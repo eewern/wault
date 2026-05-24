@@ -361,6 +361,42 @@ function loadLocalWorkspaceData(workspaceId) {
   return normalizeWorkspaceData(seedData);
 }
 
+// Hybrid load: compare localStorage vs Firebase and pick the newer one
+async function loadLocalWorkspaceDataWithFirebaseFallback(workspaceId) {
+  // Load from localStorage (fast, synchronous)
+  const localData = loadLocalWorkspaceData(workspaceId);
+  const localStoredAt = readJson(`${workspaceId}_local_saved_at`, null);
+
+  // Try to load from Firebase if available
+  let firebaseData = null;
+  let firebaseSavedAt = null;
+
+  try {
+    if (window.WorkspaceFirebaseSync?.loadWorkspace) {
+      const firebaseResult = await window.WorkspaceFirebaseSync.loadWorkspace(workspaceId);
+      if (firebaseResult?.data) {
+        firebaseData = firebaseResult.data;
+        firebaseSavedAt = firebaseResult.updated_at;
+      }
+    }
+  } catch (err) {
+    console.warn('⚠️ Firebase load failed, using localStorage:', err.message);
+  }
+
+  // Choose the newer one based on timestamps
+  if (firebaseData && firebaseSavedAt && localStoredAt) {
+    const firebaseTime = new Date(firebaseSavedAt).getTime();
+    const localTime = new Date(localStoredAt).getTime();
+    if (firebaseTime > localTime) {
+      console.log('📡 Firebase data is newer, using cloud version');
+      return normalizeWorkspaceData(firebaseData);
+    }
+  }
+
+  // Default to localStorage if Firebase is older or unavailable
+  return localData;
+}
+
 function saveLocalWorkspaceData(workspaceId, data) {
   localStorage.setItem(localWorkspaceDataKey(workspaceId), JSON.stringify(data));
   const workspaces = readJson(LOCAL_WORKSPACES_KEY, []);
@@ -407,8 +443,22 @@ function historyComparable(data) {
 function App() {
   const initialLocal = useMemo(() => initializeLocalWorkspaces(), []);
   const [data, setData] = useState(() => {
+    // Start with localStorage data immediately (fast load)
     return loadLocalWorkspaceData(initialLocal.activeId);
   });
+
+  // Load from Firebase if available (happens after initial render)
+  useEffect(() => {
+    (async () => {
+      const hybridData = await loadLocalWorkspaceDataWithFirebaseFallback(initialLocal.activeId);
+      // Only update if Firebase has newer data
+      const localData = loadLocalWorkspaceData(initialLocal.activeId);
+      if (JSON.stringify(hybridData) !== JSON.stringify(localData)) {
+        console.log('📡 Loading newer data from Firebase');
+        setData(hybridData);
+      }
+    })();
+  }, [initialLocal.activeId]);
   const [localWorkspaces, setLocalWorkspaces] = useState(initialLocal.workspaces);
   const [activeLocalWorkspaceId, setActiveLocalWorkspaceId] = useState(initialLocal.activeId);
   const [tocCollapsed, setTocCollapsed] = useState(false);
@@ -569,13 +619,79 @@ function App() {
     return () => { active = false; };
   }, []);
 
+  // Initialize Firebase for cloud sync
+  useEffect(() => {
+    if (window.WorkspaceFirebaseSync) return; // Already initialized
+
+    import('./firebase-sync.mjs').then(async ({ default: initFirebaseSync }) => {
+      try {
+        const firebaseSync = await initFirebaseSync(window.SUPABASE_CONFIG);
+        if (firebaseSync) {
+          window.WorkspaceFirebaseSync = firebaseSync;
+          console.log('🔥 Firebase initialized');
+          setSyncState((s) => ({ ...s, firebaseStatus: 'Connected to cloud' }));
+        } else {
+          console.warn('⚠️ Firebase config incomplete (missing API key)');
+          setSyncState((s) => ({ ...s, firebaseStatus: 'Cloud backup not configured' }));
+        }
+      } catch (err) {
+        console.warn('⚠️ Firebase initialization failed:', err.message);
+        setSyncState((s) => ({ ...s, firebaseStatus: 'Cloud backup offline' }));
+      }
+    }).catch(err => {
+      console.warn('⚠️ Firebase module import failed:', err.message);
+      setSyncState((s) => ({ ...s, firebaseStatus: 'Cloud backup offline' }));
+      // Non-blocking - app continues with localStorage only
+    });
+  }, []);
+
+  // Real-time Firebase listener for multi-device sync
+  useEffect(() => {
+    if (!window.WorkspaceFirebaseSync?.onWorkspaceUpdate) return;
+
+    // Listen for Firebase changes from other devices
+    const unsubscribe = window.WorkspaceFirebaseSync.onWorkspaceUpdate(
+      activeLocalWorkspaceId,
+      (remoteData) => {
+        if (!remoteData?.data) return;
+
+        // Only update if Firebase version is newer than current state
+        const remoteTime = new Date(remoteData.updated_at || 0).getTime();
+        const localStoredAt = readJson(`${activeLocalWorkspaceId}_local_saved_at`, null);
+        const localTime = localStoredAt ? new Date(localStoredAt).getTime() : 0;
+
+        if (remoteTime > localTime) {
+          console.log('📱 Received update from Firebase (another device)');
+          setData((current) => {
+            // Only update if not actively editing (don't interrupt user)
+            const activeElement = document.activeElement;
+            if (activeElement?.isContentEditable || activeElement?.closest?.('[data-block-id]')) {
+              // User is editing, don't interrupt
+              console.log('ℹ️ Firebase update received but user is editing, skipping...');
+              return current;
+            }
+            return normalizeWorkspaceData(remoteData.data);
+          });
+        }
+      }
+    );
+
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, [activeLocalWorkspaceId]);
+
   // Debounced local + remote save
   const saveTimer = useRef(null);
   useEffect(() => {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       try {
+        // Save to localStorage (primary local storage)
         localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        // Track when we saved to localStorage (for hybrid load comparison)
+        localStorage.setItem(`${activeLocalWorkspaceId}_local_saved_at`, new Date().toISOString());
+
         const backup = writeLocalAutoBackup(activeLocalWorkspaceId, data);
         if (backup) setSyncState((s) => ({ ...s, backupStatus: `Local backup ${new Date(backup.createdAt).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}` }));
         if (!window.WorkspaceStore?.canSave()) {
@@ -583,10 +699,26 @@ function App() {
           setLocalWorkspaces(nextWorkspaces);
         }
       } catch {}
+
+      // Save to Supabase if configured (existing remote save)
       if (window.WorkspaceStore?.canSave() && remoteReady.current) {
         window.WorkspaceStore.save(data).catch((error) => {
           setSyncState((s) => ({ ...s, error: error.message, status: "Sync failed" }));
         });
+      }
+
+      // NEW: Also save to Firebase (non-blocking, async)
+      if (window.WorkspaceFirebaseSync?.saveWorkspace) {
+        window.WorkspaceFirebaseSync.saveWorkspace(activeLocalWorkspaceId, data)
+          .then(() => {
+            console.log('✅ Saved to Firebase');
+            setSyncState((s) => ({ ...s, firebaseStatus: 'Synced to cloud' }));
+          })
+          .catch((err) => {
+            console.warn('⚠️ Firebase save failed (non-blocking):', err.message);
+            setSyncState((s) => ({ ...s, firebaseStatus: 'Cloud sync failed' }));
+            // Don't break the app - Firebase is optional, localStorage is always there
+          });
       }
     }, 200);
     return () => clearTimeout(saveTimer.current);
