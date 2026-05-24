@@ -19,19 +19,10 @@ const workspaceSeeds = () => (
 const cloneWorkspaceData = (data) => JSON.parse(JSON.stringify(data || window.WORKSPACE_DEFAULT));
 const createTextBlock = () => ({ id: window.nid(), type:"text", text:"" });
 const createEmptyWorkspace = () => normalizeWorkspaceData({
-  pages: {
-    home: {
-      id: "home",
-      parentId: null,
-      title: "Untitled",
-      icon: randomPageIcon(),
-      date: "",
-      blocks: [createTextBlock()],
-    },
-  },
-  rootOrder: ["home"],
+  pages: {},
+  rootOrder: [],
   childOrder: {},
-  currentPageId: "home",
+  currentPageId: null,
 });
 const isBlankTextBlock = (block) => {
   if (!block || block.type !== "text") return false;
