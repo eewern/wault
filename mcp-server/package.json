@@ -1,0 +1,23 @@
+{
+  "name": "wault-mcp-server",
+  "version": "1.0.0",
+  "description": "Official MCP server for WAULT — exposes your workspaces/pages to Claude.",
+  "type": "module",
+  "bin": {
+    "wault-mcp": "./index.mjs"
+  },
+  "files": [
+    "index.mjs"
+  ],
+  "scripts": {
+    "start": "node index.mjs",
+    "inspect": "npx @modelcontextprotocol/inspector node index.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^3.23.8"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

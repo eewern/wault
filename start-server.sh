@@ -12,7 +12,7 @@ echo "🚀 Starting Notion Workspace API Server"
 echo "📁 Data directory: $WORKSPACE_API_STORE"
 echo "📊 Current data: $(wc -l < "$WORKSPACE_API_STORE" 2>/dev/null || echo '0') lines"
 echo ""
-echo "Server running on http://localhost:3000"
+echo "Server running on http://localhost:${WORKSPACE_API_PORT:-3334}"
 echo "Press Ctrl+C to stop"
 echo ""
 

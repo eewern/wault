@@ -2246,8 +2246,28 @@ window.CHURNS_WEEK_1_FOUNDER_CONTENT_PAGES = buildChurnsWeek1FounderContentPages
 window.CHURNS_60_DAY_CONTENT_PAGES = buildChurns60DayContentPages();
 window.XALT_WEEK_1_SCRIPT_PAGES = buildXaltWeek1ScriptPages();
 
+// Empty workspace for new users / self-hosted downloads
+const buildEmptyWorkspace = () => ({
+  pages: {
+    home: {
+      id: "home",
+      parentId: null,
+      title: "Home",
+      icon: "doc",
+      blocks: [{ id: nid(), type: "text", text: "" }],
+    }
+  },
+  rootOrder: ["home"],
+  childOrder: {},
+  currentPageId: "home",
+});
+
+const EMPTY_WORKSPACE_DEFAULT = buildEmptyWorkspace();
+
+// Fresh installs / self-hosted downloads start with ONE empty workspace.
+// XALT / Churns are no longer seeded — each user builds their own, stored in their Firebase.
+// (The XALT/Churns builders above are kept dormant for reference but are not loaded.)
 window.WORKSPACE_SEEDS = [
-  { id: "xalt_strategy", seedKey: "xalt_strategy", name: "XALT Strategy", data: XALT_WORKSPACE_DEFAULT },
-  { id: "churns_ai_bible", seedKey: "churns_ai_bible", name: "Churns AI Bible", data: CHURNS_WORKSPACE_DEFAULT },
+  { id: "local_default", seedKey: "default", name: "My Workspace", data: EMPTY_WORKSPACE_DEFAULT },
 ];
-window.WORKSPACE_DEFAULT = XALT_WORKSPACE_DEFAULT;
+window.WORKSPACE_DEFAULT = EMPTY_WORKSPACE_DEFAULT;

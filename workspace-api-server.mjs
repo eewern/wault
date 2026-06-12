@@ -1,4 +1,6 @@
 import http from "node:http";
+import https from "node:https";
+import { createSign } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +10,127 @@ const PORT = Number(process.env.PORT || process.env.WORKSPACE_API_PORT || 3334);
 const HOST = process.env.WORKSPACE_API_HOST || "127.0.0.1";
 const STORE_PATH = resolve(process.env.WORKSPACE_API_STORE || `${__dirname}/workspace-api-store.json`);
 const API_TOKEN = process.env.WORKSPACE_API_TOKEN || "";
+
+// Firebase Database URL for API-key validation (optional — set if hosted).
+// Format: https://<project>-default-rtdb.firebaseio.com
+const FIREBASE_DB_URL = (process.env.FIREBASE_DATABASE_URL || "").replace(/\/$/, "");
+const FIREBASE_SERVICE_ACCOUNT_PATH =
+  process.env.FIREBASE_SERVICE_ACCOUNT_PATH ||
+  process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+  "";
+const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "";
+
+// In-memory cache of validated API keys → uid to avoid hitting Firebase on every request.
+const apiKeyCache = new Map(); // key → { uid, email, expiresAt }
+const KEY_CACHE_TTL_MS = 30 * 1000; // Keep revocation responsive.
+let firebaseAccessToken = null;
+
+function base64url(value) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function createServiceAccountJwt(serviceAccount) {
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: "RS256", typ: "JWT" };
+  const payload = {
+    iss: serviceAccount.client_email,
+    sub: serviceAccount.client_email,
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+    scope: "https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email",
+  };
+  const unsigned = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`;
+  const signature = createSign("RSA-SHA256").update(unsigned).sign(serviceAccount.private_key);
+  return `${unsigned}.${base64url(signature)}`;
+}
+
+async function loadFirebaseServiceAccount() {
+  if (FIREBASE_SERVICE_ACCOUNT_JSON) return JSON.parse(FIREBASE_SERVICE_ACCOUNT_JSON);
+  if (FIREBASE_SERVICE_ACCOUNT_PATH) return JSON.parse(await readFile(FIREBASE_SERVICE_ACCOUNT_PATH, "utf8"));
+  return null;
+}
+
+async function getFirebaseAccessToken() {
+  if (firebaseAccessToken && firebaseAccessToken.expiresAt > Date.now() + 60_000) {
+    return firebaseAccessToken.value;
+  }
+  const serviceAccount = await loadFirebaseServiceAccount();
+  if (!serviceAccount) return "";
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: createServiceAccountJwt(serviceAccount),
+    }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.access_token) {
+    throw new Error(`Firebase auth failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  firebaseAccessToken = {
+    value: body.access_token,
+    expiresAt: Date.now() + Math.max(60, Number(body.expires_in || 3600)) * 1000,
+  };
+  return firebaseAccessToken.value;
+}
+
+async function firebaseGet(path, searchParams = {}) {
+  const accessToken = await getFirebaseAccessToken();
+  const url = new URL(`${FIREBASE_DB_URL}/${path.replace(/^\/+/, "")}.json`);
+  for (const [key, value] of Object.entries(searchParams)) {
+    url.searchParams.set(key, value);
+  }
+  return await new Promise((resolve, reject) => {
+    const lib = url.protocol === "https:" ? https : http;
+    const opts = accessToken ? { headers: { authorization: `Bearer ${accessToken}` } } : {};
+    lib.get(url, opts, (res) => {
+      const chunks = [];
+      res.on("data", c => chunks.push(c));
+      res.on("end", () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+        catch { resolve(null); }
+      });
+    }).on("error", reject);
+  });
+}
+
+async function resolveApiKey(token) {
+  if (!token || !token.startsWith("wn_")) return null;
+  const cached = apiKeyCache.get(token);
+  if (cached && cached.expiresAt > Date.now()) return cached;
+
+  if (!FIREBASE_DB_URL) return null; // Firebase not configured — skip key lookup
+
+  // Query Firebase REST: GET /apiKeys.json?orderBy="key"&equalTo="wn_..."
+  try {
+    const result = await firebaseGet("apiKeys", {
+      orderBy: JSON.stringify("key"),
+      equalTo: JSON.stringify(token),
+    });
+    if (!result || typeof result !== "object" || result.error) return null;
+    const entry = Object.entries(result).find(([, data]) => data?.key === token); // [uid, { key, email, ... }]
+    if (!entry) return null;
+    const [uid, data] = entry;
+    const access = await firebaseGet(`access/${uid}`);
+    if (!access || typeof access !== "object" || access.error) return null;
+    const role = access.role === "owner" ? "owner" : "member";
+    const info = {
+      uid,
+      email: access.email || data.email || "",
+      role,
+      expiresAt: Date.now() + KEY_CACHE_TTL_MS,
+    };
+    apiKeyCache.set(token, info);
+    return info;
+  } catch { return null; }
+}
 
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
@@ -31,9 +154,21 @@ function sendNoContent(res) {
   res.end();
 }
 
+// Cap request bodies so a single huge/streamed payload can't exhaust memory.
+const MAX_BODY_BYTES = Number(process.env.WORKSPACE_API_MAX_BODY || 10 * 1024 * 1024); // 10 MB
+
 async function readBody(req) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      const error = new Error("Request body too large.");
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
   if (!chunks.length) return {};
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw.trim()) return {};
@@ -81,12 +216,23 @@ function workspaceSummary(workspace) {
   };
 }
 
-function requireAuth(req) {
-  if (!API_TOKEN) return;
+async function requireAuth(req) {
   const auth = req.headers.authorization || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : req.headers["x-workspace-api-token"];
-  if (token === API_TOKEN) return;
-  const error = new Error("Unauthorized.");
+  const token = (auth.startsWith("Bearer ") ? auth.slice(7) : req.headers["x-workspace-api-token"] || "").trim();
+
+  // 1. No auth configured at all (local dev) → allow
+  if (!API_TOKEN && !FIREBASE_DB_URL) return { uid: null };
+
+  // 2. Static token (local dev or simple single-user hosting)
+  if (API_TOKEN && token === API_TOKEN) return { uid: null };
+
+  // 3. Per-user Firebase API key (wn_...)
+  if (token.startsWith("wn_")) {
+    const info = await resolveApiKey(token);
+    if (info) return info; // { uid, email }
+  }
+
+  const error = new Error("Unauthorized. Provide a valid API key in the Authorization: Bearer header.");
   error.statusCode = 401;
   throw error;
 }
@@ -363,12 +509,27 @@ async function router(req, res) {
 
   const { parts } = splitPath(req);
   if (parts.length === 1 && parts[0] === "health" && req.method === "GET") {
-    send(res, 200, { ok: true, storePath: STORE_PATH });
+    send(res, 200, {
+      ok: true,
+      storePath: STORE_PATH,
+      firebaseDatabaseConfigured: Boolean(FIREBASE_DB_URL),
+      firebaseServiceAccountConfigured: Boolean(FIREBASE_SERVICE_ACCOUNT_JSON || FIREBASE_SERVICE_ACCOUNT_PATH),
+      staticTokenConfigured: Boolean(API_TOKEN),
+    });
     return;
   }
 
-  requireAuth(req);
+  await requireAuth(req);
   const store = await readStore();
+
+  // Convenience: /api/workspace/active → most-recently-updated workspace
+  if (parts[0] === "api" && parts[1] === "workspace" && parts[2] === "active" && req.method === "GET") {
+    const workspaces = Object.values(store.workspaces)
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+    if (!workspaces.length) { send(res, 404, { error: "No workspaces found." }); return; }
+    send(res, 200, { workspace: workspaces[0] });
+    return;
+  }
 
   if (parts[0] === "api" && parts[1] === "workspaces") {
     const handled = await handleWorkspaces(req, res, store, parts);

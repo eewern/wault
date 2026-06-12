@@ -1176,6 +1176,15 @@
   .block-wrap.text-indent-level-2 {
     padding-left: 56px;
   }
+  .block-wrap.text-indent-level-3 {
+    padding-left: 84px;
+  }
+  .block-wrap.text-indent-level-4 {
+    padding-left: 112px;
+  }
+  .block-wrap.text-indent-level-5 {
+    padding-left: 140px;
+  }
   .block-shell {
     position: relative;
     user-select: text;
@@ -1386,6 +1395,19 @@
   .list-row.list-level-2 .bullet-dot,
   .list-row.list-level-2 .number-dot {
     color: rgba(var(--ovr),0.42);
+    font-size: 13px;
+    min-width: 20px;
+  }
+  .list-row.list-level-3 { padding-left: 84px; }
+  .list-row.list-level-4 { padding-left: 112px; }
+  .list-row.list-level-5 { padding-left: 140px; }
+  .list-row.list-level-3 .bullet-dot,
+  .list-row.list-level-3 .number-dot,
+  .list-row.list-level-4 .bullet-dot,
+  .list-row.list-level-4 .number-dot,
+  .list-row.list-level-5 .bullet-dot,
+  .list-row.list-level-5 .number-dot {
+    color: rgba(var(--ovr),0.38);
     font-size: 13px;
     min-width: 20px;
   }
@@ -2976,8 +2998,8 @@
     return null;
   });
 </script>
-<script type="text/babel" src="workspace-blocks.jsx?v=20260609-wault15"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260609-wault15"></script>
+<script type="text/babel" src="workspace-blocks.jsx?v=20260611-waultv2"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260611-waultv2"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

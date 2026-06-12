@@ -1,0 +1,82 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "workspaces": {
+      "$workspaceId": {
+        ".read": "auth != null && root.child('access').child(auth.uid).exists()",
+        ".write": "auth != null && root.child('access').child(auth.uid).exists()"
+      }
+    },
+
+    "presence": {
+      "$workspaceId": {
+        ".read": "auth != null && root.child('access').child(auth.uid).exists()",
+        "$sessionId": {
+          ".write": "auth != null && root.child('access').child(auth.uid).exists() && (!newData.exists() || newData.child('uid').val() === auth.uid)",
+          ".validate": "!newData.exists() || (newData.hasChildren(['uid', 'blockId', 'lastActivity']) && newData.child('uid').val() === auth.uid)"
+        }
+      }
+    },
+
+    "signins": {
+      ".read": "auth != null && root.child('access').child(auth.uid).child('role').val() === 'owner'",
+      "$uid": {
+        ".write": "auth != null && (auth.uid === $uid || root.child('access').child(auth.uid).child('role').val() === 'owner')",
+        ".validate": "!newData.exists() || newData.hasChildren(['email'])"
+      }
+    },
+
+    "blocked": {
+      ".read": "auth != null && root.child('access').child(auth.uid).child('role').val() === 'owner'",
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && root.child('access').child(auth.uid).child('role').val() === 'owner'",
+        ".validate": "!newData.exists() || (newData.hasChildren(['email', 'blockedAt']) && newData.child('email').isString() && newData.child('blockedAt').isString())"
+      }
+    },
+
+    "access": {
+      ".read": "auth != null && root.child('access').child(auth.uid).child('role').val() === 'owner'",
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && (root.child('access').child(auth.uid).child('role').val() === 'owner' || (auth.uid === $uid && auth.token.email === 'eewern21@gmail.com' && !data.exists()))",
+        ".validate": "newData.hasChildren(['email', 'role']) && (newData.child('role').val() === 'owner' || newData.child('role').val() === 'member')"
+      }
+    },
+
+    "apiKeys": {
+      ".indexOn": ["key"],
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid",
+        ".validate": "!newData.exists() || (newData.hasChildren(['key', 'createdAt', 'email']) && newData.child('key').isString() && newData.child('key').val().matches(/^wn_[A-Za-z0-9_-]+_[a-f0-9]{32}$/) && newData.child('createdAt').isString() && newData.child('email').isString() && (!newData.child('displayName').exists() || newData.child('displayName').isString()))"
+      }
+    },
+
+    "feedback": {
+      ".read": "auth != null && root.child('access').child(auth.uid).child('role').val() === 'owner'",
+      "$uid": {
+        ".write": "auth != null && auth.uid === $uid",
+        "$feedbackId": {
+          ".validate": "newData.hasChildren(['message', 'createdAt', 'email']) && newData.child('message').isString() && newData.child('createdAt').isString() && newData.child('email').isString()"
+        }
+      }
+    },
+
+    "focus": {
+      "$uid": {
+        ".read":  "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid && root.child('access').child(auth.uid).exists()"
+      }
+    },
+
+    "users": {
+      "$uid": {
+        ".read":  "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    }
+  }
+}

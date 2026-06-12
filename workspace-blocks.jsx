@@ -307,25 +307,45 @@ function parseHtmlBlocks(html = "") {
     }
     if (tag === "TABLE") {
       const cellText = (c) => (window.stripHtml ? window.stripHtml(c.innerHTML) : c.textContent || "").replace(/​/g, "").trim();
-      const rowCells = (tr) => Array.from(tr.querySelectorAll(":scope > th, :scope > td")).map(cellText);
+      // Checkbox-only cells (a lone <input type=checkbox>) become "1"/"" so WAULT
+      // checkbox columns survive a copy→paste round-trip.
+      const cellVal = (c) => {
+        const cb = c.querySelector('input[type="checkbox"]');
+        if (cb && !cellText(c)) return cb.checked ? "1" : "";
+        return cellText(c);
+      };
+      const isCheckCell = (c) => !!c.querySelector('input[type="checkbox"]') && !cellText(c);
+      const rowEls = (tr) => Array.from(tr.querySelectorAll(":scope > th, :scope > td"));
       const thead = node.querySelector("thead");
       let headerCells = [];
       let bodyTrs = [];
       if (thead) {
         // Explicit header row(s) → first thead row is the header; everything else is body.
         const theadTr = thead.querySelector("tr");
-        if (theadTr) headerCells = rowCells(theadTr);
+        if (theadTr) headerCells = rowEls(theadTr).map(cellText);
         bodyTrs = Array.from(node.querySelectorAll("tbody tr"));
         if (!bodyTrs.length) bodyTrs = Array.from(node.querySelectorAll("tr")).filter((tr) => !thead.contains(tr));
       } else {
         // No <thead> → the FIRST row is the header, the rest are the body.
         const allTrs = Array.from(node.querySelectorAll("tr"));
-        if (allTrs.length) headerCells = rowCells(allTrs[0]);
+        if (allTrs.length) headerCells = rowEls(allTrs[0]).map(cellText);
         bodyTrs = allTrs.slice(1);
       }
-      const bodyRows = bodyTrs.map((tr) => ({ id: nid(), cells: rowCells(tr) }));
+      const bodyRows = bodyTrs.map((tr) => ({ id: nid(), cells: rowEls(tr).map(cellVal) }));
+      // Column types: explicit data attribute (WAULT copy) wins; otherwise infer a
+      // checkbox column when at least one body cell in it is a bare checkbox.
+      let colTypes = null;
+      const declared = (node.getAttribute("data-col-types") || "").split(",").map((t) => t === "checkbox" ? "checkbox" : "text");
+      if (declared.length === headerCells.length && declared.includes("checkbox")) {
+        colTypes = declared;
+      } else if (bodyTrs.length) {
+        const inferred = headerCells.map((_, i) => bodyTrs.some((tr) => { const c = rowEls(tr)[i]; return c && isCheckCell(c); }) ? "checkbox" : "text");
+        if (inferred.includes("checkbox")) colTypes = inferred;
+      }
       if (headerCells.length) {
-        blocks.push({ id: nid(), type:"table", headers: headerCells, rows: bodyRows.length ? bodyRows : [{ id: nid(), cells: headerCells.map(() => "") }] });
+        const tbl = { id: nid(), type:"table", headers: headerCells, rows: bodyRows.length ? bodyRows : [{ id: nid(), cells: headerCells.map(() => "") }] };
+        if (colTypes) tbl.colTypes = colTypes;
+        blocks.push(tbl);
       }
       return;
     }
@@ -396,9 +416,12 @@ function serializeBlockToHtml(block) {
     case "milestones":
       return `<ul data-checklist="1">${(block.items||[]).map(i=>`<li><input type="checkbox"${i.status==="done"?" checked":""}> ${s(i.name)}</li>`).join("")}</ul>`;
     case "table": {
+      const types = (block.headers||[]).map((_, i) => (block.colTypes || [])[i] || "text");
       const hdrs = (block.headers||[]).map(h=>`<th>${h}</th>`).join("");
-      const rows = (block.rows||[]).map(r=>`<tr>${(r.cells||[]).map(c=>`<td>${c}</td>`).join("")}</tr>`).join("");
-      return `<table><thead><tr>${hdrs}</tr></thead><tbody>${rows}</tbody></table>`;
+      const rows = (block.rows||[]).map(r=>`<tr>${(r.cells||[]).map((c, i)=> types[i] === "checkbox"
+        ? `<td><input type="checkbox"${c ? " checked" : ""}></td>`
+        : `<td>${c}</td>`).join("")}</tr>`).join("");
+      return `<table data-col-types="${types.join(",")}"><thead><tr>${hdrs}</tr></thead><tbody>${rows}</tbody></table>`;
     }
     case "content-shooting-table": {
       const cols = block.columns || DEFAULT_SHOOT_COLS;
@@ -427,7 +450,9 @@ function serializeBlockToText(block) {
       return list.map(i=>`${"  ".repeat(Math.max(0,(i.level||0)-base))}- ${plain(i.text)}`).join("\n");
     }
     case "numbers": {
-      // Indent by level AND restart numbering at each nesting level (1,2 then nested 1,2 then 3…).
+      // Indent by level AND restart numbering at each nesting level. Markers use
+      // the SAME 1./a./i. cycle the editor renders, so external pastes look
+      // identical to WAULT and paste back into the right levels.
       const list = (block.items||[]).filter(Boolean);
       const base = list.length ? Math.min(...list.map(i=>Math.max(0,i.level||0))) : 0;
       const counters = {};
@@ -435,16 +460,17 @@ function serializeBlockToText(block) {
         const lvl = Math.max(0,(i.level||0)-base);
         Object.keys(counters).forEach(k=>{ if (+k > lvl) delete counters[k]; });
         counters[lvl] = (counters[lvl]||0) + 1;
-        return `${"  ".repeat(lvl)}${counters[lvl]}. ${plain(i.text)}`;
+        return `${"  ".repeat(lvl)}${markerForNumberLevel(lvl, counters[lvl])} ${plain(i.text)}`;
       }).join("\n");
     }
     case "checklist":return (block.items||[]).map(i=>`- [${i.done?"x":" "}] ${plain(i.text)}`).join("\n");
     case "milestones":return (block.items||[]).map(i=>`- [${i.status==="done"?"x":" "}] ${plain(i.name)}`).join("\n");
     case "table": {
       // Tab-separated so it pastes cleanly into Sheets / Excel / Word tables.
+      const types = (block.headers||[]).map((_, i) => (block.colTypes || [])[i] || "text");
       const rows = [
         (block.headers||[]).map(h=>plain(h)).join("\t"),
-        ...(block.rows||[]).map(r=>(r.cells||[]).map(c=>plain(c)).join("\t")),
+        ...(block.rows||[]).map(r=>(r.cells||[]).map((c, i)=> types[i] === "checkbox" ? (c ? "[x]" : "[ ]") : plain(c)).join("\t")),
       ];
       return rows.join("\n");
     }
@@ -479,6 +505,47 @@ function regenBlockIds(block) {
   return b;
 }
 window.regenBlockIds = regenBlockIds;
+
+// Sanitize every rich-text field of an UNTRUSTED block payload (e.g. the
+// application/x-wault-blocks clipboard JSON, which any web page could forge).
+// Without this, a crafted payload could smuggle arbitrary HTML into block text.
+function sanitizeBlockPayload(block) {
+  const b = JSON.parse(JSON.stringify(block));
+  const clean = (h) => sanitizeHtml(String(h == null ? "" : h));
+  if (typeof b.text === "string") b.text = clean(b.text);
+  if (typeof b.label === "string") b.label = stripHtml(b.label);
+  if (typeof b.icon === "string") b.icon = stripHtml(b.icon).slice(0, 8);
+  if (Array.isArray(b.items)) {
+    b.items = b.items.map((i) => ({
+      ...i,
+      ...(typeof i?.text === "string" ? { text: clean(i.text) } : {}),
+      ...(typeof i?.name === "string" ? { name: stripHtml(i.name) } : {}),
+      ...(typeof i?.label === "string" ? { label: stripHtml(i.label) } : {}),
+    }));
+  }
+  if (Array.isArray(b.headers)) b.headers = b.headers.map((h) => clean(h));
+  if (Array.isArray(b.columns)) b.columns = b.columns.map((c) => stripHtml(String(c ?? "")));
+  if (Array.isArray(b.rows)) {
+    b.rows = b.rows.map((r) => ({ ...r, cells: (r?.cells || []).map((c) => clean(c)) }));
+  }
+  return b;
+}
+window.sanitizeBlockPayload = sanitizeBlockPayload;
+
+// Read the exact-blocks payload from a paste event's custom clipboard type.
+// Returns sanitized blocks with fresh ids, or null when absent/invalid.
+function readWaultClipboardPayload(e) {
+  try {
+    const raw = e.clipboardData?.getData("application/x-wault-blocks");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || !parsed.length || parsed.length > 500) return null;
+    return parsed
+      .filter((b) => b && typeof b === "object" && typeof b.type === "string")
+      .map((b) => regenBlockIds(sanitizeBlockPayload(b)));
+  } catch (_) { return null; }
+}
+window.readWaultClipboardPayload = readWaultClipboardPayload;
 
 // ── In-memory clipboard ─────────────────────────────────────────────────────
 // The OS pasteboard can (and on macOS does) rewrite text/html and drop data-*
@@ -641,13 +708,48 @@ function parseMarkdownishBlocks(text = "") {
       continue;
     }
 
+    // Numbered lists in plain text: digits (1. 2.), alpha (a. b.), roman (i. ii. iv.).
+    // Marker style implies a nesting level (digits→0, alpha→1, roman→2) which we
+    // combine with leading-indent level so "1. / a. / i." paste back as a nested list
+    // even when the clipboard stripped the indentation.
+    // 1–39 only (i…xxxix): real list markers are small; the full roman grammar would
+    // false-match English words like "mix." or "did." at the start of a sentence.
+    const ROMAN_RE = /^(?=[ivx])(x{0,3})(ix|iv|v?i{0,3})$/;
+    const classifyMarker = (line) => {
+      const m = line.trim().match(/^([0-9]+|[A-Za-z]+)[.)]\s+(.+)$/);
+      if (!m) return null;
+      const marker = m[1];
+      if (/^\d+$/.test(marker)) return { style: 0, text: m[2], ord: parseInt(marker, 10) };
+      const low = marker.toLowerCase();
+      const isRoman = ROMAN_RE.test(low);
+      const isAlpha = /^[a-z]$/.test(low);
+      if (isRoman && isAlpha) {
+        // Ambiguous single letter (i, v, x): resolved by the caller from sequence
+        // context — "i." right after "h." is alphabetical, otherwise roman.
+        return { style: 2, text: m[2], ord: low.charCodeAt(0) - 96, ambiguous: true };
+      }
+      if (isRoman) return { style: 2, text: m[2], ord: 0 };
+      if (isAlpha) return { style: 1, text: m[2], ord: low.charCodeAt(0) - 96 };
+      return null;
+    };
     const numberItems = [];
     j = i;
+    let prevStyle = -1;
+    let prevAlphaOrd = 0;
     while (j < lines.length) {
       const raw = lines[j];
-      const match = raw.trim().match(/^\d+[.)]\s+(.+)$/);
-      if (!match) break;
-      numberItems.push({ id: nid(), text: parseInlineMd(match[1].trim()), level: indentLevel(raw) });
+      const cls = classifyMarker(raw);
+      if (!cls) break;
+      // Disambiguate i/v/x: alpha ONLY when it continues the alphabet run
+      // ("h. → i.", "u. → v."); after "a./b." or standalone, "i." is roman.
+      let style = cls.style;
+      if (cls.ambiguous) style = (prevStyle === 1 && cls.ord === prevAlphaOrd + 1) ? 1 : 2;
+      const indent = indentLevel(raw);
+      // Indentation wins when present; otherwise the marker style sets the level.
+      const level = indent > 0 ? indent : style;
+      numberItems.push({ id: nid(), text: parseInlineMd(cls.text.trim()), level });
+      prevStyle = style;
+      if (style === 1) prevAlphaOrd = cls.ord;
       j++;
     }
     if (numberItems.length) {
@@ -821,7 +923,7 @@ function EditableText({
   value, onChange, placeholder, multiline = false, style, tag = "div",
   onSlashCommand, onEnter, onBackspaceEmpty, onBackspaceAtStart, onMarkdownShortcut, autoFocus = false,
   softBreakOnEnter = false, focusKey = 0, onPasteBlocks, onTab, onShiftTab, selectOnFocus = false,
-  focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock,
+  focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock, onDeleteAtEnd,
 }) {
   const ref = useRef(null);
   const lastValue = useRef(sanitizeHtml(value || ""));
@@ -1051,6 +1153,14 @@ function EditableText({
         onBackspaceAtStart(ref.current.innerHTML || "");
       }
     }
+    // Forward-Delete at the very end of a block merges the NEXT block/item in,
+    // mirroring Backspace-at-start — Google Docs behaviour across "paragraphs".
+    if (e.key === "Delete" && onDeleteAtEnd && isCursorAtEnd(ref.current)) {
+      e.preventDefault();
+      e.stopPropagation();
+      onDeleteAtEnd(ref.current.innerHTML || "");
+      return;
+    }
     // Arrow key navigation between blocks — uses visual line check so the cursor
     // jumps to the adjacent block on the very first keypress (Notion behaviour),
     // not after first moving to the start/end of the current line.
@@ -1064,6 +1174,23 @@ function EditableText({
       e.preventDefault();
       e.stopPropagation();
       capturePendingCaretX("top"); // going DOWN → land on first line of next block
+      onMoveToNextBlock("start");
+    }
+    // Plain ArrowLeft/Right walk across block boundaries like one continuous
+    // document: Left at the very start → end of previous block; Right at the very
+    // end → start of next block. Modifier combos (Shift-select, Cmd-line-jump,
+    // Alt-word-jump) keep their native behaviour.
+    const plainArrow = !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
+    if (e.key === "ArrowLeft" && plainArrow && onMoveToPreviousBlock && isCursorAtStart(ref.current)) {
+      e.preventDefault();
+      e.stopPropagation();
+      _pendingCaretX = null; // land exactly at the END of the previous block
+      onMoveToPreviousBlock("end");
+    }
+    if (e.key === "ArrowRight" && plainArrow && onMoveToNextBlock && isCursorAtEnd(ref.current)) {
+      e.preventDefault();
+      e.stopPropagation();
+      _pendingCaretX = null; // land exactly at the START of the next block
       onMoveToNextBlock("start");
     }
   };
@@ -1099,6 +1226,15 @@ function EditableText({
 
     // ── Multi-block paste ──────────────────────────────────────────────────
     if (onPasteBlocks) {
+      // (-1) Exact payload from WAULT's own copy handler (custom clipboard type) —
+      // survives across tabs/windows where the in-memory clipboard can't help.
+      // A single plain text block falls through to inline insertion instead, so
+      // pasting copied text inside a list item never replaces the whole block.
+      const exact = readWaultClipboardPayload(e);
+      if (exact && exact.length && !(exact.length === 1 && exact[0].type === "text")) {
+        onPasteBlocks(exact, exact[0]?.id);
+        return;
+      }
       // (0) Faithful internal paste: exact blocks we copied inside WAULT.
       const mine = window.matchWaultClipboard ? window.matchWaultClipboard(text) : null;
       if (mine && mine.length) { onPasteBlocks(mine, mine[0]?.id); return; }
@@ -1125,7 +1261,7 @@ function EditableText({
       // genuinely structured (multiple blocks or a single non-text block).
       // Multi-line plain text that parses to a single text block falls through to
       // inline insertion rather than replacing the surrounding list block.
-      if (text.includes("\n") || text.includes("\t") || /^(#{1,3}|[-*•]\s|\d+[.)]\s|>\s|\|)/m.test(text.trim())) {
+      if (text.includes("\n") || text.includes("\t") || /^(#{1,3}|[-*•]\s|(\d+|[a-z]|[ivx]{1,5})[.)]\s|>\s|\|)/im.test(text.trim())) {
         const blocks = parseMarkdownishBlocks(text);
         const hasStructure = blocks.length > 1 || (blocks.length === 1 && blocks[0].type !== "text");
         if (hasStructure) {
@@ -1412,17 +1548,29 @@ function liftListItemToTextBlocks(block, itemId, text, textIndentLevel = 0) {
   return { blocks, focusId: textBlock.id };
 }
 
-const MAX_LIST_LEVEL = 2;
+const MAX_LIST_LEVEL = 5;
 const listLevel = (item) => Math.max(0, Math.min(MAX_LIST_LEVEL, Number(item?.level ?? (item?.indent ? 1 : 0)) || 0));
+// Markers cycle every 3 levels (Google-Docs style): 1. → a. → i. → 1. → a. → i.
 const markerForNumberLevel = (level, ordinal) => {
-  if (level === 1) return `${String.fromCharCode(96 + ordinal)}.`;
-  if (level >= 2) {
-    const romans = ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"];
-    return `${romans[(ordinal - 1) % romans.length]}.`;
+  const style = Math.max(0, level) % 3;
+  if (style === 1) {
+    // a..z, then aa, ab… for ordinals past 26
+    let n = ordinal, s = "";
+    while (n > 0) { n -= 1; s = String.fromCharCode(97 + (n % 26)) + s; n = Math.floor(n / 26); }
+    return `${s}.`;
+  }
+  if (style === 2) {
+    const toRoman = (n) => {
+      const map = [[1000,"m"],[900,"cm"],[500,"d"],[400,"cd"],[100,"c"],[90,"xc"],[50,"l"],[40,"xl"],[10,"x"],[9,"ix"],[5,"v"],[4,"iv"],[1,"i"]];
+      let out = "";
+      for (const [v, sym] of map) { while (n >= v) { out += sym; n -= v; } }
+      return out || "i";
+    };
+    return `${toRoman(ordinal)}.`;
   }
   return `${ordinal}.`;
 };
-const markerForBulletLevel = (level) => ["•", "◦", "▪"][Math.min(MAX_LIST_LEVEL, level)] || "•";
+const markerForBulletLevel = (level) => ["•", "◦", "▪"][Math.max(0, level) % 3] || "•";
 const itemWithLevel = (item) => {
   const { indent, level: _level, ...rest } = item;
   const level = listLevel(item);
@@ -1519,7 +1667,7 @@ function BlockHandle({ blockId, onDragBlockStart, onDragBlockEnd }) {
 }
 
 // ====== TEXT BLOCK with slash detection ======
-function TextBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, onDeleteEmpty, onAddBlockBefore, onAddBlockAfter, onMarkdownShortcut, onSlashCommandShow, onSlashCommandHide, onReplaceBlock, isLast, autoFocus, focusKey = 0, focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock }) {
+function TextBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, onDeleteEmpty, onAddBlockBefore, onAddBlockAfter, onMarkdownShortcut, onSlashCommandShow, onSlashCommandHide, onReplaceBlock, isLast, autoFocus, focusKey = 0, focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock, onMergeNextBlock }) {
   const ref = useRef(null);
   const indentLevel = textIndentLevel(block);
   const handleSlash = (txt, el) => {
@@ -1596,6 +1744,7 @@ function TextBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlo
         onPasteBlocks={(blocks, focusId) => onReplaceBlock?.(blocks, focusId)}
         onMoveToPreviousBlock={onMoveToPreviousBlock}
         onMoveToNextBlock={onMoveToNextBlock}
+        onDeleteAtEnd={() => onMergeNextBlock?.()}
         autoFocus={autoFocus}
         focusKey={focusKey}
         focusAtStart={focusAtStart}
@@ -1606,7 +1755,7 @@ function TextBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlo
 }
 
 // ====== HEADING BLOCK ======
-function HeadingBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, onDeleteEmpty, onConvertToText, onAddBlockBefore, onAddBlockAfter, autoFocus, focusKey = 0, focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock }) {
+function HeadingBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, onDeleteEmpty, onConvertToText, onAddBlockBefore, onAddBlockAfter, autoFocus, focusKey = 0, focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock, onMergeNextBlock }) {
   const sizes = { 1:30, 2:24, 3:19 };
   const weights = { 1:700, 2:600, 3:600 };
   const margins = { 1:"30px 0 8px", 2:"22px 0 6px", 3:"14px 0 4px" };
@@ -1632,6 +1781,7 @@ function HeadingBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
         onBackspaceAtStart={() => onConvertToText?.(block.text || "")}
         onMoveToPreviousBlock={onMoveToPreviousBlock}
         onMoveToNextBlock={onMoveToNextBlock}
+        onDeleteAtEnd={() => onMergeNextBlock?.()}
         autoFocus={autoFocus}
         focusKey={focusKey}
         focusAtStart={focusAtStart}
@@ -1687,7 +1837,7 @@ function CalloutBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
 }
 
 // ====== BULLETS ======
-function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, patchBlock, onDeleteEmpty, onConvertToText, onReplaceBlock, onAddBlockAfter, onExitBlock, autoFocus, onMoveToPreviousBlock, onMoveToNextBlock }) {
+function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, patchBlock, onDeleteEmpty, onConvertToText, onReplaceBlock, onAddBlockAfter, onExitBlock, autoFocus, onMoveToPreviousBlock, onMoveToNextBlock, onMergeNextBlock }) {
   const [focusItemId, setFocusItemId] = useState(null);
   const [focusKey, setFocusKey] = useState(0);
   // Pre-focus an item BEFORE the DOM mutation so focus is never lost when
@@ -1858,6 +2008,21 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
               }}
               onMoveToPreviousBlock={handleMoveToPrev}
               onMoveToNextBlock={handleMoveToNext}
+              onDeleteAtEnd={() => {
+                // Forward-Delete at end of an item pulls the NEXT item's text in;
+                // at the end of the last item, merge the following block instead.
+                if (!isLast) {
+                  const nextItem = block.items[index + 1];
+                  patchBlock(block.id, (b) => {
+                    const a = b.items.find((i) => i.id === item.id);
+                    const nx = b.items.find((i) => i.id === nextItem.id);
+                    if (!a || !nx) return b;
+                    return { ...b, items: b.items.map((i) => i.id === item.id ? { ...i, text: (a.text || "") + (nx.text || "") } : i).filter((i) => i.id !== nextItem.id) };
+                  });
+                  return;
+                }
+                onMergeNextBlock?.();
+              }}
               onPasteBlocks={(pastedBlocks, focusId) => {
                 if (pastedBlocks.length === 1 && pastedBlocks[0].type === "bullets") {
                   const newItems = (pastedBlocks[0].items || []).map(itemWithLevel);
@@ -1891,7 +2056,7 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
 }
 
 // ====== NUMBERED LIST ======
-function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, patchBlock, onDeleteEmpty, onConvertToText, onReplaceBlock, onAddBlockAfter, onExitBlock, autoFocus, onMoveToPreviousBlock, onMoveToNextBlock }) {
+function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, patchBlock, onDeleteEmpty, onConvertToText, onReplaceBlock, onAddBlockAfter, onExitBlock, autoFocus, onMoveToPreviousBlock, onMoveToNextBlock, onMergeNextBlock }) {
   const [focusItemId, setFocusItemId] = useState(null);
   const [focusKey, setFocusKey] = useState(0);
   const preFocusEl = (itemId, atStart = false) => {
@@ -1976,8 +2141,8 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
     // Track last-seen index of each parent level so we can detect parent changes.
     // parentId[l] = the flat index of the most recent item at level l-1 (i.e. the parent of items at level l).
     // counter[l] = running count of items at level l under the current parent.
-    const counter = [0, 0, 0];
-    const parentIdx = [-1, -1, -1]; // index of the most-recent item at level l-1
+    const counter = new Array(MAX_LIST_LEVEL + 1).fill(0);
+    const parentIdx = new Array(MAX_LIST_LEVEL + 1).fill(-1); // index of the most-recent item at level l-1
     return block.items.map((item, idx) => {
       const lv = listLevel(item);
       // Find the most recent item above idx at level lv-1 (= parent level).
@@ -2096,6 +2261,19 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
               }}
               onMoveToPreviousBlock={handleMoveToPrev}
               onMoveToNextBlock={handleMoveToNext}
+              onDeleteAtEnd={() => {
+                if (!isLast) {
+                  const nextItem = block.items[idx + 1];
+                  patchBlock(block.id, (b) => {
+                    const a = b.items.find((i) => i.id === item.id);
+                    const nx = b.items.find((i) => i.id === nextItem.id);
+                    if (!a || !nx) return b;
+                    return { ...b, items: b.items.map((i) => i.id === item.id ? { ...i, text: (a.text || "") + (nx.text || "") } : i).filter((i) => i.id !== nextItem.id) };
+                  });
+                  return;
+                }
+                onMergeNextBlock?.();
+              }}
               onPasteBlocks={(pastedBlocks, focusId) => {
                 if (pastedBlocks.length === 1 && pastedBlocks[0].type === "numbers") {
                   const newItems = (pastedBlocks[0].items || []).map(itemWithLevel);
@@ -2129,7 +2307,7 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
 }
 
 // ====== CHECKLIST ======
-function ChecklistBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, patchBlock, onDeleteEmpty, onConvertToText, onReplaceBlock, onAddBlockAfter, onAddBlockBefore, onExitBlock, autoFocus, data, onMoveToPreviousBlock, onMoveToNextBlock }) {
+function ChecklistBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, patchBlock, onDeleteEmpty, onConvertToText, onReplaceBlock, onAddBlockAfter, onAddBlockBefore, onExitBlock, autoFocus, data, onMoveToPreviousBlock, onMoveToNextBlock, onMergeNextBlock }) {
   const [focusItemId, setFocusItemId] = useState(null);
   const [tableView, setTableView] = useState(block.tableView || false);
   const upd = (id, patch) => updateBlock({ ...block, items: (block.items||[]).map(i => i.id === id ? { ...i, ...patch } : i) });
@@ -2328,6 +2506,19 @@ function ChecklistBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upda
                 }}
                 onMoveToPreviousBlock={handleMoveToPrev}
                 onMoveToNextBlock={handleMoveToNext}
+                onDeleteAtEnd={() => {
+                  if (!isLast) {
+                    const nextItem = safeItems[index + 1];
+                    patchBlock?.(block.id, (b) => {
+                      const a = b.items.find((i) => i.id === item.id);
+                      const nx = b.items.find((i) => i.id === nextItem.id);
+                      if (!a || !nx) return b;
+                      return { ...b, items: b.items.map((i) => i.id === item.id ? { ...i, text: (a.text || "") + (nx.text || "") } : i).filter((i) => i.id !== nextItem.id) };
+                    });
+                    return;
+                  }
+                  onMergeNextBlock?.();
+                }}
                 onPasteBlocks={(pastedBlocks, focusId) => {
                   if (pastedBlocks.length === 1 && pastedBlocks[0].type === "checklist") {
                     const newItems = (pastedBlocks[0].items || []).map(i => ({ id: nid(), text: i.text || "", done: !!i.done, dueDate: i.dueDate || "" }));
@@ -2627,11 +2818,18 @@ function MilestonesBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upd
 // ====== TABLE ======
 function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, onDeleteBlock }) {
   const columnWidths = block.columnWidths || block.headers.map(() => 180);
+  // Per-column type: "text" (default) or "checkbox". Checkbox cells store "1"/"".
+  const colTypes = block.headers.map((_, i) => (block.colTypes || [])[i] || "text");
   const updateTable = (patch) => updateBlock({ ...block, ...patch });
   const updCell = (rid, ci, v) => updateBlock({ ...block, rows: block.rows.map(r => r.id === rid ? { ...r, cells: r.cells.map((c,i) => i === ci ? v : c) } : r) });
   const updHead = (i, v) => updateBlock({ ...block, headers: block.headers.map((h, idx) => idx === i ? v : h) });
+  const toggleColType = (i) => {
+    const next = [...colTypes];
+    next[i] = next[i] === "checkbox" ? "text" : "checkbox";
+    updateBlock({ ...block, colTypes: next });
+  };
   const addRow = () => updateBlock({ ...block, columnWidths, rows: [...block.rows, { id: nid(), cells: block.headers.map(() => "") }] });
-  const addCol = () => updateBlock({ ...block, headers: [...block.headers, "New"], columnWidths: [...columnWidths, 180], rows: block.rows.map(r => ({ ...r, cells: [...r.cells, ""] })) });
+  const addCol = () => updateBlock({ ...block, headers: [...block.headers, "New"], colTypes: [...colTypes, "text"], columnWidths: [...columnWidths, 180], rows: block.rows.map(r => ({ ...r, cells: [...r.cells, ""] })) });
   const clearCell = (rid, ci) => updCell(rid, ci, "");
   const remRow = (id) => {
     const nextRows = block.rows.filter(r => r.id !== id);
@@ -2639,7 +2837,7 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
   };
   const remCol = (i) => {
     if (block.headers.length <= 1) return;
-    updateBlock({ ...block, headers: block.headers.filter((_,idx) => idx !== i), columnWidths: columnWidths.filter((_, idx) => idx !== i), rows: block.rows.map(r => ({ ...r, cells: r.cells.filter((_,idx) => idx !== i) })) });
+    updateBlock({ ...block, headers: block.headers.filter((_,idx) => idx !== i), colTypes: colTypes.filter((_, idx) => idx !== i), columnWidths: columnWidths.filter((_, idx) => idx !== i), rows: block.rows.map(r => ({ ...r, cells: r.cells.filter((_,idx) => idx !== i) })) });
   };
   const startResize = (index, e) => {
     e.preventDefault();
@@ -2689,6 +2887,15 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
                     />
                     <button
                       onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleColType(i); }}
+                      className={`tbl-coltype${colTypes[i] === "checkbox" ? " tbl-coltype-on" : ""}`}
+                      title={colTypes[i] === "checkbox" ? "Checkbox column — click for text" : "Make this a checkbox column"}
+                      type="button"
+                    >
+                      ☑
+                    </button>
+                    <button
+                      onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
                       onClick={(e) => { e.preventDefault(); e.stopPropagation(); remCol(i); }}
                       className="tbl-del"
                       title="Delete column"
@@ -2709,26 +2916,38 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
             {block.rows.map(row => (
               <tr key={row.id}>
                 {row.cells.map((c, i) => (
-                  <td key={i}>
-                    <div className="tbl-cell-inner">
-                      <EditableText
-                        value={c}
-                        onChange={(v) => updCell(row.id, i, v)}
-                        placeholder="…"
-                        multiline
-                        softBreakOnEnter
-                        style={{ fontSize:14, lineHeight:1.55, color:"var(--text)", minHeight:24, paddingRight:22 }}
-                      />
+                  <td key={i} className={colTypes[i] === "checkbox" ? "tbl-td-check" : ""}>
+                    {colTypes[i] === "checkbox" ? (
                       <button
-                        className="tbl-cell-clear"
+                        className={`tbl-checkcell${c ? " tbl-checked" : ""}`}
                         onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); clearCell(row.id, i); }}
-                        title="Clear cell"
+                        onClick={(e) => { e.stopPropagation(); updCell(row.id, i, c ? "" : "1"); }}
+                        title={c ? "Mark incomplete" : "Mark complete"}
                         type="button"
                       >
-                        ×
+                        {c ? "✓" : ""}
                       </button>
-                    </div>
+                    ) : (
+                      <div className="tbl-cell-inner">
+                        <EditableText
+                          value={c}
+                          onChange={(v) => updCell(row.id, i, v)}
+                          placeholder="…"
+                          multiline
+                          softBreakOnEnter
+                          style={{ fontSize:14, lineHeight:1.55, color:"var(--text)", minHeight:24, paddingRight:22 }}
+                        />
+                        <button
+                          className="tbl-cell-clear"
+                          onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); clearCell(row.id, i); }}
+                          title="Clear cell"
+                          type="button"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    )}
                   </td>
                 ))}
                 <td style={{ textAlign:"center", width:30 }}>
@@ -2753,7 +2972,7 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
 }
 
 // ====== CALENDAR ======
-function CalendarBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, onDeleteBlock, data, setCurrentPage }) {
+function CalendarBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, onDeleteBlock, data, setCurrentPage, updateEvents }) {
   const reachableIds = new Set([
     ...(data?.rootOrder || []),
     ...Object.values(data?.childOrder || {}).flat(),
@@ -2779,6 +2998,53 @@ function CalendarBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updat
     acc[day] = [...(acc[day] || []), page];
     return acc;
   }, {});
+
+  // ── Real, editable calendar EVENTS (workspace-level data.events) ──────────
+  const dayKeyOf = (day) => `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const allEvents = Object.values(data?.events || {}).filter((ev) => ev && ev.date && ev.title);
+  const eventsByDay = allEvents.reduce((acc, ev) => {
+    if (ev.date.slice(0, 7) !== `${year}-${String(month + 1).padStart(2, "0")}`) return acc;
+    const day = parseInt(ev.date.slice(8, 10), 10);
+    acc[day] = [...(acc[day] || []), ev].sort((a, b) => String(a.time || "").localeCompare(String(b.time || "")));
+    return acc;
+  }, {});
+
+  // editor: null | { id?, title, date, time, notes, pageId, createdAt? }
+  const [editor, setEditor] = React.useState(null);
+  const canEdit = typeof updateEvents === "function";
+  const openNewEvent = (day) => canEdit && setEditor({ title: "", date: dayKeyOf(day), time: "", notes: "", pageId: "" });
+  const openEditEvent = (ev) => canEdit && setEditor({ ...ev });
+  const saveEvent = () => {
+    const title = (editor?.title || "").trim();
+    if (!title || !/^\d{4}-\d{2}-\d{2}$/.test(editor?.date || "")) return;
+    const id = editor.id || nid();
+    const now = new Date().toISOString();
+    updateEvents((evs) => ({
+      ...evs,
+      [id]: {
+        id,
+        title,
+        date: editor.date,
+        time: editor.time || "",
+        notes: (editor.notes || "").slice(0, 2000),
+        pageId: editor.pageId || "",
+        createdAt: editor.createdAt || now,
+        updatedAt: now,
+      },
+    }));
+    setEditor(null);
+  };
+  const deleteEvent = (id) => {
+    updateEvents((evs) => {
+      const next = { ...evs };
+      delete next[id];
+      return next;
+    });
+    setEditor(null);
+  };
+  const linkablePages = Object.values(data?.pages || {})
+    .filter((p) => !p.system && reachableIds.has(p.id))
+    .map((p) => ({ id: p.id, title: (window.stripHtml ? window.stripHtml(p.title || "") : (p.title || "")) || "Untitled" }));
 
   // Today marker (only highlight when viewing the current month).
   const now = new Date();
@@ -2824,14 +3090,38 @@ function CalendarBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updat
           {cells.map((day, index) => {
             const isToday = day && isCurrentMonth && day === todayDay;
             const dayPages = pagesByDay[day] || [];
+            const dayEvents = eventsByDay[day] || [];
             return (
               <div key={`${day || "blank"}-${index}`} className={`calendar-cell ${day ? "" : "muted"} ${isToday ? "today" : ""}`}>
                 {day && (
                   <div className="calendar-day-row">
                     <span className="calendar-day">{day}</span>
-                    {dayPages.length > 0 && <span className="calendar-day-count" title={`${dayPages.length} pending`}>{dayPages.length}</span>}
+                    {dayPages.length + dayEvents.length > 0 && (
+                      <span className="calendar-day-count" title={`${dayPages.length + dayEvents.length} on this day`}>{dayPages.length + dayEvents.length}</span>
+                    )}
+                    {canEdit && (
+                      <button
+                        className="calendar-add-event"
+                        type="button"
+                        title="Add event"
+                        onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                        onClick={(e) => { e.stopPropagation(); openNewEvent(day); }}
+                      >+</button>
+                    )}
                   </div>
                 )}
+                {dayEvents.map((ev) => (
+                  <button
+                    key={ev.id}
+                    className="calendar-event-pill"
+                    type="button"
+                    onClick={() => openEditEvent(ev)}
+                    title={`${ev.time ? ev.time + " · " : ""}${ev.title}${ev.notes ? "\n" + ev.notes : ""} — click to edit`}
+                  >
+                    {ev.time && <span className="calendar-event-time">{ev.time}</span>}
+                    <span className="calendar-page-pill-title">{ev.title}</span>
+                  </button>
+                ))}
                 {dayPages.map((page) => (
                   <button key={page.id} className="calendar-page-pill" onClick={() => setCurrentPage?.(page.id)} title={`Open "${window.stripHtml ? window.stripHtml(page.title || "") : (page.title || "Untitled")}"`}>
                     <span>{page.icon ? renderPageIcon(page.icon, 14) : "📄"}</span>
@@ -2842,6 +3132,61 @@ function CalendarBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updat
             );
           })}
         </div>
+        {editor && (
+          <div className="cal-event-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setEditor(null); }}>
+            <div className="cal-event-modal" onMouseDown={(e) => e.stopPropagation()}>
+              <h3>{editor.id ? "Edit event" : "New event"}</h3>
+              <input
+                className="cal-event-input"
+                autoFocus
+                placeholder="Event title"
+                value={editor.title}
+                onChange={(e) => setEditor({ ...editor, title: e.target.value })}
+                onKeyDown={(e) => { if (e.key === "Enter") saveEvent(); if (e.key === "Escape") setEditor(null); }}
+              />
+              <div className="cal-event-row">
+                <input
+                  className="cal-event-input"
+                  type="date"
+                  value={editor.date}
+                  onChange={(e) => setEditor({ ...editor, date: e.target.value })}
+                />
+                <input
+                  className="cal-event-input"
+                  type="time"
+                  value={editor.time || ""}
+                  onChange={(e) => setEditor({ ...editor, time: e.target.value })}
+                />
+              </div>
+              <textarea
+                className="cal-event-input cal-event-notes"
+                placeholder="Notes (optional)"
+                value={editor.notes || ""}
+                onChange={(e) => setEditor({ ...editor, notes: e.target.value })}
+              />
+              <select
+                className="cal-event-input"
+                value={editor.pageId || ""}
+                onChange={(e) => setEditor({ ...editor, pageId: e.target.value })}
+                title="Optionally link this event to a page"
+              >
+                <option value="">No linked page</option>
+                {linkablePages.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}
+              </select>
+              <div className="cal-event-actions">
+                {editor.id && <button className="cal-event-btn cal-event-del" type="button" onClick={() => deleteEvent(editor.id)}>Delete</button>}
+                {editor.pageId && data?.pages?.[editor.pageId] && (
+                  <button className="cal-event-btn" type="button" onClick={() => { setCurrentPage?.(editor.pageId); setEditor(null); }}>Open page</button>
+                )}
+                <span style={{ flex: 1 }} />
+                <button className="cal-event-btn" type="button" onClick={() => setEditor(null)}>Cancel</button>
+                <button className="cal-event-btn cal-event-save" type="button" disabled={!(editor.title || "").trim()} onClick={saveEvent}>
+                  {editor.id ? "Save" : "Add event"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

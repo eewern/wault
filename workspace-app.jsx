@@ -135,6 +135,7 @@ function normalizeWorkspaceData(raw) {
       childOrder: {},
       pinnedPages: [],
       settings: {},
+      events: {},
       currentPageId: homeId,
     };
   }
@@ -303,6 +304,8 @@ function normalizeWorkspaceData(raw) {
   normalized.pinnedPages = normalized.pinnedPages.filter(id => !!normalized.pages[id]);
   // Ensure workspace settings object exists
   if (!normalized.settings || typeof normalized.settings !== 'object') normalized.settings = {};
+  // Calendar events live on the workspace: { [id]: { id, title, date, time?, notes?, pageId? } }
+  if (!normalized.events || typeof normalized.events !== 'object' || Array.isArray(normalized.events)) normalized.events = {};
   return normalized;
 }
 
@@ -796,6 +799,22 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
               {pending.length > 0 ? `Team (${pending.length})` : 'Team'}
             </button>
           )}
+          <a
+            href="./focus/"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px',
+              borderRadius: 8, textDecoration: 'none', color: 'var(--text-muted)',
+              fontSize: 13, fontWeight: 500, cursor: 'pointer',
+              transition: 'background 0.15s ease, color 0.15s ease',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--panel-hover)'; e.currentTarget.style.color = 'var(--text)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = ''; e.currentTarget.style.color = 'var(--text-muted)'; }}
+            data-tooltip="Open WAULT Focus — your daily 3 priorities"
+          >
+            <span style={{ fontSize: 15 }}>◎</span> Focus
+          </a>
           <button
             onClick={() => { setFeedbackMsg(''); setSettingsTab('data'); setShowSettingsModal(true); }}
             data-tooltip="Settings"
@@ -1724,6 +1743,14 @@ function App() {
   // === Page operations ===
   const setCurrentPage = (id) => setData(d => ({ ...d, currentPageId: id }));
 
+  // Calendar events are part of the workspace data, so they ride the existing
+  // localStorage + Firebase sync for free. mutator: (events) => nextEvents
+  const updateEvents = (mutator) => setData(d => {
+    const cur = d.events || {};
+    const next = typeof mutator === "function" ? mutator(cur) : mutator;
+    return { ...d, events: next || {} };
+  });
+
   const updatePage = (id, patch) => setData(d => {
     const current = d.pages[id];
     const resolvedPatch = typeof patch === 'function' ? patch(current) : patch;
@@ -2382,6 +2409,7 @@ function App() {
         moveBlock={moveBlock}
         data={data}
         setCurrentPage={setCurrentPage}
+        updateEvents={updateEvents}
         addPage={addPage}
         presenceLocks={{ ...presenceLocks, ...firebasePresence }}
         onWordBoundary={forceHistoryCommit}
@@ -3016,7 +3044,7 @@ function getBuiltinTemplates() {
 }
 
 // ====== PAGE EDITOR ======
-function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, addBlock, addBlockAfter, addBlockBefore, replaceBlock, moveBlock, data, setCurrentPage, addPage, presenceLocks = {}, onWordBoundary, authUser, activeWorkspaceId }) {
+function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, addBlock, addBlockAfter, addBlockBefore, replaceBlock, moveBlock, data, setCurrentPage, updateEvents, addPage, presenceLocks = {}, onWordBoundary, authUser, activeWorkspaceId }) {
   // Make forceHistoryCommit available globally so EditableText can call it on word boundaries
   useEffect(() => { window.__onWordBoundary = onWordBoundary; }, [onWordBoundary]);
 
@@ -3188,11 +3216,58 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     focusBlock(page.blocks[idx + 1].id, mode === "start");
   };
 
+  // Forward-Delete at the end of a block: merge the NEXT block into the current
+  // one (inverse of the Backspace-at-start merge). Because we merge INTO the
+  // focused block, the caret keeps its offset automatically — EditableText's
+  // value-sync restores it, so the cursor stays at the junction.
+  const mergeNextBlockIn = (currentBlockId) => {
+    if (!page || page.system) return;
+    const idx = page.blocks.findIndex(b => b.id === currentBlockId);
+    if (idx === -1 || idx >= page.blocks.length - 1) return;
+    const cur = page.blocks[idx];
+    const next = page.blocks[idx + 1];
+    const LISTY = ["bullets", "numbers", "checklist"];
+    const san = (h) => window.sanitizeHtml ? window.sanitizeHtml(h) : h;
+    const plain = (h) => (window.stripHtml ? window.stripHtml(h || "") : String(h || "").replace(/<[^>]*>/g, "")).trim();
+    let newBlocks = null;
+    if ((cur.type === "text" || cur.type === "heading") && (next.type === "text" || next.type === "heading")) {
+      newBlocks = page.blocks.filter((_, i) => i !== idx + 1);
+      newBlocks[idx] = { ...cur, text: san((cur.text || "") + (next.text || "")) };
+    } else if ((cur.type === "text" || cur.type === "heading") && LISTY.includes(next.type) && (next.items || []).length) {
+      // Pull the FIRST list item's text into the current block; the rest stay a list.
+      const first = next.items[0];
+      const rest = next.items.slice(1);
+      newBlocks = [...page.blocks];
+      newBlocks[idx] = { ...cur, text: san((cur.text || "") + (first.text || "")) };
+      if (rest.length) newBlocks[idx + 1] = { ...next, items: rest };
+      else newBlocks.splice(idx + 1, 1);
+    } else if (LISTY.includes(cur.type) && next.type === "text" && (cur.items || []).length) {
+      // Append the next text block's content to the LAST list item.
+      newBlocks = page.blocks.filter((_, i) => i !== idx + 1);
+      if (plain(next.text)) {
+        const items = [...cur.items];
+        const last = items[items.length - 1];
+        items[items.length - 1] = { ...last, text: san((last.text || "") + (next.text || "")) };
+        newBlocks[idx] = { ...cur, items };
+      }
+    } else {
+      // Complex neighbour (table, KPI, divider…) — just hop the caret over it.
+      focusBlock(next.id, true);
+      return;
+    }
+    updatePage(page.id, { blocks: newBlocks });
+  };
+
   // Stable ref so the selectionchange listener always sees the latest blocks
   // without needing to re-subscribe on every keystroke.
   const blocksRef = useRef(blocks);
   useEffect(() => { blocksRef.current = blocks; });
   useEffect(() => { multiSelectedIdsRef.current = multiSelectedIds; }, [multiSelectedIds]);
+  // Mirrors for the copy/cut listeners (registered once, so they read refs, not closures).
+  const pageRef = useRef(page);
+  useEffect(() => { pageRef.current = page; });
+  const updatePageRef = useRef(updatePage);
+  useEffect(() => { updatePageRef.current = updatePage; });
 
   // Show inline format-bar when the user selects text within a single block.
   // Guarded against the selectionchange re-render storm: selectionchange fires on
@@ -3283,6 +3358,116 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       return (window.stripHtml ? window.stripHtml(ed.innerHTML || "") : (ed.textContent || "")).replace(/​/g, "").trim();
     };
 
+    // ── Selection-accurate helpers ────────────────────────────────────────
+    const LIST_TYPES = ["bullets", "numbers", "checklist", "milestones"];
+    const itemTextField = (blockType) => blockType === "milestones" ? "name" : "text";
+
+    // True when `range` fully covers the content of `el`.
+    const rangeCoversEl = (range, el) => {
+      try {
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        return range.compareBoundaryPoints(Range.START_TO_START, r) <= 0 &&
+               range.compareBoundaryPoints(Range.END_TO_END, r) >= 0;
+      } catch { return false; }
+    };
+
+    // Intersection of `range` with the contents of one editable, as sanitized HTML.
+    const sliceRangeHtml = (ed, range) => {
+      const r = document.createRange();
+      r.selectNodeContents(ed);
+      try {
+        if (ed.contains(range.startContainer)) r.setStart(range.startContainer, range.startOffset);
+        if (ed.contains(range.endContainer)) r.setEnd(range.endContainer, range.endOffset);
+      } catch (_) {}
+      const tmp = document.createElement("div");
+      tmp.appendChild(r.cloneContents());
+      tmp.querySelectorAll(JUNK_SEL).forEach((n) => n.remove());
+      return (window.sanitizeHtml ? window.sanitizeHtml(tmp.innerHTML) : tmp.innerHTML)
+        .replace(/<br\s*\/?>\s*$/i, "");
+    };
+
+    // What's left of one editable's content once the selected part is removed (for cut).
+    const remainderHtml = (ed, range) => {
+      const parts = [];
+      try {
+        if (ed.contains(range.startContainer)) {
+          const r = document.createRange();
+          r.selectNodeContents(ed);
+          r.setEnd(range.startContainer, range.startOffset);
+          const tmp = document.createElement("div");
+          tmp.appendChild(r.cloneContents());
+          parts.push(tmp.innerHTML);
+        }
+        if (ed.contains(range.endContainer)) {
+          const r = document.createRange();
+          r.selectNodeContents(ed);
+          r.setStart(range.endContainer, range.endOffset);
+          const tmp = document.createElement("div");
+          tmp.appendChild(r.cloneContents());
+          parts.push(tmp.innerHTML);
+        }
+      } catch (_) {}
+      const html = parts.join("");
+      return window.sanitizeHtml ? window.sanitizeHtml(html) : html;
+    };
+
+    const plainOf = (h) => (window.stripHtml ? window.stripHtml(h || "") : String(h || "").replace(/<[^>]*>/g, "")).trim();
+
+    // Build a block that contains ONLY what the range selected of it.
+    // Returns null when nothing meaningful of the block is inside the range.
+    const partialBlockFromRange = (block, el, range) => {
+      if (rangeCoversEl(range, el)) return block;
+      if (LIST_TYPES.includes(block.type) && Array.isArray(block.items)) {
+        const field = itemTextField(block.type);
+        const rows = [...el.querySelectorAll("[data-item-id]")];
+        const rowById = new Map(rows.map((r) => [r.getAttribute("data-item-id"), r]));
+        const picked = [];
+        block.items.forEach((item) => {
+          const row = rowById.get(String(item.id));
+          if (!row) return;
+          let hit = false;
+          try { hit = range.intersectsNode(row); } catch (_) {}
+          if (!hit) return;
+          const ed = row.querySelector(".editable");
+          const isBoundary = ed && (ed.contains(range.startContainer) || ed.contains(range.endContainer));
+          if (!isBoundary) { picked.push({ ...item }); return; }
+          const sliced = sliceRangeHtml(ed, range);
+          // A boundary item with an empty slice was only "touched" at its edge — skip it.
+          if (!plainOf(sliced)) return;
+          picked.push({ ...item, [field]: sliced });
+        });
+        if (!picked.length) return null;
+        return { ...block, items: picked };
+      }
+      if (["text", "heading", "callout"].includes(block.type)) {
+        const eds = [...el.querySelectorAll(".editable")];
+        const ed = eds.find((x) => x.contains(range.startContainer) || x.contains(range.endContainer)) || eds[eds.length - 1];
+        if (!ed) return block;
+        const sliced = sliceRangeHtml(ed, range);
+        if (!plainOf(sliced)) return null;
+        return { ...block, text: sliced };
+      }
+      // Tables / KPIs / progress / dividers: all-or-nothing.
+      return block;
+    };
+
+    // Write a blocks payload to the clipboard: semantic HTML + plain text + the
+    // exact JSON under a custom type so internal pastes are 100% faithful even
+    // across tabs (where the in-memory clipboard can't help).
+    const writeBlocksPayload = (e, blocksArr) => {
+      const { html, text } = window.serializeBlocksForClipboard(blocksArr);
+      e.clipboardData.setData("text/html", `<!--StartFragment-->${html}<!--EndFragment-->`);
+      e.clipboardData.setData("text/plain", text);
+      try { e.clipboardData.setData("application/x-wault-blocks", JSON.stringify(blocksArr)); } catch (_) {}
+    };
+
+    const touchedBlocksOf = (range) => blocksRef.current.filter((b) => {
+      const el = pageBody.querySelector(`[data-block-id="${b.id}"]`);
+      if (!el) return false;
+      try { return range.intersectsNode(el); } catch { return false; }
+    });
+
     const onCopy = (e) => {
       // Reset the in-memory clipboard; only full-block serialization repopulates it,
       // so a partial/inline/cell copy can never falsely match on the next paste.
@@ -3306,9 +3491,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       if (selIds && selIds.size && (!sel || sel.isCollapsed || sel.rangeCount === 0)) {
         const chosen = blocksRef.current.filter((b) => selIds.has(b.id));
         if (chosen.length) {
-          const { html, text } = window.serializeBlocksForClipboard(chosen);
-          e.clipboardData.setData("text/html", `<!--StartFragment-->${html}<!--EndFragment-->`);
-          e.clipboardData.setData("text/plain", text);
+          writeBlocksPayload(e, chosen);
           e.preventDefault();
           return;
         }
@@ -3322,11 +3505,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       const startEd = (range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement)?.closest?.(".editable");
       const endEd = (range.endContainer.nodeType === 1 ? range.endContainer : range.endContainer.parentElement)?.closest?.(".editable");
 
-      const touched = blocksRef.current.filter((b) => {
-        const el = pageBody.querySelector(`[data-block-id="${b.id}"]`);
-        if (!el) return false;
-        try { return range.intersectsNode(el); } catch { return false; }
-      });
+      const touched = touchedBlocksOf(range);
       if (!touched.length) return;
 
       // ── Table cell-range copy (TSV + <table>) — works across multiple cells ──
@@ -3339,7 +3518,10 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
           const picked = cells.filter((c) => { try { return range.intersectsNode(c); } catch { return false; } });
           if (picked.length) matrix.push(picked.map(cellText));
         });
-        if (matrix.length) {
+        const cellCount = matrix.reduce((n, r) => n + r.length, 0);
+        // A selection inside a SINGLE cell falls through to the inline path below,
+        // so partial text in one cell copies as exactly that text — not the whole cell.
+        if (matrix.length && cellCount > 1) {
           const tsv = matrix.map((r) => r.join("\t")).join("\n");
           const htmlTbl = `<table>${matrix.map((r) => `<tr>${r.map((c) => `<td>${(c || "").replace(/&/g,"&amp;").replace(/</g,"&lt;")}</td>`).join("")}</tr>`).join("")}</table>`;
           e.clipboardData.setData("text/html", `<!--StartFragment-->${htmlTbl}<!--EndFragment-->`);
@@ -3349,33 +3531,135 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
         }
       }
 
-      let html, text;
       if (startEd && startEd === endEd) {
+        // Selection lives inside ONE editable (one list item, one paragraph, one cell).
+        // Copy EXACTLY the highlighted text — never the surrounding block. This is the
+        // "what you highlight is what you paste" rule.
         const block = touched[0];
-        // For list/structured blocks always serialize the WHOLE block so the type
-        // (bullets, numbers, checklist, milestones) is preserved on paste.
-        if (block && ["bullets","numbers","checklist","milestones","kpis","progress","table","content-shooting-table"].includes(block.type)) {
-          ({ html, text } = window.serializeBlocksForClipboard([block]));
-        } else {
-          // Partial inline selection — wrap in the semantic tag of the source block.
-          const { html: inner, text: innerText } = cleanClone(range);
-          switch (block?.type) {
-            case "heading": html = `<h${block.level}>${inner}</h${block.level}>`; text = innerText; break;
-            case "callout": html = `<blockquote>${inner}</blockquote>`; text = innerText; break;
-            default:        html = `<p>${inner}</p>`; text = innerText; break;
-          }
+        const { html: inner, text: innerText } = cleanClone(range);
+        let html, text;
+        switch (block?.type) {
+          case "heading": html = `<h${block.level}>${inner}</h${block.level}>`; text = innerText; break;
+          case "callout": html = `<blockquote>${inner}</blockquote>`; text = innerText; break;
+          default:        html = `<p>${inner}</p>`; text = innerText; break;
         }
-      } else {
-        // Spans multiple blocks → serialize each from the data model (always clean).
-        ({ html, text } = window.serializeBlocksForClipboard(touched));
+        e.clipboardData.setData("text/html", `<!--StartFragment-->${html}<!--EndFragment-->`);
+        e.clipboardData.setData("text/plain", text);
+        e.preventDefault();
+        return;
       }
 
-      e.clipboardData.setData("text/html", `<!--StartFragment-->${html}<!--EndFragment-->`);
-      e.clipboardData.setData("text/plain", text);
+      // Spans multiple editables/blocks → slice each touched block down to exactly
+      // the selected items/text (boundary blocks partial, middle blocks whole).
+      const partial = touched
+        .map((b) => {
+          const el = pageBody.querySelector(`[data-block-id="${b.id}"]`);
+          return el ? partialBlockFromRange(b, el, range) : null;
+        })
+        .filter(Boolean);
+      if (!partial.length) return;
+      writeBlocksPayload(e, partial);
       e.preventDefault();
     };
+
+    // ── Cut: same payload as copy, then remove the selection from the model ──
+    const removeBlocksByIds = (ids) => {
+      const pg = pageRef.current;
+      if (!pg || pg.system) return;
+      const idSet = new Set(ids);
+      const next = (pg.blocks || []).filter((b) => !idSet.has(b.id));
+      updatePageRef.current?.(pg.id, { blocks: next.length ? next : [{ id: window.nid(), type: "text", text: "" }] });
+      setMultiSelectedIds(new Set());
+    };
+
+    const applyRangeDeletion = (range, touched) => {
+      const pg = pageRef.current;
+      if (!pg || pg.system) return;
+      const touchedIds = new Set(touched.map((b) => b.id));
+      const nextBlocks = [];
+      (pg.blocks || []).forEach((b) => {
+        if (!touchedIds.has(b.id)) { nextBlocks.push(b); return; }
+        const el = pageBody.querySelector(`[data-block-id="${b.id}"]`);
+        if (!el) { nextBlocks.push(b); return; }
+        if (rangeCoversEl(range, el)) return; // fully selected → remove the block
+        if (LIST_TYPES.includes(b.type) && Array.isArray(b.items)) {
+          const field = itemTextField(b.type);
+          const rows = [...el.querySelectorAll("[data-item-id]")];
+          const rowById = new Map(rows.map((r) => [r.getAttribute("data-item-id"), r]));
+          const keep = [];
+          b.items.forEach((item) => {
+            const row = rowById.get(String(item.id));
+            if (!row) { keep.push(item); return; }
+            let hit = false;
+            try { hit = range.intersectsNode(row); } catch (_) {}
+            if (!hit) { keep.push(item); return; }
+            const ed = row.querySelector(".editable");
+            const isBoundary = ed && (ed.contains(range.startContainer) || ed.contains(range.endContainer));
+            if (!isBoundary) return; // fully inside the selection → drop
+            const rest = remainderHtml(ed, range);
+            if (plainOf(rest)) keep.push({ ...item, [field]: rest });
+          });
+          if (keep.length) nextBlocks.push({ ...b, items: keep });
+          return;
+        }
+        if (["text", "heading", "callout"].includes(b.type)) {
+          const eds = [...el.querySelectorAll(".editable")];
+          const ed = eds.find((x) => x.contains(range.startContainer) || x.contains(range.endContainer)) || eds[eds.length - 1];
+          if (!ed) { nextBlocks.push(b); return; }
+          nextBlocks.push({ ...b, text: remainderHtml(ed, range) });
+          return;
+        }
+        nextBlocks.push(b); // tables/KPIs/etc. are never deleted by a text-range cut
+      });
+      updatePageRef.current?.(pg.id, {
+        blocks: nextBlocks.length ? nextBlocks : [{ id: window.nid(), type: "text", text: "" }],
+      });
+    };
+
+    const onCut = (e) => {
+      const pg = pageRef.current;
+      if (!pg || pg.system) return;
+      window._waultClipboard = null;
+      const sel = window.getSelection();
+      const selIds = multiSelectedIdsRef.current;
+      // Block-level selection → copy whole blocks, then remove them.
+      if (selIds && selIds.size && (!sel || sel.isCollapsed || sel.rangeCount === 0)) {
+        const chosen = blocksRef.current.filter((b) => selIds.has(b.id));
+        if (!chosen.length) return;
+        writeBlocksPayload(e, chosen);
+        e.preventDefault();
+        removeBlocksByIds([...selIds]);
+        return;
+      }
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+      const range = sel.getRangeAt(0);
+      if (!pageBody.contains(range.commonAncestorContainer)) return;
+      const startEd = (range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement)?.closest?.(".editable");
+      const endEd = (range.endContainer.nodeType === 1 ? range.endContainer : range.endContainer.parentElement)?.closest?.(".editable");
+      // Inside a single editable the browser's native cut is correct (copy + delete
+      // + input event) — don't interfere.
+      if (startEd && startEd === endEd) return;
+      const touched = touchedBlocksOf(range);
+      if (!touched.length) return;
+      const partial = touched
+        .map((b) => {
+          const el = pageBody.querySelector(`[data-block-id="${b.id}"]`);
+          return el ? partialBlockFromRange(b, el, range) : null;
+        })
+        .filter(Boolean);
+      if (!partial.length) return;
+      writeBlocksPayload(e, partial);
+      e.preventDefault();
+      applyRangeDeletion(range, touched);
+      try { sel.removeAllRanges(); } catch (_) {}
+    };
+
     pageBody.addEventListener("copy", onCopy);
-    return () => pageBody.removeEventListener("copy", onCopy);
+    pageBody.addEventListener("cut", onCut);
+    return () => {
+      pageBody.removeEventListener("copy", onCopy);
+      pageBody.removeEventListener("cut", onCut);
+    };
   }, []);
 
   useEffect(() => {
@@ -3645,7 +3929,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     const trimmed = String(text).trim();
     return Boolean(trimmed) && (
       trimmed.includes("\n") ||
-      /^(#{1,3}\s|[-*]\s|\d+[.)]\s|>\s|\|)/m.test(trimmed)
+      /^(#{1,3}\s|[-*]\s|(\d+|[a-z]|[ivx]{1,5})[.)]\s|>\s|\|)/im.test(trimmed)
     );
   };
 
@@ -3661,9 +3945,12 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     const text = e.clipboardData?.getData("text/plain") || "";
     const clipHtml = e.clipboardData?.getData("text/html") || "";
 
+    // (-1) Exact payload from WAULT's own copy handler (custom clipboard type).
+    let parsedBlocks = window.readWaultClipboardPayload ? window.readWaultClipboardPayload(e) : null;
+
     // (0) FAITHFUL internal paste: if this is exactly what we copied inside WAULT,
     //     restore the stored blocks verbatim — immune to OS clipboard mangling.
-    let parsedBlocks = window.matchWaultClipboard ? window.matchWaultClipboard(text) : null;
+    if (!parsedBlocks) parsedBlocks = window.matchWaultClipboard ? window.matchWaultClipboard(text) : null;
 
     // Prefer HTML parsing for rich-text sources (Notion, Google Docs, Word).
     // Fall back to plain-text markdown parsing for ChatGPT / raw markdown.
@@ -4108,6 +4395,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
               data={data}
               pageBlocks={blocks}
               setCurrentPage={setCurrentPage}
+              updateEvents={updateEvents}
               lockedBy={presenceLocks[block.id]}
               onBeginEditing={() => markEditingBlock(block.id)}
               onEndEditing={clearEditingBlock}
@@ -4148,6 +4436,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
               }}
               onMoveToPreviousBlock={(mode) => moveToPreviousBlock(block.id, mode)}
               onMoveToNextBlock={(mode) => moveToNextBlock(block.id, mode)}
+              onMergeNextBlock={() => mergeNextBlockIn(block.id)}
               onExitBlock={(updatedBlock) => exitBlockToText(block.id, updatedBlock)}
               onSlashCommandShow={(query, rect, clearCb, anchorEl) => {
                 showSlash(query, rect, (cmd) => {
