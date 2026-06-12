@@ -68,7 +68,12 @@
     "focus": {
       "$uid": {
         ".read":  "auth != null && auth.uid === $uid",
-        ".write": "auth != null && auth.uid === $uid && root.child('access').child(auth.uid).exists()"
+        ".write": "auth != null && auth.uid === $uid && root.child('access').child(auth.uid).exists()",
+        "tasks": {
+          "$taskId": {
+            ".validate": "!newData.exists() || (newData.hasChildren(['id', 'title', 'status', 'createdAt', 'updatedAt']) && newData.child('id').isString() && newData.child('title').isString() && newData.child('title').val().length <= 500 && (newData.child('status').val() === 'todo' || newData.child('status').val() === 'in_progress' || newData.child('status').val() === 'waiting' || newData.child('status').val() === 'done') && (!newData.child('priority').exists() || newData.child('priority').val() === 'high' || newData.child('priority').val() === 'medium' || newData.child('priority').val() === 'low') && (!newData.child('dueDate').exists() || (newData.child('dueDate').isString() && newData.child('dueDate').val().length <= 10)) && (!newData.child('notes').exists() || (newData.child('notes').isString() && newData.child('notes').val().length <= 5000)))"
+          }
+        }
       }
     },
 

@@ -1164,6 +1164,73 @@
   .editable i, .editable em { font-style: italic; }
   .editable u { text-decoration: underline; }
   .editable s, .editable strike { text-decoration: line-through; }
+  .editable a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-decoration-color: rgba(var(--ovr),0.3);
+    text-underline-offset: 2px;
+    cursor: pointer;
+    transition: text-decoration-color .14s ease;
+  }
+  .editable a:hover { text-decoration-color: var(--accent); }
+
+  /* === IMAGE BLOCK === */
+  .img-block { position: relative; margin: 6px 0; max-width: 100%; }
+  .img-block img {
+    display: block;
+    max-width: 100%;
+    max-height: 540px;
+    border-radius: 9px;
+    border: 1px solid var(--line-soft, rgba(255,255,255,0.06));
+  }
+  .img-block-edit {
+    position: absolute;
+    top: 8px; right: 8px;
+    width: 28px; height: 28px;
+    border: none; border-radius: 7px;
+    background: rgba(0,0,0,0.55);
+    color: #fff;
+    font-size: 13px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .14s ease;
+  }
+  .img-block:hover .img-block-edit { opacity: 1; }
+  .img-block-prompt {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 1.5px dashed rgba(var(--ovr),0.22);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin: 6px 0;
+    transition: border-color .14s ease;
+  }
+  .img-block-prompt:focus-within { border-color: var(--accent); }
+  .img-block-broken { border-style: solid; border-color: rgba(255,115,105,0.4); }
+  .img-block-icon { font-size: 16px; }
+  .img-block-input {
+    flex: 1;
+    background: none;
+    border: none;
+    outline: none;
+    color: var(--text);
+    font-size: 14px;
+  }
+  .img-block-input::placeholder { color: var(--text-muted); }
+  .img-block-btn {
+    border: 1px solid var(--line, rgba(255,255,255,0.12));
+    border-radius: 8px;
+    background: none;
+    color: var(--text-muted);
+    font-size: 12.5px; font-weight: 600;
+    padding: 7px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color .14s ease, border-color .14s ease;
+  }
+  .img-block-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+  .img-block-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
   /* === BLOCK WRAP === */
   .block-wrap {
@@ -2096,6 +2163,164 @@
     white-space: nowrap;
   }
 
+  /* === CALENDAR EVENTS === */
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  .calendar-add-event {
+    margin-left: auto;
+    width: 18px; height: 18px;
+    border: none; border-radius: 5px;
+    background: none;
+    color: var(--text-muted);
+    font-size: 13px; line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .14s ease, background .14s ease, color .14s ease;
+  }
+  .calendar-cell:hover .calendar-add-event { opacity: 1; }
+  .calendar-add-event:hover { background: var(--accent-soft, rgba(88,196,212,0.16)); color: var(--accent); }
+  .calendar-event-pill {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    width: 100%;
+    margin-bottom: 4px;
+    padding: 4px 6px;
+    border: 1px solid rgba(var(--ovr),0.14);
+    border-left: 3px solid var(--accent);
+    border-radius: 5px;
+    background: rgba(var(--ovr),0.045);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 12px;
+    text-align: left;
+    min-width: 0;
+    transition: background .14s ease, border-color .14s ease;
+  }
+  .calendar-event-pill:hover { background: rgba(var(--ovr),0.085); border-color: var(--accent); }
+  .calendar-event-time { font-size: 10.5px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .cal-event-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+    z-index: 80;
+    animation: fadeIn .15s ease both;
+  }
+  .cal-event-modal {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 20px;
+    width: 100%;
+    max-width: 400px;
+    display: flex; flex-direction: column; gap: 10px;
+    box-shadow: 0 18px 50px rgba(0,0,0,0.35);
+  }
+  .cal-event-modal h3 { margin: 0 0 2px; font-size: 15px; color: var(--text-strong); }
+  .cal-event-input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 9px 12px;
+    color: var(--text);
+    font-size: 14px;
+    outline: none;
+    transition: border-color .14s ease;
+  }
+  .cal-event-input:focus { border-color: var(--accent); }
+  .cal-event-row { display: flex; gap: 8px; }
+  .cal-event-notes { min-height: 60px; resize: vertical; font-family: inherit; }
+  .cal-event-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+  .cal-event-btn {
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px; font-weight: 600;
+    border: 1px solid var(--line);
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background .14s ease, color .14s ease;
+  }
+  .cal-event-btn:hover { background: rgba(var(--ovr),0.06); color: var(--text); }
+  .cal-event-save { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .cal-event-save:hover { background: var(--accent); color: #fff; opacity: 0.9; }
+  .cal-event-save:disabled { opacity: 0.35; cursor: not-allowed; }
+  .cal-event-del { color: #ff7369; border-color: rgba(255,115,105,0.35); }
+  .cal-event-del:hover { background: rgba(255,115,105,0.12); color: #ff7369; }
+
+  /* === TABLE CHECKBOX COLUMNS === */
+  .tbl-coltype {
+    background: none;
+    border: none;
+    color: rgba(var(--ovr),0.3);
+    font-size: 12px;
+    padding: 2px 4px;
+    border-radius: 5px;
+    cursor: pointer;
+    line-height: 1;
+    opacity: 0;
+    transition: opacity .14s ease, color .14s ease;
+  }
+  th:hover .tbl-coltype { opacity: 1; }
+  .tbl-coltype:hover { color: var(--accent); background: rgba(var(--ovr),0.07); }
+  .tbl-coltype-on { opacity: 1; color: var(--accent); }
+  .tbl-td-check { text-align: center; vertical-align: middle; }
+  .tbl-checkcell {
+    width: 20px; height: 20px;
+    border: 1.5px solid rgba(var(--ovr),0.3);
+    border-radius: 6px;
+    background: none;
+    color: transparent;
+    font-size: 12px; font-weight: 700; line-height: 1;
+    cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: all .14s ease;
+  }
+  .tbl-checkcell:hover { border-color: var(--accent); }
+  .tbl-checkcell.tbl-checked { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .tbl-checkcell:active { transform: scale(0.88); }
+
+  /* === EMPTY PAGE STARTERS === */
+  .empty-page-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 4px 0 10px;
+    animation: fadeIn .25s ease both;
+  }
+  .empty-page-actions button {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    background: rgba(var(--ovr),0.03);
+    border: 1px solid rgba(var(--ovr),0.10);
+    border-radius: 9px;
+    color: var(--text-muted);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 13px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color .14s ease, color .14s ease, background .14s ease, transform .12s ease;
+  }
+  .empty-page-actions button:hover {
+    border-color: var(--accent);
+    color: var(--text-strong);
+    background: rgba(var(--ovr),0.05);
+  }
+  .empty-page-actions button:active { transform: scale(0.97); }
+  .epa-icon { font-size: 14px; color: var(--accent); }
+  .empty-page-tip { font-size: 12.5px; color: var(--text-muted); margin-left: 4px; }
+  .empty-page-tip b {
+    color: var(--accent);
+    background: rgba(var(--ovr),0.07);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: ui-monospace, monospace;
+  }
+
   /* === ADD BLOCK PROMPT === */
   .add-block-prompt {
     background: none;
@@ -2277,6 +2502,15 @@
     flex-shrink: 0;
   }
   .slash-item.active .slash-icon { background: rgba(120,200,210,0.16); color: var(--accent); border-color: rgba(120,200,210,0.3); }
+  .slash-footer {
+    margin-top: 6px;
+    padding: 7px 10px 3px;
+    border-top: 1px solid rgba(var(--ovr),0.07);
+    font-size: 10.5px;
+    color: var(--text-muted);
+    letter-spacing: 0.04em;
+    user-select: none;
+  }
   .slash-item-arrow { margin-left: auto; color: var(--text-muted); font-size: 15px; flex-shrink: 0; }
   /* Template submenu — opens to the right of the slash menu */
   .slash-submenu {
@@ -2393,6 +2627,18 @@
   ::selection {
     background: var(--select);
     color: var(--text-strong);
+  }
+
+  /* Keyboard accessibility: visible focus ring on interactive chrome (but never
+     on contenteditable text, where the caret itself is the focus indicator). */
+  button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  .editable:focus-visible { outline: none; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; animation: none !important; }
   }
 
   /* ── Checklist view toggle ── */
@@ -2986,7 +3232,7 @@
 <script src="workspace-config.js?v=20260515-clickfix1"></script>
 <script src="workspace-localStorage-sync.js?v=20260525-fix-data-loss"></script>
 <script src="xalt-bible-data.js?v=20260515-workspaces1"></script>
-<script src="workspace-data.js?v=20260607-teamblock1"></script>
+<script src="workspace-data.js?v=20260612-cmdcentre1"></script>
 <script src="workspace-persistence.js?v=20260522-workspace-tools1"></script>
 <script src="workspace-api-client.js?v=20260522-api1"></script>
 <script type="module">
@@ -2998,8 +3244,8 @@
     return null;
   });
 </script>
-<script type="text/babel" src="workspace-blocks.jsx?v=20260611-waultv2"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260611-waultv2"></script>
+<script type="text/babel" src="workspace-blocks.jsx?v=20260612-cmdcentre1"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260612-cmdcentre1"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

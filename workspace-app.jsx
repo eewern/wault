@@ -4476,6 +4476,37 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
             />
           ))}
 
+          {/* Guided empty state: a brand-new page offers three starters instead of a
+              dead blank line. It disappears the moment the user types anything. */}
+          {!page.system && blocks.length === 1 && blocks[0].type === "text" &&
+            !(window.stripHtml ? window.stripHtml(blocks[0].text || "") : (blocks[0].text || "")).trim() && (
+            <div className="empty-page-actions">
+              <button type="button" onClick={() => openTemplatePicker(blocks[0].id)}>
+                <span className="epa-icon">❏</span> Start from a template
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const tbl = { id: window.nid(), type: "table", headers: ["Col 1", "Col 2", "Col 3"], rows: [{ id: window.nid(), cells: ["", "", ""] }] };
+                  const txt = { id: window.nid(), type: "text", text: "" };
+                  replaceBlockWithBlocks(blocks[0].id, [tbl, txt], txt.id);
+                }}
+              >
+                <span className="epa-icon">▦</span> Insert a table
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const todo = { id: window.nid(), type: "checklist", items: [{ id: window.nid(), text: "", done: false, dueDate: "" }] };
+                  replaceBlockWithBlocks(blocks[0].id, [todo], todo.id);
+                }}
+              >
+                <span className="epa-icon">☑</span> Start a to-do list
+              </button>
+              <span className="empty-page-tip">…or just write. Type <b>/</b> for every block.</span>
+            </div>
+          )}
+
           {/* Bottom click target: clicking empty space below blocks focuses the last block */}
           <div
             style={{ minHeight: 120, cursor: "text" }}

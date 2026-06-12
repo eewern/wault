@@ -73,7 +73,21 @@ window.isPremiumIconKey = isPremiumIconKey;
 window.resolveIconKey = resolveIconKey;
 window.renderPageIcon = renderPageIcon;
 
-const ALLOWED_INLINE_TAGS = new Set(["B", "STRONG", "I", "EM", "U", "S", "STRIKE", "BR"]);
+const ALLOWED_INLINE_TAGS = new Set(["B", "STRONG", "I", "EM", "U", "S", "STRIKE", "BR", "A"]);
+
+// ── URL safety ──────────────────────────────────────────────────────────────
+// Single source of truth for every href/src the app ever renders. Anything that
+// isn't plainly http(s), mailto, or an inline data-image is rejected — which
+// kills javascript:, vbscript:, file:, blob: and protocol-relative tricks.
+function safeUrl(input, { allowDataImage = false } = {}) {
+  const s = String(input || "").trim();
+  if (!s || /[\s\u0000-\u001f]/.test(s)) return "";
+  if (/^https?:\/\//i.test(s)) return s;
+  if (/^mailto:[^\s]+$/i.test(s)) return s;
+  if (allowDataImage && /^data:image\/(png|jpe?g|gif|webp|avif|svg\+xml);base64,/i.test(s)) return s;
+  return "";
+}
+window.safeUrl = safeUrl;
 
 // Elements whose content must never survive a paste (style/script blocks, doc head, etc.)
 const DROP_TAGS = new Set(["STYLE","SCRIPT","HEAD","META","LINK","TITLE","NOSCRIPT","O:P"]);
@@ -102,6 +116,24 @@ function sanitizeHtml(input = "") {
       const frag = document.createDocumentFragment();
       node.childNodes.forEach((child) => frag.appendChild(cleanNode(child)));
       return frag;
+    }
+
+    // Links keep ONLY a validated href (killing javascript:/event-handler attrs)
+    // and always open safely in a new tab. A link with no safe href unwraps to
+    // plain text via the fragment path above.
+    if (tag === "A") {
+      const href = safeUrl(node.getAttribute("href"));
+      if (!href) {
+        const frag = document.createDocumentFragment();
+        node.childNodes.forEach((child) => frag.appendChild(cleanNode(child)));
+        return frag;
+      }
+      const a = document.createElement("a");
+      a.setAttribute("href", href);
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+      node.childNodes.forEach((child) => a.appendChild(cleanNode(child)));
+      return a;
     }
 
     const el = document.createElement(tag.toLowerCase());
@@ -277,6 +309,12 @@ function parseHtmlBlocks(html = "") {
       return;
     }
     if (tag === "P") {
+      // Images travel inside <p> wrappers (Google Docs, our own serializer) —
+      // surface them as image blocks before handling the paragraph text.
+      node.querySelectorAll("img").forEach((img) => {
+        const src = safeUrl(img.getAttribute("src"), { allowDataImage: true });
+        if (src) blocks.push({ id: nid(), type:"image", src, alt: (img.getAttribute("alt") || "").slice(0, 300) });
+      });
       const text = inlineHtml(node);
       if (node.textContent?.trim()) blocks.push({ id: nid(), type:"text", text });
       return;
@@ -303,6 +341,11 @@ function parseHtmlBlocks(html = "") {
     }
     if (tag === "HR") {
       blocks.push({ id: nid(), type:"divider" });
+      return;
+    }
+    if (tag === "IMG") {
+      const src = safeUrl(node.getAttribute("src"), { allowDataImage: true });
+      if (src) blocks.push({ id: nid(), type:"image", src, alt: (node.getAttribute("alt") || "").slice(0, 300) });
       return;
     }
     if (tag === "TABLE") {
@@ -405,6 +448,10 @@ function serializeBlockToHtml(block) {
     case "text":     return `<p>${s(block.text)}</p>`;
     case "callout":  return `<blockquote>${s(block.text)}</blockquote>`;
     case "divider":  return `<hr>`;
+    case "image": {
+      const u = safeUrl(block.src, { allowDataImage: true });
+      return u ? `<p><img src="${u.replace(/"/g, "%22")}" alt=""></p>` : "";
+    }
     case "bullets":
       return itemsToNestedListHtml(block.items, "ul");
     case "numbers":
@@ -444,6 +491,7 @@ function serializeBlockToText(block) {
     case "text":     return plain(block.text);
     case "callout":  return `> ${plain(block.text)}`;
     case "divider":  return "---";
+    case "image":    return safeUrl(block.src, { allowDataImage: true }) || "";
     case "bullets": {
       const list = (block.items||[]).filter(Boolean);
       const base = list.length ? Math.min(...list.map(i=>Math.max(0,i.level||0))) : 0;
@@ -515,6 +563,8 @@ function sanitizeBlockPayload(block) {
   if (typeof b.text === "string") b.text = clean(b.text);
   if (typeof b.label === "string") b.label = stripHtml(b.label);
   if (typeof b.icon === "string") b.icon = stripHtml(b.icon).slice(0, 8);
+  if (typeof b.src === "string") b.src = safeUrl(b.src, { allowDataImage: true });
+  if (typeof b.alt === "string") b.alt = stripHtml(b.alt).slice(0, 300);
   if (Array.isArray(b.items)) {
     b.items = b.items.map((i) => ({
       ...i,
@@ -1019,7 +1069,7 @@ function EditableText({
     const raw = ref.current.innerHTML;
     // Only run full sanitise when the browser has injected block-level tags
     // (avoids expensive DOM work on every plain-text keystroke)
-    const needsSanitize = raw.includes("<div") || raw.includes("<p>") || raw.includes("<p ") || raw.includes("<span");
+    const needsSanitize = raw.includes("<div") || raw.includes("<p>") || raw.includes("<p ") || raw.includes("<span") || raw.includes("<a ") || raw.includes("<a>") || raw.includes("<img");
     const html = needsSanitize ? sanitizeHtml(raw) : raw;
     if (html !== raw) {
       const caret = getCaretOffset(ref.current);
@@ -1048,11 +1098,28 @@ function EditableText({
     // legacy "composition in progress" sentinel; e.isComposing is the modern flag.
     // Without this, pressing Enter to pick a CJK candidate would split the block.
     if (e.isComposing || e.keyCode === 229 || composingRef.current) return;
-    // Bold / Italic / Underline
+    // Bold / Italic / Underline / Link
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey) {
       if (e.key === "b") { e.preventDefault(); document.execCommand("bold"); handleInput(); return; }
       if (e.key === "i") { e.preventDefault(); document.execCommand("italic"); handleInput(); return; }
       if (e.key === "u") { e.preventDefault(); document.execCommand("underline"); handleInput(); return; }
+      if (e.key === "k") {
+        e.preventDefault();
+        const sel = window.getSelection();
+        const hasSelection = sel && !sel.isCollapsed && ref.current.contains(sel.anchorNode);
+        const raw = window.prompt("Link URL (https://…)", "https://");
+        if (raw == null) return;
+        const href = window.safeUrl ? window.safeUrl(raw) : "";
+        if (!href) { window.alert("Only http(s) and mailto links are allowed."); return; }
+        if (hasSelection) {
+          document.execCommand("createLink", false, href);
+        } else {
+          const esc = href.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+          document.execCommand("insertHTML", false, `<a href="${esc}">${esc}</a>`);
+        }
+        handleInput(); // sanitizeHtml normalises the anchor (target/rel, scrubbed attrs)
+        return;
+      }
     }
     if (e.key === " ") {
       // Commit a history snapshot at word boundaries (space) so undo works per-word
@@ -1238,6 +1305,34 @@ function EditableText({
       // (0) Faithful internal paste: exact blocks we copied inside WAULT.
       const mine = window.matchWaultClipboard ? window.matchWaultClipboard(text) : null;
       if (mine && mine.length) { onPasteBlocks(mine, mine[0]?.id); return; }
+    }
+
+    // ── Bare URL paste ───────────────────────────────────────────────────
+    // A lone URL becomes a clickable link (or links the selected text); an
+    // image URL pasted on an empty plain-text line becomes an image block.
+    const pastedUrl = !text.includes("\n") && window.safeUrl ? window.safeUrl(text.trim()) : "";
+    if (pastedUrl) {
+      const isImageUrl = /\.(png|jpe?g|gif|webp|avif|svg)([?#][^\s]*)?$/i.test(pastedUrl);
+      const isEmptyLine = !(ref.current.innerText || "").replace(/​/g, "").trim();
+      // Only a top-level text line may convert into an image block — converting
+      // inside a list/table/callout would replace the whole surrounding block.
+      const isPlainTextHost = !ref.current.closest(".list-row, .check-row, td, th, .callout");
+      if (isImageUrl && isEmptyLine && isPlainTextHost && onPasteBlocks) {
+        onPasteBlocks([{ id: nid(), type: "image", src: pastedUrl, alt: "" }]);
+        return;
+      }
+      const sel = window.getSelection();
+      const esc = pastedUrl.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+      if (sel && !sel.isCollapsed && ref.current.contains(sel.anchorNode)) {
+        document.execCommand("createLink", false, pastedUrl);
+      } else {
+        document.execCommand("insertHTML", false, `<a href="${esc}">${esc}</a>`);
+      }
+      handleInput();
+      return;
+    }
+
+    if (onPasteBlocks) {
       // Prefer HTML clipboard (Notion, Google Docs, Word) — it has real structure
       if (clipHtml) {
         const blocks = parseHtmlBlocks(clipHtml);
@@ -1287,6 +1382,18 @@ function EditableText({
     handleInput();
   };
 
+  // contentEditable swallows link clicks by default — make anchors actually
+  // clickable ("clickable links inside text"). href is re-validated at click
+  // time so a stale/forged anchor can never reach window.open unchecked.
+  const handleClick = (e) => {
+    const a = e.target?.closest?.("a[href]");
+    if (!a || !ref.current?.contains(a)) return;
+    const href = window.safeUrl ? window.safeUrl(a.getAttribute("href")) : "";
+    if (!href) return;
+    e.preventDefault();
+    window.open(href, "_blank", "noopener,noreferrer");
+  };
+
   const handleFocus = selectOnFocus ? () => {
     requestAnimationFrame(() => {
       if (!ref.current) return;
@@ -1313,6 +1420,7 @@ function EditableText({
       onKeyDown={handleKeyDown}
       onPaste={handlePaste}
       onFocus={handleFocus}
+      onClick={handleClick}
       data-placeholder={placeholder || ""}
       className="editable"
       style={{ whiteSpace:"pre-wrap", ...style }}
@@ -1379,6 +1487,7 @@ const SLASH_COMMANDS = [
   { keys:["milestone","milestones"], label:"Milestones", icon:"🎯", make: () => ({ id: nid(), type:"milestones", items:[{ id: nid(), name:"", status:"pending" }] }) },
   { keys:["table","tbl"], label:"Table", icon:"▦", make: () => ({ id: nid(), type:"table", headers:["Col 1","Col 2","Col 3"], rows:[{ id: nid(), cells:["","",""] }] }) },
   { keys:["calendar","cal"], label:"Calendar", icon:"Cal", make: () => ({ id: nid(), type:"calendar", month:"" }) },
+  { keys:["image","img","picture","photo"], label:"Image from URL", icon:"🖼", make: () => ({ id: nid(), type:"image", src:"", alt:"" }) },
   { keys:["callout","quote"], label:"Callout", icon:"💡", make: () => ({ id: nid(), type:"callout", icon:"💡", text:"" }) },
   { keys:["divider","hr","line"], label:"Divider", icon:"—", make: () => ({ id: nid(), type:"divider" }) },
   {
@@ -1485,6 +1594,7 @@ function SlashMenu({ query, onPick, onClose, anchorRect }) {
             {c.openTemplate && <span className="slash-item-arrow">›</span>}
           </button>
         ))}
+        <div className="slash-footer">↑↓ navigate · ↵ select · esc dismiss</div>
       </div>
       {subOpen && (
         <div className="slash-submenu" style={{ left: subRect.left, top: subRect.top }}>
@@ -3480,6 +3590,73 @@ function ContentShootingTableBlock({ block, updateBlock, onDeleteBlock, blockId,
   );
 }
 
+// ====== IMAGE (external URL) ======
+function ImageBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, onDeleteBlock }) {
+  const src = safeUrl(block.src, { allowDataImage: true });
+  const [draft, setDraft] = useState(block.src || "");
+  const [broken, setBroken] = useState(false);
+  const [editing, setEditing] = useState(!src);
+  useEffect(() => { setBroken(false); }, [src]);
+
+  const commit = () => {
+    const clean = safeUrl(draft, { allowDataImage: true });
+    if (!clean) {
+      setDraft("");
+      return; // unsafe / invalid URL — refuse silently, keep the prompt open
+    }
+    updateBlock({ ...block, src: clean });
+    setEditing(false);
+  };
+
+  return (
+    <div className="block-wrap">
+      <BlockHandle blockId={blockId} onDragBlockStart={onDragBlockStart} onDragBlockEnd={onDragBlockEnd} />
+      <BlockDeleteButton onDeleteBlock={onDeleteBlock} />
+      {editing || !src ? (
+        <div className="img-block-prompt">
+          <span className="img-block-icon">🖼</span>
+          <input
+            className="img-block-input"
+            placeholder="Paste an image URL (https://…)"
+            value={draft}
+            autoFocus
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commit();
+              if (e.key === "Escape") { src ? setEditing(false) : onDeleteBlock?.(); }
+            }}
+          />
+          <button className="img-block-btn" type="button" onClick={commit} disabled={!safeUrl(draft, { allowDataImage: true })}>
+            {safeUrl(draft, { allowDataImage: true }) || !draft.trim() ? "Embed" : "Unsafe URL"}
+          </button>
+        </div>
+      ) : broken ? (
+        <div className="img-block-prompt img-block-broken">
+          <span className="img-block-icon">⚠️</span>
+          <span style={{ flex: 1, fontSize: 13 }}>Image failed to load.</span>
+          <button className="img-block-btn" type="button" onClick={() => { setDraft(block.src || ""); setEditing(true); }}>Change URL</button>
+        </div>
+      ) : (
+        <div className="img-block">
+          <img
+            src={src}
+            alt={(window.stripHtml ? window.stripHtml(block.alt || "") : (block.alt || "")) || "Image"}
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            onError={() => setBroken(true)}
+          />
+          <button
+            className="img-block-edit"
+            type="button"
+            title="Change image URL"
+            onClick={() => { setDraft(block.src || ""); setEditing(true); }}
+          >✎</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ====== DISPATCH ======
 // Deterministic hue from an email string so each teammate always gets the
 // same colour (matches Google Docs avatar behaviour).
@@ -3561,6 +3738,7 @@ function Block(props) {
     case "progress":   inner = <ProgressBlock {...childProps} />; break;
     case "content-shooting-table": inner = <ContentShootingTableBlock {...childProps} />; break;
     case "subpage":    inner = <SubpageBlock {...childProps} />; break;
+    case "image":      inner = <ImageBlock {...childProps} />; break;
     case "divider":    inner = (
       <div className="block-wrap">
         <BlockHandle blockId={block.id} onDragBlockStart={props.onDragBlockStart} onDragBlockEnd={props.onDragBlockEnd} />
