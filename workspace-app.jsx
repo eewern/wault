@@ -7,6 +7,7 @@ const LOCAL_WORKSPACES_KEY = "workspace_v4_workspaces";
 const LOCAL_ACTIVE_WORKSPACE_KEY = "workspace_v4_active_workspace";
 const DEFAULT_LOCAL_WORKSPACE_ID = "local_default";
 const TASK_INDEX_PAGE_ID = "task_index";
+const HOME_PAGE_ID = "wault_home"; // Focus dashboard rendered as the in-app Home view
 const LOCAL_BACKUP_INTERVAL_MS = 60000;
 const LOCAL_BACKUP_LIMIT = 30;
 const SEED_REFRESH_VERSION = "20260515-stable-edits2";
@@ -78,6 +79,17 @@ const taskIndexPage = () => ({
   blocks: [],
   system: true,
 });
+// Home lives in `pages` ONLY (never rootOrder) so it routes + persists without
+// ever appearing in the sidebar tree, drag targets, or context menus. The one
+// nav entry is the ◎ Home button in the account panel.
+const homePage = () => ({
+  id: HOME_PAGE_ID,
+  parentId: null,
+  title: "Home",
+  icon: "◎",
+  blocks: [],
+  system: true,
+});
 const mergeOrderedIds = (existing = [], official = [], keep = () => true) => {
   const officialSet = new Set(official);
   const next = existing.filter((id) => officialSet.has(id) || keep(id));
@@ -126,10 +138,11 @@ const ensureParentSubpageLinks = (data) => {
 function normalizeWorkspaceData(raw) {
   // Brand-new workspace: skip all template injection, start with one blank Home page
   if (raw?._isNewBlankWorkspace) {
-    const homeId = 'home_' + Date.now().toString(36);
+    const homeId = 'start_' + Date.now().toString(36);
     return {
       pages: {
-        [homeId]: { id: homeId, title: 'Home', icon: '🏠', blocks: [], parentId: null },
+        [HOME_PAGE_ID]: homePage(),
+        [homeId]: { id: homeId, title: 'Getting Started', icon: '🏠', blocks: [], parentId: null },
       },
       rootOrder: [homeId],
       childOrder: {},
@@ -149,6 +162,14 @@ function normalizeWorkspaceData(raw) {
   } else {
     pages[TASK_INDEX_PAGE_ID] = { ...pages[TASK_INDEX_PAGE_ID], title: "Tasks by Due Date", icon: "✅", parentId: null, system: true, blocks: [] };
   }
+
+  // Home (Focus dashboard) system page: pages map only — keep it OUT of rootOrder.
+  if (!pages[HOME_PAGE_ID]) {
+    pages[HOME_PAGE_ID] = homePage();
+  } else {
+    pages[HOME_PAGE_ID] = { ...pages[HOME_PAGE_ID], title: "Home", icon: "◎", parentId: null, system: true, blocks: [] };
+  }
+  rootOrder = rootOrder.filter((id) => id !== HOME_PAGE_ID);
   if (!rootOrder.includes(TASK_INDEX_PAGE_ID)) {
     const insertAt = rootOrder.includes("home") ? rootOrder.indexOf("home") + 1 : rootOrder.length;
     rootOrder.splice(insertAt, 0, TASK_INDEX_PAGE_ID);
@@ -578,7 +599,7 @@ function TeamAvatar({ email, name, photoURL, size }) {
 }
 
 // ====== TEAM PANEL (compact sidebar strip) + TEAM MODAL (popup overlay) ======
-function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportData, importData, syncState }) {
+function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportData, importData, syncState, onOpenHome, homeActive }) {
   const [showModal, setShowModal] = React.useState(false);
   const [showSettingsModal, setShowSettingsModal] = React.useState(false);
   const [settingsTab, setSettingsTab] = React.useState('data');
@@ -799,22 +820,24 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
               {pending.length > 0 ? `Team (${pending.length})` : 'Team'}
             </button>
           )}
-          <a
-            href="./focus/"
-            target="_blank"
-            rel="noopener noreferrer"
+          <button
+            type="button"
+            onClick={() => onOpenHome?.()}
             style={{
               display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px',
-              borderRadius: 8, textDecoration: 'none', color: 'var(--text-muted)',
-              fontSize: 13, fontWeight: 500, cursor: 'pointer',
+              borderRadius: 8, border: 'none', width: '100%', textAlign: 'left',
+              background: homeActive ? 'var(--panel-active)' : 'none',
+              color: homeActive ? 'var(--accent)' : 'var(--text-muted)',
+              fontSize: 13, fontWeight: homeActive ? 600 : 500, cursor: 'pointer',
+              fontFamily: 'inherit',
               transition: 'background 0.15s ease, color 0.15s ease',
             }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--panel-hover)'; e.currentTarget.style.color = 'var(--text)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = ''; e.currentTarget.style.color = 'var(--text-muted)'; }}
-            data-tooltip="Open WAULT Focus — your daily 3 priorities"
+            onMouseEnter={(e) => { if (!homeActive) { e.currentTarget.style.background = 'var(--panel-hover)'; e.currentTarget.style.color = 'var(--text)'; } }}
+            onMouseLeave={(e) => { if (!homeActive) { e.currentTarget.style.background = ''; e.currentTarget.style.color = 'var(--text-muted)'; } }}
+            data-tooltip="Home — your Focus dashboard and workspaces"
           >
-            <span style={{ fontSize: 15 }}>◎</span> Focus
-          </a>
+            <span style={{ fontSize: 15 }}>◎</span> Home
+          </button>
           <button
             onClick={() => { setFeedbackMsg(''); setSettingsTab('data'); setShowSettingsModal(true); }}
             data-tooltip="Settings"
@@ -1751,6 +1774,23 @@ function App() {
     return { ...d, events: next || {} };
   });
 
+  // Focus→Main half of the bidirectional task sync: flip a checklist item by
+  // (pageId, itemId) through normal state so it rides the save pipeline
+  // (localStorage + Firebase + undo + cross-tab). Block id isn't known to the
+  // caller (Focus sourceIds are wsId:pageId:itemId), so scan checklist blocks.
+  const completeChecklistItem = (pageId, itemId, done) => setData(d => {
+    const page = d.pages[pageId];
+    if (!page || !Array.isArray(page.blocks)) return d;
+    let found = false;
+    const blocks = page.blocks.map((b) => {
+      if (b.type !== "checklist" || !Array.isArray(b.items)) return b;
+      if (!b.items.some((i) => i && i.id === itemId)) return b;
+      found = true;
+      return { ...b, items: b.items.map((i) => i && i.id === itemId ? { ...i, done: !!done } : i) };
+    });
+    return found ? { ...d, pages: { ...d.pages, [pageId]: { ...page, blocks } } } : d;
+  });
+
   const updatePage = (id, patch) => setData(d => {
     const current = d.pages[id];
     const resolvedPatch = typeof patch === 'function' ? patch(current) : patch;
@@ -2395,28 +2435,45 @@ function App() {
         authUser={authUser}
         userAccess={userAccess}
         onFirebaseSignOut={signOutFirebase}
+        onOpenHome={() => setCurrentPage(HOME_PAGE_ID)}
+        homeActive={data.currentPageId === HOME_PAGE_ID}
       />
-      <PageEditor
-        page={currentPage}
-        updatePage={updatePage}
-        updateBlock={updateBlock}
-        patchBlock={patchBlock}
-        deleteBlock={deleteBlock}
-        addBlock={addBlock}
-        addBlockAfter={addBlockAfter}
-        addBlockBefore={addBlockBefore}
-        replaceBlock={replaceBlock}
-        moveBlock={moveBlock}
-        data={data}
-        setCurrentPage={setCurrentPage}
-        updateEvents={updateEvents}
-        addPage={addPage}
-        presenceLocks={{ ...presenceLocks, ...firebasePresence }}
-        onWordBoundary={forceHistoryCommit}
-        authUser={authUser}
-        activeWorkspaceId={activeLocalWorkspaceId}
-      />
-      <TableOfContents page={currentPage} collapsed={tocCollapsed} onToggle={() => setTocCollapsed((value) => !value)} />
+      {currentPage?.id === HOME_PAGE_ID ? (
+        <window.FocusHome
+          data={data}
+          activeWorkspaceId={syncState.user ? syncState.workspaceId : activeLocalWorkspaceId}
+          workspaces={syncState.user ? (syncState.workspaces || []) : localWorkspaces}
+          authUser={authUser}
+          switchWorkspace={switchWorkspace}
+          setCurrentPage={setCurrentPage}
+          completeChecklistItem={completeChecklistItem}
+          cloudConnected={!!window.WorkspaceFirebaseSync}
+        />
+      ) : (
+        <PageEditor
+          page={currentPage}
+          updatePage={updatePage}
+          updateBlock={updateBlock}
+          patchBlock={patchBlock}
+          deleteBlock={deleteBlock}
+          addBlock={addBlock}
+          addBlockAfter={addBlockAfter}
+          addBlockBefore={addBlockBefore}
+          replaceBlock={replaceBlock}
+          moveBlock={moveBlock}
+          data={data}
+          setCurrentPage={setCurrentPage}
+          updateEvents={updateEvents}
+          addPage={addPage}
+          presenceLocks={{ ...presenceLocks, ...firebasePresence }}
+          onWordBoundary={forceHistoryCommit}
+          authUser={authUser}
+          activeWorkspaceId={activeLocalWorkspaceId}
+        />
+      )}
+      {currentPage?.id !== HOME_PAGE_ID && (
+        <TableOfContents page={currentPage} collapsed={tocCollapsed} onToggle={() => setTocCollapsed((value) => !value)} />
+      )}
     </div>
   );
 }
@@ -2436,7 +2493,7 @@ function Sidebar({
   exportData, importData,
   syncState, onSignIn, onSignOut, onInviteMember, workspaces, activeWorkspaceId,
   onCreateWorkspace, onRenameWorkspace, onDeleteWorkspace, onSwitchWorkspace, canManageWorkspace = false, onUndo, onRedo,
-  authUser, userAccess, onFirebaseSignOut, onMobileClose,
+  authUser, userAccess, onFirebaseSignOut, onMobileClose, onOpenHome, homeActive,
 }) {
   // Backup/restore is an owner-only operation; members never see the backup interface.
   const isOwner = userAccess?.role === 'owner';
@@ -2786,6 +2843,8 @@ function Sidebar({
             exportData={exportData}
             importData={importData}
             syncState={syncState}
+            onOpenHome={onOpenHome}
+            homeActive={homeActive}
           />
         )}
       </div>
