@@ -343,6 +343,17 @@ function parseHtmlBlocks(html = "") {
       blocks.push({ id: nid(), type:"divider" });
       return;
     }
+    if (tag === "FIGURE") {
+      // <figure><img><figcaption>…</figcaption></figure> — image with a caption.
+      const img = node.querySelector("img");
+      const src = img && safeUrl(img.getAttribute("src"), { allowDataImage: true });
+      if (src) {
+        const figcap = node.querySelector("figcaption");
+        const caption = (figcap ? (window.stripHtml ? window.stripHtml(figcap.innerHTML) : (figcap.textContent || "")) : "").trim().slice(0, 500);
+        blocks.push({ id: nid(), type:"image", src, alt: (img.getAttribute("alt") || "").slice(0, 300), caption });
+      }
+      return;
+    }
     if (tag === "IMG") {
       const src = safeUrl(node.getAttribute("src"), { allowDataImage: true });
       if (src) blocks.push({ id: nid(), type:"image", src, alt: (node.getAttribute("alt") || "").slice(0, 300) });
@@ -450,7 +461,10 @@ function serializeBlockToHtml(block) {
     case "divider":  return `<hr>`;
     case "image": {
       const u = safeUrl(block.src, { allowDataImage: true });
-      return u ? `<p><img src="${u.replace(/"/g, "%22")}" alt=""></p>` : "";
+      if (!u) return "";
+      const cap = s(block.caption);
+      const img = `<img src="${u.replace(/"/g, "%22")}" alt="">`;
+      return cap ? `<figure>${img}<figcaption>${cap}</figcaption></figure>` : `<p>${img}</p>`;
     }
     case "bullets":
       return itemsToNestedListHtml(block.items, "ul");
@@ -491,7 +505,11 @@ function serializeBlockToText(block) {
     case "text":     return plain(block.text);
     case "callout":  return `> ${plain(block.text)}`;
     case "divider":  return "---";
-    case "image":    return safeUrl(block.src, { allowDataImage: true }) || "";
+    case "image": {
+      const u = safeUrl(block.src, { allowDataImage: true }) || "";
+      const cap = (window.stripHtml ? window.stripHtml(block.caption||"") : (block.caption||"")).trim();
+      return cap ? `${u}\n${cap}` : u;
+    }
     case "bullets": {
       const list = (block.items||[]).filter(Boolean);
       const base = list.length ? Math.min(...list.map(i=>Math.max(0,i.level||0))) : 0;
@@ -565,6 +583,7 @@ function sanitizeBlockPayload(block) {
   if (typeof b.icon === "string") b.icon = stripHtml(b.icon).slice(0, 8);
   if (typeof b.src === "string") b.src = safeUrl(b.src, { allowDataImage: true });
   if (typeof b.alt === "string") b.alt = stripHtml(b.alt).slice(0, 300);
+  if (typeof b.caption === "string") b.caption = stripHtml(b.caption).slice(0, 500);
   if (Array.isArray(b.items)) {
     b.items = b.items.map((i) => ({
       ...i,
@@ -970,7 +989,7 @@ function setCaretOffset(el, offset) {
 // ====== EDITABLE TEXT ======
 // Single contentEditable with slash-command support and B/I/U via execCommand
 function EditableText({
-  value, onChange, placeholder, multiline = false, style, tag = "div",
+  value, onChange, placeholder, multiline = false, style, tag = "div", className = "",
   onSlashCommand, onEnter, onBackspaceEmpty, onBackspaceAtStart, onMarkdownShortcut, autoFocus = false,
   softBreakOnEnter = false, focusKey = 0, onPasteBlocks, onTab, onShiftTab, selectOnFocus = false,
   focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock, onDeleteAtEnd,
@@ -1422,7 +1441,7 @@ function EditableText({
       onFocus={handleFocus}
       onClick={handleClick}
       data-placeholder={placeholder || ""}
-      className="editable"
+      className={className ? `editable ${className}` : "editable"}
       style={{ whiteSpace:"pre-wrap", ...style }}
       spellCheck={false}
     />
@@ -1487,7 +1506,7 @@ const SLASH_COMMANDS = [
   { keys:["milestone","milestones"], label:"Milestones", icon:"🎯", make: () => ({ id: nid(), type:"milestones", items:[{ id: nid(), name:"", status:"pending" }] }) },
   { keys:["table","tbl"], label:"Table", icon:"▦", make: () => ({ id: nid(), type:"table", headers:["Col 1","Col 2","Col 3"], rows:[{ id: nid(), cells:["","",""] }] }) },
   { keys:["calendar","cal"], label:"Calendar", icon:"Cal", make: () => ({ id: nid(), type:"calendar", month:"" }) },
-  { keys:["image","img","picture","photo"], label:"Image from URL", icon:"🖼", make: () => ({ id: nid(), type:"image", src:"", alt:"" }) },
+  { keys:["image","img","picture","photo","upload"], label:"Image (upload or URL)", icon:"🖼", make: () => ({ id: nid(), type:"image", src:"", alt:"", caption:"" }) },
   { keys:["callout","quote"], label:"Callout", icon:"💡", make: () => ({ id: nid(), type:"callout", icon:"💡", text:"" }) },
   { keys:["divider","hr","line"], label:"Divider", icon:"—", make: () => ({ id: nid(), type:"divider" }) },
   {
@@ -3591,11 +3610,49 @@ function ContentShootingTableBlock({ block, updateBlock, onDeleteBlock, blockId,
 }
 
 // ====== IMAGE (external URL) ======
+// Read an image File and return a downscaled base64 data-URL so embedded images
+// don't bloat localStorage / the Firebase realtime DB. Long edge is capped at
+// MAX_EDGE; PNGs with transparency stay PNG, everything else becomes JPEG.
+const IMG_MAX_EDGE = 1600;
+const IMG_MAX_BYTES = 6 * 1024 * 1024; // refuse originals over ~6MB to avoid jank
+function fileToDownscaledDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !/^image\//i.test(file.type)) { reject(new Error("Not an image")); return; }
+    if (file.size > IMG_MAX_BYTES * 2) { reject(new Error("Image too large")); return; }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Read failed"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Decode failed"));
+      img.onload = () => {
+        try {
+          let { width: w, height: h } = img;
+          const scale = Math.min(1, IMG_MAX_EDGE / Math.max(w, h));
+          w = Math.max(1, Math.round(w * scale));
+          h = Math.max(1, Math.round(h * scale));
+          const canvas = document.createElement("canvas");
+          canvas.width = w; canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, w, h);
+          const isPng = /png/i.test(file.type);
+          const out = isPng ? canvas.toDataURL("image/png") : canvas.toDataURL("image/jpeg", 0.82);
+          resolve(out);
+        } catch (err) { reject(err); }
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function ImageBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, onDeleteBlock }) {
   const src = safeUrl(block.src, { allowDataImage: true });
   const [draft, setDraft] = useState(block.src || "");
   const [broken, setBroken] = useState(false);
   const [editing, setEditing] = useState(!src);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const fileRef = useRef(null);
   useEffect(() => { setBroken(false); }, [src]);
 
   const commit = () => {
@@ -3608,6 +3665,26 @@ function ImageBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     setEditing(false);
   };
 
+  const onPickFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+    setErr(""); setBusy(true);
+    try {
+      const dataUrl = await fileToDownscaledDataUrl(file);
+      const clean = safeUrl(dataUrl, { allowDataImage: true });
+      if (!clean) throw new Error("Unsupported image");
+      updateBlock({ ...block, src: clean });
+      setEditing(false);
+    } catch (e2) {
+      setErr(e2 && e2.message === "Image too large" ? "That image is too large." : "Couldn't load that image.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setCaption = (v) => updateBlock({ ...block, caption: v });
+
   return (
     <div className="block-wrap">
       <BlockHandle blockId={blockId} onDragBlockStart={onDragBlockStart} onDragBlockEnd={onDragBlockEnd} />
@@ -3617,7 +3694,7 @@ function ImageBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
           <span className="img-block-icon">🖼</span>
           <input
             className="img-block-input"
-            placeholder="Paste an image URL (https://…)"
+            placeholder="Paste an image URL (https://…) or upload"
             value={draft}
             autoFocus
             onChange={(e) => setDraft(e.target.value)}
@@ -3629,15 +3706,20 @@ function ImageBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
           <button className="img-block-btn" type="button" onClick={commit} disabled={!safeUrl(draft, { allowDataImage: true })}>
             {safeUrl(draft, { allowDataImage: true }) || !draft.trim() ? "Embed" : "Unsafe URL"}
           </button>
+          <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={onPickFile} />
+          <button className="img-block-upload" type="button" onClick={() => fileRef.current?.click()} disabled={busy}>
+            {busy ? "Uploading…" : "⬆ Upload"}
+          </button>
+          {err && <span className="img-block-err">{err}</span>}
         </div>
       ) : broken ? (
         <div className="img-block-prompt img-block-broken">
           <span className="img-block-icon">⚠️</span>
           <span style={{ flex: 1, fontSize: 13 }}>Image failed to load.</span>
-          <button className="img-block-btn" type="button" onClick={() => { setDraft(block.src || ""); setEditing(true); }}>Change URL</button>
+          <button className="img-block-btn" type="button" onClick={() => { setDraft(block.src || ""); setEditing(true); }}>Change</button>
         </div>
       ) : (
-        <div className="img-block">
+        <figure className="img-block">
           <img
             src={src}
             alt={(window.stripHtml ? window.stripHtml(block.alt || "") : (block.alt || "")) || "Image"}
@@ -3648,10 +3730,16 @@ function ImageBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
           <button
             className="img-block-edit"
             type="button"
-            title="Change image URL"
+            title="Change image"
             onClick={() => { setDraft(block.src || ""); setEditing(true); }}
           >✎</button>
-        </div>
+          <EditableText
+            className="img-block-caption"
+            value={block.caption || ""}
+            onChange={setCaption}
+            placeholder="Write a caption…"
+          />
+        </figure>
       )}
     </div>
   );

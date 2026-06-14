@@ -394,6 +394,55 @@
     overflow-y: auto;
     padding: 10px 6px;
   }
+  /* ── Home (Focus dashboard) prominent nav button ── */
+  .sidebar-home-btn {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: calc(100% - 8px);
+    margin: 0 4px 8px;
+    padding: 9px 11px;
+    border-radius: 9px;
+    border: 1px solid var(--accent-soft);
+    background: linear-gradient(135deg, var(--accent-soft), transparent 85%);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13.5px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+    transition: background .14s ease, border-color .14s ease, box-shadow .14s ease, transform .12s ease;
+  }
+  .sidebar-home-btn:hover {
+    background: linear-gradient(135deg, var(--accent-soft), var(--panel-hover));
+    border-color: var(--accent);
+    transform: translateY(-1px);
+  }
+  .sidebar-home-btn.active {
+    background: var(--panel-active);
+    border-color: var(--accent);
+    box-shadow: inset 3px 0 0 var(--accent), 0 0 0 1px var(--accent-soft);
+    color: var(--text-strong);
+  }
+  .sidebar-home-icon {
+    font-size: 16px;
+    line-height: 1;
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+  .sidebar-home-label { flex: 1; }
+  .sidebar-home-tag {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 5px;
+    background: var(--accent);
+    color: var(--bg);
+    opacity: 0.9;
+    flex-shrink: 0;
+  }
   .sidebar-item {
     display: flex;
     align-items: center;
@@ -1231,6 +1280,38 @@
   }
   .img-block-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
   .img-block-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .img-block-upload {
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 12.5px; font-weight: 700;
+    padding: 7px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .14s ease, opacity .14s ease;
+  }
+  .img-block-upload:hover:not(:disabled) { background: var(--accent); color: #fff; }
+  .img-block-upload:disabled { opacity: 0.6; cursor: default; }
+  .img-block-err { font-size: 12px; color: var(--kpi-red); white-space: nowrap; }
+  /* Image caption (figcaption) — muted, centered under the image. */
+  .img-block-caption {
+    display: block;
+    margin: 7px auto 0;
+    max-width: 100%;
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-muted);
+    font-style: italic;
+    line-height: 1.5;
+    outline: none;
+  }
+  .img-block-caption:empty::before {
+    content: attr(data-placeholder);
+    color: var(--text-faint, var(--text-muted));
+    opacity: 0.6;
+    font-style: italic;
+  }
 
   /* === BLOCK WRAP === */
   .block-wrap {
@@ -3231,26 +3312,43 @@
     --line-strong: rgba(140,150,160,0.3);
     --line-strong: color-mix(in srgb, var(--text) 22%, transparent);
 
+    /* Secondary hue — a soft indigo used sparingly for highlights (pinned /
+       active states / pin star) to add a hint of colour without competing
+       with the teal accent or the red/amber/green status colours. */
+    --fx-violet: #7c83f5;
+    --fx-violet-soft: rgba(124,131,245,0.15);
+    --fx-violet-soft: color-mix(in srgb, #7c83f5 18%, transparent);
+
     height: 100%;
     background: var(--bg);
     color: var(--text);
   }
+  /* Indigo reads a touch too light on a white background — deepen it. */
+  [data-theme="light"] .focus-home { --fx-violet: #5b61d6; }
   .focus-home .fx-shell { max-width: 1140px; margin: 0 auto; padding: 30px 30px 90px; }
 
   /* ── Hero (premium gradient card) ───────────────────────────────────────── */
   .focus-home .fx-hero {
     display: flex; align-items: center; justify-content: space-between; gap: 18px;
-    margin: 4px 0 20px; padding: 24px 26px; border-radius: 18px;
+    margin: 4px 0 22px; padding: 20px 22px; border-radius: 14px;
     background: var(--panel);
-    background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 18%, var(--panel)), var(--panel) 62%);
-    border: 1px solid var(--accent-soft);
-    box-shadow: 0 10px 40px rgba(0,0,0,0.18), 0 1px 0 rgba(255,255,255,0.02) inset;
+    /* faint single-direction accent tint — calm, not glowing */
+    background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 6%, var(--panel)), var(--panel) 55%);
+    border: 1px solid var(--line);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06);
   }
   .focus-home .fx-eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.22em; color: var(--text-muted); text-transform: uppercase; margin-bottom: 6px; }
   .focus-home .fx-eyebrow b { color: var(--accent); }
   .focus-home .fx-date { font-size: 28px; color: var(--text-strong); font-weight: 800; letter-spacing: -0.02em; }
   .focus-home .fx-sub { font-size: 13.5px; color: var(--text-muted); margin-top: 4px; }
   .focus-home .fx-sub-warn { color: var(--danger); font-weight: 700; }
+  /* Prominent at-a-glance counts under the date. */
+  .focus-home .fx-hero-counts { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 9px; }
+  .focus-home .fx-count-big { font-size: 14px; color: var(--text-muted); font-weight: 600; }
+  .focus-home .fx-count-big b { font-size: 19px; font-weight: 800; color: var(--text-strong); margin-right: 3px; font-variant-numeric: tabular-nums; }
+  .focus-home .fx-count-accent b { color: var(--accent); }
+  .focus-home .fx-count-warn b { color: var(--danger); }
+  .focus-home .fx-count-warn { color: var(--danger); }
   .focus-home .fx-hero-side { display: flex; align-items: center; gap: 12px; }
   .focus-home .fx-streak {
     font-size: 13px; font-weight: 800; padding: 6px 12px; border-radius: 99px; white-space: nowrap;
@@ -3261,17 +3359,17 @@
   .focus-home .fx-sync { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
   .focus-home .fx-sync-off { background: var(--text-faint); box-shadow: none; }
   .focus-home .fx-ring { position: relative; display: inline-flex; align-items: center; justify-content: center; }
-  .focus-home .fx-ring-arc { filter: drop-shadow(0 0 5px var(--accent)); }
+  .focus-home .fx-ring-arc { filter: none; }
   .focus-home .fx-ring-label { position: absolute; font-size: 9.5px; font-weight: 800; color: var(--text-strong); font-variant-numeric: tabular-nums; }
 
   /* ── Quick add ──────────────────────────────────────────────────────────── */
   .focus-home .fx-quickadd {
     display: flex; align-items: center; gap: 10px;
-    background: var(--panel); border: 1px solid var(--line-strong); border-radius: 13px;
-    padding: 4px 6px 4px 14px; margin-bottom: 24px;
+    background: var(--panel); border: 1px solid var(--line-strong); border-radius: 14px;
+    padding: 4px 6px 4px 14px; margin-bottom: 22px;
     transition: border-color .14s ease, box-shadow .14s ease;
   }
-  .focus-home .fx-quickadd:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .focus-home .fx-quickadd:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
   .focus-home .fx-quickadd-plus { color: var(--accent); font-weight: 700; font-size: 18px; }
   .focus-home .fx-quickadd input { flex: 1; background: none; border: none; outline: none; color: var(--text-strong); font-size: 14.5px; padding: 11px 0; }
   .focus-home .fx-quickadd input::placeholder { color: var(--text-faint); }
@@ -3286,53 +3384,68 @@
   .focus-home .fx-quickadd-go:not(:disabled):active { transform: scale(0.96); }
 
   /* ── Workspace cards ────────────────────────────────────────────────────── */
-  .focus-home .fx-ws { margin-bottom: 28px; }
+  .focus-home .fx-ws { margin-bottom: 22px; }
   .focus-home .fx-ws-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
   .focus-home .fx-ws-head h2 { font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text); font-weight: 700; margin: 0; }
   .focus-home .fx-ws-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
   .focus-home .fx-ws-card {
-    position: relative; display: flex; align-items: center; gap: 12px; text-align: left;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 13px;
+    display: flex; align-items: center; gap: 12px; text-align: left;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
     padding: 14px 16px; cursor: pointer; color: var(--text);
     transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
   }
-  .focus-home .fx-ws-card:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(0,0,0,0.26); border-color: var(--accent-soft); }
-  .focus-home .fx-ws-active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .focus-home .fx-ws-card:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0,0,0,0.12); border-color: var(--line-strong); }
+  .focus-home .fx-ws-active { border-color: var(--fx-violet); box-shadow: 0 0 0 1px var(--fx-violet) inset; }
+  .focus-home .fx-ws-active:hover { border-color: var(--fx-violet); }
   .focus-home .fx-ws-icon {
     width: 38px; height: 38px; min-width: 38px; border-radius: 10px;
     display: flex; align-items: center; justify-content: center;
     font-size: 17px; font-weight: 800; color: var(--accent);
     background: var(--accent-soft);
   }
-  .focus-home .fx-ws-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .focus-home .fx-ws-meta { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
   .focus-home .fx-ws-name { font-size: 14px; font-weight: 700; color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .focus-home .fx-ws-sub { font-size: 11.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  /* Inline trailing chip (not an absolute overlay) so a long name truncates with
+     an ellipsis and the badge always sits to its right — never overlapping. */
   .focus-home .fx-ws-badge {
-    position: absolute; top: 10px; right: 10px; font-size: 9px; font-weight: 800; letter-spacing: 0.06em;
-    text-transform: uppercase; color: var(--accent); background: var(--accent-soft);
-    padding: 2px 7px; border-radius: 99px;
+    flex-shrink: 0; align-self: center; font-size: 9px; font-weight: 800; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--fx-violet); background: var(--fx-violet-soft);
+    padding: 3px 8px; border-radius: 99px;
   }
 
   /* ── Layout grid ────────────────────────────────────────────────────────── */
   .focus-home .fx-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 28px; align-items: start; }
-  .focus-home .fx-side { display: flex; flex-direction: column; gap: 14px; position: sticky; top: 18px; }
+  .focus-home .fx-side { display: flex; flex-direction: column; gap: 12px; position: sticky; top: 18px; }
 
   /* ── Buckets ────────────────────────────────────────────────────────────── */
-  .focus-home .fx-bucket { margin-bottom: 26px; border-left: 3px solid transparent; padding-left: 15px; }
-  .focus-home .fx-bucket-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 9px; flex-wrap: wrap; }
-  .focus-home .fx-bucket-head h2 { font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text); font-weight: 700; margin: 0; display: flex; align-items: center; gap: 7px; }
-  .focus-home .fx-bucket-sub { font-size: 11.5px; color: var(--text-faint); }
-  .focus-home .fx-count {
-    font-size: 10.5px; font-weight: 800; background: var(--accent-soft); color: var(--accent);
-    border-radius: 99px; padding: 1.5px 8px; font-variant-numeric: tabular-nums; transition: background .2s ease;
+  .focus-home .fx-bucket { margin-bottom: 26px; }
+  .focus-home .fx-bucket-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 11px; flex-wrap: wrap; }
+  /* Bigger, clearly readable section headers (was a tiny 12px). */
+  .focus-home .fx-bucket-head h2 { font-size: 14.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-strong); font-weight: 800; margin: 0; display: flex; align-items: center; gap: 9px; }
+  /* Calm status cue: a small coloured dot before the heading. */
+  .focus-home .fx-bucket-head h2::before {
+    content: ""; width: 8px; height: 8px; min-width: 8px; border-radius: 50%;
+    background: var(--text-faint);
   }
-  .focus-home .fx-b-pinned  { border-left-color: var(--accent); }
-  .focus-home .fx-b-overdue { border-left-color: var(--danger); }
-  .focus-home .fx-b-overdue h2 { color: var(--danger); text-shadow: 0 0 14px color-mix(in srgb, var(--danger) 50%, transparent); }
-  .focus-home .fx-b-now     { border-left-color: var(--accent); }
-  .focus-home .fx-b-now h2  { color: var(--accent); text-shadow: 0 0 14px color-mix(in srgb, var(--accent) 45%, transparent); }
-  .focus-home .fx-b-waiting { opacity: 0.85; }
-  .focus-home .fx-b-later   { opacity: 0.85; }
+  .focus-home .fx-bucket-sub { font-size: 12px; color: var(--text-faint); }
+  .focus-home .fx-count {
+    font-size: 11px; font-weight: 800; background: var(--accent-soft); color: var(--accent);
+    border-radius: 99px; padding: 2px 9px; font-variant-numeric: tabular-nums; transition: background .2s ease;
+  }
+  /* Today's Focus — the primary block: large title + extra breathing room. */
+  .focus-home .fx-focus-block { margin-bottom: 30px; }
+  .focus-home .fx-focus-title { font-size: 22px !important; letter-spacing: -0.01em !important; text-transform: none !important; font-weight: 800; color: var(--fx-violet) !important; gap: 11px !important; }
+  .focus-home .fx-focus-title::before { width: 10px !important; height: 10px !important; min-width: 10px !important; background: var(--fx-violet) !important; }
+  .focus-home .fx-b-pinned  .fx-count { background: var(--fx-violet-soft); color: var(--fx-violet); }
+  .focus-home .fx-b-overdue  .fx-bucket-head h2 { color: var(--danger); }
+  .focus-home .fx-b-overdue  .fx-bucket-head h2::before { background: var(--danger); }
+  .focus-home .fx-b-overdue  .fx-count { background: var(--danger-soft); color: var(--danger); }
+  .focus-home .fx-b-today    .fx-bucket-head h2 { color: var(--accent); }
+  .focus-home .fx-b-today    .fx-bucket-head h2::before { background: var(--accent); }
+  .focus-home .fx-b-upcoming .fx-bucket-head h2::before { background: var(--fx-violet); }
+  .focus-home .fx-b-nodate   { opacity: 0.92; }
+  .focus-home .fx-b-hold     { opacity: 0.9; }
 
   /* ── Task rows ──────────────────────────────────────────────────────────── */
   .focus-home .fx-task {
@@ -3367,7 +3480,7 @@
   .focus-home .fx-mini { background: none; border: none; color: var(--text-faint); font-size: 13px; padding: 3px 6px; border-radius: 6px; line-height: 1; cursor: pointer; transition: background .12s ease, color .12s ease; }
   .focus-home .fx-mini:hover { background: var(--panel); color: var(--text); }
   .focus-home .fx-mini-del:hover { color: var(--danger); }
-  .focus-home .fx-pin-on { color: var(--amber); }
+  .focus-home .fx-pin-on { color: var(--fx-violet); }
 
   /* ── Pills (vivid) ──────────────────────────────────────────────────────── */
   .focus-home .fx-pill {
@@ -3417,9 +3530,9 @@
   .focus-home .fx-cal-dots { position: absolute; bottom: 2px; left: 0; right: 0; display: flex; justify-content: center; gap: 2px; }
   .focus-home .fx-cal-dots .fx-dot { width: 4px; height: 4px; min-width: 4px; }
 
-  .focus-home .fx-week { display: flex; align-items: baseline; gap: 8px; }
-  .focus-home .fx-week-num { font-size: 26px; font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; }
-  .focus-home .fx-week-label { font-size: 12px; color: var(--text-muted); }
+  /* Week-completed stat folded into the calendar card footer. */
+  .focus-home .fx-cal-foot { display: flex; align-items: baseline; gap: 7px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--text-muted); }
+  .focus-home .fx-cal-foot-num { font-size: 18px; font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; }
 
   .focus-home .fx-empty { font-size: 12.5px; color: var(--text-faint); padding: 10px 2px; line-height: 1.5; }
 
@@ -3432,12 +3545,29 @@
   @media (max-width: 980px) {
     .focus-home .fx-grid { grid-template-columns: 1fr; }
     .focus-home .fx-side { position: static; }
+    .focus-home .fx-shell { padding: 26px 22px 80px; }
   }
-  @media (max-width: 560px) {
-    .focus-home .fx-shell { padding: 20px 16px 80px; }
-    .focus-home .fx-hero { flex-direction: column; align-items: flex-start; gap: 14px; }
+  @media (max-width: 640px) {
+    /* Phone: single column, generous tap targets, no hover-only affordances. */
+    .focus-home .fx-shell { padding: 18px 14px 96px; }
+    .focus-home .fx-hero { flex-direction: column; align-items: flex-start; gap: 14px; padding: 18px; }
+    .focus-home .fx-hero-side { align-self: stretch; justify-content: flex-start; }
     .focus-home .fx-date { font-size: 22px; }
+    .focus-home .fx-focus-title { font-size: 19px !important; }
+    .focus-home .fx-ws-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
+    .focus-home .fx-quickadd { flex-wrap: wrap; padding: 8px 10px; }
+    .focus-home .fx-quickadd input { flex: 1 1 100%; padding: 8px 0; }
+    .focus-home .fx-quickadd-chips { order: 2; }
+    .focus-home .fx-quickadd-go { order: 3; margin-left: auto; }
+    /* Actions always visible (no hover on touch) + bigger hit areas. */
     .focus-home .fx-task-actions { opacity: 1; }
+    .focus-home .fx-mini { padding: 6px 9px; font-size: 15px; }
+    .focus-home .fx-task { padding: 11px 6px; }
+    .focus-home .fx-check { width: 26px; height: 26px; min-width: 26px; }
+    .focus-home .fx-task-src { max-width: 60vw; }
+  }
+  @media (max-width: 400px) {
+    .focus-home .fx-ws-grid { grid-template-columns: 1fr; }
   }
 
 </style>
@@ -3477,9 +3607,9 @@
     return null;
   });
 </script>
-<script type="text/babel" src="workspace-blocks.jsx?v=20260613-home1"></script>
-<script type="text/babel" src="focus-home.jsx?v=20260613-home1"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260613-home1"></script>
+<script type="text/babel" src="workspace-blocks.jsx?v=20260614-fxv2"></script>
+<script type="text/babel" src="focus-home.jsx?v=20260614-fxv2"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260614-fxv2"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

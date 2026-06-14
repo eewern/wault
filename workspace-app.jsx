@@ -821,24 +821,6 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
             </button>
           )}
           <button
-            type="button"
-            onClick={() => onOpenHome?.()}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px',
-              borderRadius: 8, border: 'none', width: '100%', textAlign: 'left',
-              background: homeActive ? 'var(--panel-active)' : 'none',
-              color: homeActive ? 'var(--accent)' : 'var(--text-muted)',
-              fontSize: 13, fontWeight: homeActive ? 600 : 500, cursor: 'pointer',
-              fontFamily: 'inherit',
-              transition: 'background 0.15s ease, color 0.15s ease',
-            }}
-            onMouseEnter={(e) => { if (!homeActive) { e.currentTarget.style.background = 'var(--panel-hover)'; e.currentTarget.style.color = 'var(--text)'; } }}
-            onMouseLeave={(e) => { if (!homeActive) { e.currentTarget.style.background = ''; e.currentTarget.style.color = 'var(--text-muted)'; } }}
-            data-tooltip="Home — your Focus dashboard and workspaces"
-          >
-            <span style={{ fontSize: 15 }}>◎</span> Home
-          </button>
-          <button
             onClick={() => { setFeedbackMsg(''); setSettingsTab('data'); setShowSettingsModal(true); }}
             data-tooltip="Settings"
             className="account-btn is-icon is-settings has-tip tip-account"
@@ -2786,6 +2768,20 @@ function Sidebar({
           // bottom drop zone for root
           e.preventDefault();
         }}>
+        {/* ── Home (Focus dashboard) — prominent top nav entry ── */}
+        <button
+          type="button"
+          className={"sidebar-home-btn has-tip" + (homeActive ? " active" : "")}
+          onClick={() => { onOpenHome?.(); onMobileClose?.(); }}
+          title="Home — your Focus dashboard and workspaces"
+          aria-label="Home — your Focus dashboard and workspaces"
+          aria-current={homeActive ? "page" : undefined}
+          data-tooltip="Home — your Focus dashboard and workspaces"
+        >
+          <span className="sidebar-home-icon">◎</span>
+          <span className="sidebar-home-label">Home</span>
+          <span className="sidebar-home-tag">Focus</span>
+        </button>
         {/* ── Pinned pages ── */}
         {(data.pinnedPages || []).length > 0 && (() => {
           const pinnedPgs = (data.pinnedPages || []).map(id => data.pages[id]).filter(Boolean);
@@ -3713,9 +3709,38 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       try { sel.removeAllRanges(); } catch (_) {}
     };
 
+    // ── Backspace / Delete across MULTIPLE editables (list rows or blocks) ──
+    // Each list item is its own contenteditable, so a native Backspace only ever
+    // deletes the focused row even when several rows are highlighted. When the
+    // selection spans more than one editable we reuse the exact cut-path deletion
+    // so "what you highlight is what gets deleted". Capture phase + stopPropagation
+    // so the per-row EditableText handlers never run the single-row native delete.
+    // Single-editable selections fall through untouched to native handling.
+    const onRangeDeleteKey = (e) => {
+      if (e.key !== "Backspace" && e.key !== "Delete") return;
+      const pg = pageRef.current;
+      if (!pg || pg.system) return;
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+      const range = sel.getRangeAt(0);
+      if (!pageBody.contains(range.commonAncestorContainer)) return;
+      const edOf = (node) => (node && (node.nodeType === 1 ? node : node.parentElement))?.closest?.(".editable");
+      const startEd = edOf(range.startContainer);
+      const endEd = edOf(range.endContainer);
+      if (startEd && startEd === endEd) return; // one editable → native delete is correct
+      const touched = touchedBlocksOf(range);
+      if (!touched.length) return;
+      e.preventDefault();
+      e.stopPropagation();
+      applyRangeDeletion(range, touched);
+      try { sel.removeAllRanges(); } catch (_) {}
+    };
+
+    pageBody.addEventListener("keydown", onRangeDeleteKey, true);
     pageBody.addEventListener("copy", onCopy);
     pageBody.addEventListener("cut", onCut);
     return () => {
+      pageBody.removeEventListener("keydown", onRangeDeleteKey, true);
       pageBody.removeEventListener("copy", onCopy);
       pageBody.removeEventListener("cut", onCut);
     };
@@ -4432,8 +4457,11 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
               return;
             }
             if (e.key !== "Backspace" && e.key !== "Delete") return;
-            const ids = multiSelectedIds.size ? [...multiSelectedIds] : selectedBlockIds();
-            if (ids.length < 2) return;
+            // Only an EXPLICIT block-marquee/handle selection deletes whole blocks.
+            // A plain text highlight (even one spanning blocks/rows) is handled by
+            // the range-aware deleter so exactly the highlighted span is removed.
+            const ids = multiSelectedIds.size ? [...multiSelectedIds] : [];
+            if (ids.length < 1) return;
             e.preventDefault();
             e.stopPropagation();
             deleteSelectedBlocks(ids);

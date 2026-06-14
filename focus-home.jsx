@@ -82,6 +82,8 @@ function fxStripHtml(html) {
 
 const LS_TASKS = "wault_focus_tasks_v2";
 const LS_MIGRATED = "wault_focus_migrated_v2";
+const LS_SEEDED = "wault_focus_seeded_v1";   // sourceIds already auto-pulled (don't resurrect deleted ones)
+const LS_PINSEED = "wault_focus_pinseed_v1"; // { date, userUnpinned:[] } for auto-fill of Today's Focus
 const LS_DAYS = "wault_focus_days";       // legacy (3-priority ritual) — read-only for migration
 const LS_LATER = "wault_focus_later";     // legacy — migrated into tasks
 const wsDataKey = (id) => `workspace_v4_data_${id}`;
@@ -123,15 +125,14 @@ function makeTask(patch = {}) {
 
 const PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 
-// The whole point: the app decides where a task belongs.
+// The whole point: the app decides where a task belongs — purely by its date.
 function bucketOf(task, today) {
   if (task.status === "done") return "done";
-  if (task.status === "waiting") return "waiting";
+  if (task.status === "waiting") return "waiting";       // shown as "On Hold"
   if (task.dueDate && task.dueDate < today) return "overdue";
-  if (task.dueDate === today || task.status === "in_progress") return "now";
-  if (task.dueDate && task.dueDate <= addDays(today, 7)) return "next";
-  if (!task.dueDate && task.priority === "high") return "next";
-  return "later";
+  if (task.dueDate === today) return "today";            // Due Today
+  if (task.dueDate && task.dueDate > today) return "upcoming";
+  return "nodate";                                       // no due date
 }
 
 function taskOrder(a, b) {
@@ -430,11 +431,8 @@ function TaskRow({ task, today, onPatch, onDelete, onPin, onOpenSource, big = fa
           <React.Fragment>
             <button className="fx-mini" data-tooltip="Snooze — push the due date to tomorrow" onClick={() => onPatch(task.id, { dueDate: addDays(today, 1), status: task.status === "waiting" ? "todo" : task.status })}>⤳</button>
             {task.status !== "waiting"
-              ? <button className="fx-mini" data-tooltip="Move to Waiting — blocked on someone else" onClick={() => onPatch(task.id, { status: "waiting" })}>⏳</button>
-              : <button className="fx-mini" data-tooltip="Unblock — move back to To-do" onClick={() => onPatch(task.id, { status: "todo" })}>▶</button>}
-            {task.status !== "in_progress"
-              ? <button className="fx-mini" data-tooltip="Start working — moves it into Now" onClick={() => onPatch(task.id, { status: "in_progress" })}>◐</button>
-              : <button className="fx-mini" data-tooltip="Pause — stop working on this for now" onClick={() => onPatch(task.id, { status: "todo" })}>∥</button>}
+              ? <button className="fx-mini" data-tooltip="Put on hold — paused or blocked" onClick={() => onPatch(task.id, { status: "waiting" })}>⏳</button>
+              : <button className="fx-mini" data-tooltip="Take off hold — move back to your list" onClick={() => onPatch(task.id, { status: "todo" })}>▶</button>}
             <button
               className={`fx-mini${task.pinnedDate === today ? " fx-pin-on" : ""}`}
               data-tooltip={task.pinnedDate === today ? "Unpin from Today's focus" : "Pin to Today's focus — your top 3 for the day"}
@@ -449,18 +447,18 @@ function TaskRow({ task, today, onPatch, onDelete, onPin, onOpenSource, big = fa
 }
 
 const BUCKET_META = {
-  overdue: { title: "Overdue",  cls: "fx-b-overdue", sub: "Past due — clear these or move the date.", empty: "Nothing overdue. Clean slate." },
-  now:     { title: "Now",      cls: "fx-b-now",     sub: "Due today or in progress.", empty: "Nothing due today. Pin something or pull from Next." },
-  next:    { title: "Next",     cls: "fx-b-next",    sub: "Coming up within a week.", empty: "Nothing queued for this week yet." },
-  later:   { title: "Later",    cls: "fx-b-later",   sub: "Parked. Out of your head, not forgotten.", empty: "Empty — park future things here with no date." },
-  waiting: { title: "Waiting",  cls: "fx-b-waiting", sub: "Blocked on someone or something else.", empty: "Not waiting on anyone." },
+  overdue:  { title: "Overdue",   cls: "fx-b-overdue",  sub: "Past due — clear these or move the date.", empty: "Nothing overdue. Clean slate." },
+  today:    { title: "Due Today", cls: "fx-b-today",    sub: "Due today, based on the date.", empty: "Nothing due today. Pin something or pull one in." },
+  upcoming: { title: "Upcoming",  cls: "fx-b-upcoming", sub: "Coming up — next 7 days and beyond.", empty: "Nothing scheduled ahead yet." },
+  nodate:   { title: "No date",   cls: "fx-b-nodate",   sub: "Tasks without a due date.", empty: "Everything here has a date." },
+  waiting:  { title: "On Hold",   cls: "fx-b-hold",     sub: "Paused or blocked on someone else.", empty: "Nothing on hold." },
 };
 
 function Bucket({ id, tasks, today, onPatch, onDelete, onPin, onOpenSource }) {
   const meta = BUCKET_META[id];
-  // Don't render big empty boxes for the quiet buckets — only Now keeps a
+  // Don't render big empty boxes for the quiet buckets — only Due Today keeps a
   // guiding empty state, the rest collapse to nothing when empty.
-  if (!tasks.length && id !== "now") return null;
+  if (!tasks.length && id !== "today") return null;
   return (
     <section className={`fx-bucket ${meta.cls} fx-fade`}>
       <div className="fx-bucket-head">
@@ -493,7 +491,7 @@ function DoneSection({ tasks, today, onPatch, onDelete, onPin, onOpenSource }) {
   );
 }
 
-function MiniCalendar({ tasks, events, today }) {
+function MiniCalendar({ tasks, events, today, weekDone }) {
   const [monthKey, setMonthKey] = useState(today.slice(0, 7));
   useEffect(() => { setMonthKey(today.slice(0, 7)); }, [today]);
   const [y, m] = monthKey.split("-").map(Number);
@@ -543,6 +541,12 @@ function MiniCalendar({ tasks, events, today }) {
           );
         })}
       </div>
+      {typeof weekDone === "number" && (
+        <div className="fx-cal-foot">
+          <span className="fx-cal-foot-num">{weekDone}</span>
+          <span>task{weekDone === 1 ? "" : "s"} done this week</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -829,6 +833,20 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
     }));
   }, [commitTask]);
 
+  // ── Auto-pull: materialise the ACTIVE workspace's open checklist items as Focus
+  // tasks so they land in the right date bucket automatically (no manual import).
+  // Deduped by sourceId; a persisted "seeded" set means deleting a pulled task
+  // won't resurrect it on the next scan.
+  useEffect(() => {
+    if (!activeWorkspaceId || !activeSuggestions.length) return;
+    const seeded = new Set(readJson(LS_SEEDED, []) || []);
+    const have = new Set(Object.values(tasksRef.current).map((t) => t && t.sourceId).filter(Boolean));
+    const toAdd = activeSuggestions.filter((s) => s.sourceId && !have.has(s.sourceId) && !seeded.has(s.sourceId));
+    if (!toAdd.length) return;
+    toAdd.forEach((s) => { importSuggestion(s); seeded.add(s.sourceId); });
+    writeJson(LS_SEEDED, [...seeded]);
+  }, [activeSuggestions, activeWorkspaceId, importSuggestion]);
+
   const pinTask = useCallback((id) => {
     setTasks((prev) => {
       const cur = prev[id];
@@ -836,6 +854,14 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
       const pinnedNow = Object.values(prev).filter((t) => t.pinnedDate === todayKey() && t.status !== "done");
       const isPinned = cur.pinnedDate === todayKey();
       if (!isPinned && pinnedNow.length >= 3) return prev; // Top 3 means three.
+      // A manual UNPIN today is remembered so the auto-fill effect won't re-add it.
+      if (isPinned) {
+        const seed = readJson(LS_PINSEED, null);
+        const day = todayKey();
+        const base = (seed && seed.date === day) ? seed : { date: day, userUnpinned: [] };
+        if (!base.userUnpinned.includes(id)) base.userUnpinned.push(id);
+        writeJson(LS_PINSEED, base);
+      }
       const updated = stamped({ ...cur, pinnedDate: isPinned ? "" : todayKey() });
       const next = { ...prev, [id]: updated };
       writeJson(LS_TASKS, next);
@@ -921,7 +947,7 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
   // ── Derived views ──────────────────────────────────────────────────────────
   const all = Object.values(tasks).filter((t) => t && t.title);
   const buckets = useMemo(() => {
-    const b = { overdue: [], now: [], next: [], later: [], waiting: [], done: [] };
+    const b = { overdue: [], today: [], upcoming: [], nodate: [], waiting: [], done: [] };
     all.forEach((t) => b[bucketOf(t, today)]?.push(t));
     Object.keys(b).forEach((k) => b[k].sort(taskOrder));
     b.overdue.sort((a, c) => (a.dueDate || "").localeCompare(c.dueDate || ""));
@@ -933,14 +959,28 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
 
   const pinned = all.filter((t) => t.pinnedDate === today && t.status !== "done").sort(taskOrder);
   const doneToday = all.filter((t) => (t.completedAt || "").slice(0, 10) === today);
-  const activeToday = buckets.overdue.length + buckets.now.length + pinned.filter((t) => bucketOf(t, today) !== "now" && bucketOf(t, today) !== "overdue").length;
-  const dueTodayCount = buckets.now.filter((t) => t.dueDate === today).length;
+  const activeToday = buckets.overdue.length + buckets.today.length;
+  const dueTodayCount = buckets.today.length;
   const streak = useMemo(() => computeStreak(tasks), [tasks]);
   const completedThisWeek = all.filter((t) => (t.completedAt || "").slice(0, 10) >= addDays(today, -6)).length;
   const existingSourceIds = useMemo(() => new Set(all.map((t) => t.sourceId).filter(Boolean)), [tasks]);
   // Tasks already pinned shouldn't repeat inside the buckets below.
   const pinnedIds = new Set(pinned.map((t) => t.id));
   const visible = (list) => list.filter((t) => !pinnedIds.has(t.id));
+
+  // ── Auto-fill Today's Focus: top up EMPTY pin slots (up to 3) with the most
+  // urgent tasks. Never overrides your own pins and never re-adds something you
+  // unpinned today. Pure fill-empty-only behaviour.
+  useEffect(() => {
+    if (pinned.length >= 3) return;
+    const seed = readJson(LS_PINSEED, null);
+    const unpinned = new Set(seed && seed.date === today ? (seed.userUnpinned || []) : []);
+    const pinnedSet = new Set(pinned.map((t) => t.id));
+    const candidates = [...buckets.overdue, ...buckets.today, ...buckets.upcoming, ...buckets.nodate]
+      .filter((t) => t && t.status !== "done" && !pinnedSet.has(t.id) && !unpinned.has(t.id));
+    candidates.slice(0, 3 - pinned.length).forEach((t) => pinTask(t.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buckets, pinned.length, today, pinTask]);
 
   return (
     <main className="page-main focus-home" style={{ gridColumn: "2 / -1", overflowY: "auto" }}>
@@ -949,10 +989,15 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
           <div>
             <div className="fx-eyebrow">WAULT <b>HOME</b></div>
             <div className="fx-date">{prettyDate(today)}</div>
-            <div className="fx-sub">
-              {buckets.overdue.length > 0 && <span className="fx-sub-warn">{buckets.overdue.length} overdue</span>}
-              {buckets.overdue.length > 0 && " · "}
-              {dueTodayCount > 0 ? `${dueTodayCount} due today` : "nothing due today"}
+            <div className="fx-hero-counts">
+              <span className={`fx-count-big${dueTodayCount > 0 ? " fx-count-accent" : ""}`}>
+                <b>{dueTodayCount}</b> due today
+              </span>
+              {buckets.overdue.length > 0 && (
+                <span className="fx-count-big fx-count-warn">
+                  <b>{buckets.overdue.length}</b> overdue
+                </span>
+              )}
             </div>
           </div>
           <div className="fx-hero-side">
@@ -962,16 +1007,16 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
           </div>
         </div>
 
-        <QuickAdd onAdd={addTask} />
-
         <WorkspaceCards workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} data={data} onOpen={openWorkspace} />
+
+        <QuickAdd onAdd={addTask} />
 
         <div className="fx-grid">
           <div className="fx-main">
-            <section className="fx-bucket fx-b-pinned fx-fade">
+            <section className="fx-bucket fx-b-pinned fx-focus-block fx-fade">
               <div className="fx-bucket-head">
-                <h2>Today's focus {pinned.length > 0 && <span className="fx-count">{pinned.length}/3</span>}</h2>
-                <span className="fx-bucket-sub">Pin up to three with ☆ — if you do nothing else, do these.</span>
+                <h2 className="fx-focus-title">Today's Focus {pinned.length > 0 && <span className="fx-count">{pinned.length}/3</span>}</h2>
+                <span className="fx-bucket-sub">Your top three for the day — auto-filled, pin your own with ☆.</span>
               </div>
               {pinned.length === 0
                 ? <div className="fx-empty">Nothing pinned yet. Hover a task and hit ☆ to make it today's focus.</div>
@@ -979,21 +1024,15 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
                     <TaskRow key={t.id} task={t} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} big />
                   ))}
             </section>
-            <Bucket id="overdue" tasks={visible(buckets.overdue)} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
-            <Bucket id="now"     tasks={visible(buckets.now)}     today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
-            <Bucket id="next"    tasks={visible(buckets.next)}    today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
-            <Bucket id="waiting" tasks={visible(buckets.waiting)} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
-            <Bucket id="later"   tasks={visible(buckets.later)}   today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
+            <Bucket id="overdue"  tasks={visible(buckets.overdue)}  today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
+            <Bucket id="today"    tasks={visible(buckets.today)}    today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
+            <Bucket id="upcoming" tasks={visible(buckets.upcoming)} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
+            <Bucket id="nodate"   tasks={visible(buckets.nodate)}   today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
+            <Bucket id="waiting"  tasks={visible(buckets.waiting)}  today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
             <DoneSection tasks={buckets.done} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
           </div>
           <aside className="fx-side">
-            <MiniCalendar tasks={tasks} events={events} today={today} />
-            <Upcoming tasks={tasks} events={events} today={today} />
-            <WorkspacePull suggestions={suggestions} existingSourceIds={existingSourceIds} onImport={importSuggestion} />
-            <div className="fx-card fx-week">
-              <span className="fx-week-num">{completedThisWeek}</span>
-              <span className="fx-week-label">task{completedThisWeek === 1 ? "" : "s"} completed this week</span>
-            </div>
+            <MiniCalendar tasks={tasks} events={events} today={today} weekDone={completedThisWeek} />
           </aside>
         </div>
       </div>
