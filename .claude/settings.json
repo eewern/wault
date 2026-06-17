@@ -2,7 +2,7 @@
   "mcpServers": {
     "wault": {
       "command": "node",
-      "args": ["/Users/eewern/Desktop/Claude project /Notion design/wernotion-mcp.mjs"],
+      "args": ["/Users/eewern/Desktop/WAULT v2/wault-mcp.mjs"],
       "env": {
         "WERNOTION_API_URL": "http://127.0.0.1:3334",
         "WERNOTION_API_TOKEN": "wn_dW4vdt_3567a8b9838f50137c0bc016e8fc5f17"
