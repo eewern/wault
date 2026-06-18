@@ -1,0 +1,15 @@
+{
+  "name": "wault",
+  "version": "2.0.0",
+  "type": "module",
+  "description": "WAULT — workspace app API + MCP server",
+  "scripts": {
+    "start":     "node wault-mcp-http.mjs",
+    "start:api": "node workspace-api-server.mjs",
+    "start:mcp": "node wault-mcp-http.mjs",
+    "start:mcp:local": "node wault-mcp.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

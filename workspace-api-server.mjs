@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || process.env.WORKSPACE_API_PORT || 3334);
-const HOST = process.env.WORKSPACE_API_HOST || "127.0.0.1";
+const HOST = process.env.WORKSPACE_API_HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
 const STORE_PATH = resolve(process.env.WORKSPACE_API_STORE || `${__dirname}/workspace-api-store.json`);
 const API_TOKEN = process.env.WORKSPACE_API_TOKEN || "";
 
