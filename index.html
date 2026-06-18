@@ -2698,11 +2698,8 @@
     .app.toc-collapsed { grid-template-columns: 240px 1fr; }
     .toc { display: none; }
   }
-  @media (max-width: 720px) {
-    .app { grid-template-columns: 1fr; }
-    .sidebar { display: none; }
-    .page-container { padding: 32px 20px 100px; }
-  }
+  /* Phone layout (single column + off-canvas sidebar drawer) is handled by the
+     consolidated ≤768px block further down — see "MOBILE RESPONSIVE". */
 
   /* selection */
   ::selection {
@@ -3221,8 +3218,12 @@
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
     }
+    aside.sidebar { display: flex; }
     .app.mobile-sidebar-open aside.sidebar { transform: translateX(0); }
     .app.mobile-sidebar-open .mobile-sidebar-overlay { display: block; }
+    /* The fixed hamburger sits at top-left; when the drawer is open it would
+       overlap the workspace switcher, so hide it (tap the overlay to close). */
+    .app.mobile-sidebar-open .mobile-menu-btn { display: none; }
 
     /* ── TOC: hidden on mobile ── */
     .toc, .app.toc-collapsed .toc { display: none !important; }
@@ -3250,6 +3251,12 @@
     /* ── Tables: horizontal scroll ── */
     .tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     table { min-width: 320px; }
+
+    /* ── Overflow safety: let flex children shrink so long content wraps
+       instead of pushing the page sideways. ── */
+    .page-container, .callout, .check-row { min-width: 0; }
+    .callout > *, .check-row > * { min-width: 0; }
+    .page-container img, .page-container pre, .page-container video { max-width: 100%; }
 
     /* ── Kanban: single-column scroll ── */
     .milestone-kanban { grid-template-columns: 1fr; gap: 8px; }
@@ -3279,6 +3286,18 @@
     /* ── Auth gate ── */
     .auth-gate { padding: 16px; }
     .auth-card { padding: 36px 24px !important; }
+
+    /* ── Modals: full-bleed, scrollable body, never wider than the screen ── */
+    .team-modal-card,
+    .template-modal,
+    .cal-event-modal,
+    .page-icon-popover,
+    .category-popover-card { width: min(96vw, 480px); max-width: calc(100vw - 20px); }
+    .team-modal-card, .template-modal, .cal-event-modal { max-height: 88dvh; overflow-y: auto; }
+    /* Floating popovers anchored by JS can sit near an edge — keep them on-screen. */
+    .page-icon-popover, .sidebar-ctx-menu { max-width: calc(100vw - 20px); }
+    /* Stack any 2–3 column grids inside modals so fields don't squish. */
+    .sync-actions { grid-template-columns: 1fr; }
   }
 
   @media (max-width: 480px) {
@@ -3570,6 +3589,34 @@
     .focus-home .fx-ws-grid { grid-template-columns: 1fr; }
   }
 
+  /* Focus/Home view: clear the fixed hamburger (top-left) on phone/tablet.
+     Placed after the Focus breakpoints above so it wins over their fx-shell
+     padding shorthands. Matches the ≤768px range where the hamburger shows. */
+  @media (max-width: 768px) {
+    .focus-home .fx-shell { padding-top: 64px; }
+  }
+
+  /* ── Touch devices: reveal hover-only affordances ──────────────────────────
+     Controls that fade in on :hover are invisible on touch, where there is no
+     hover. Show them whenever the primary pointer can't hover (phones/tablets),
+     independent of viewport width. */
+  @media (hover: none) {
+    .sidebar-item .sidebar-actions { opacity: 1; }
+    .img-block .img-block-edit { opacity: 1; }
+    .block-wrap .block-handle { opacity: 0.35; }
+    .focus-home .fx-task-actions { opacity: 1; }
+  }
+
+  /* ── Comfortable tap targets on phones for small chrome buttons ─────────── */
+  @media (max-width: 768px) {
+    .sidebar-action-btn,
+    .workspace-create-btn,
+    .workspace-edit-btn,
+    .workspace-delete-btn,
+    .workspace-tip-wrap > button { min-width: 30px; min-height: 30px; }
+    .img-block-err { white-space: normal; }
+  }
+
 </style>
 <script>
   // Apply saved theme BEFORE first paint so there's no flash of the wrong theme.
@@ -3607,9 +3654,9 @@
     return null;
   });
 </script>
-<script type="text/babel" src="workspace-blocks.jsx?v=20260617-babel7fix"></script>
-<script type="text/babel" src="focus-home.jsx?v=20260617-babel7fix"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260617-babel7fix"></script>
+<script type="text/babel" src="workspace-blocks.jsx?v=20260618-mobile1"></script>
+<script type="text/babel" src="focus-home.jsx?v=20260618-mobile1"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260618-mobile1"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

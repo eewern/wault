@@ -2386,6 +2386,18 @@ function App() {
   return (
     <div className={`app ${tocCollapsed ? "toc-collapsed" : ""} ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`}>
       {mobileSidebarOpen && <div className="mobile-sidebar-overlay" onClick={() => setMobileSidebarOpen(false)} />}
+      {/* App-level hamburger: present on every view (editor, Focus home, task index)
+          so the sidebar drawer is always reachable on mobile. */}
+      <button
+        className="mobile-menu-btn"
+        type="button"
+        aria-label="Open navigation"
+        onClick={() => setMobileSidebarOpen(true)}
+      >
+        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+          <path d="M3 5h14M3 10h14M3 15h14"/>
+        </svg>
+      </button>
       <Sidebar
         onMobileClose={() => setMobileSidebarOpen(false)}
         data={data}
@@ -4364,16 +4376,6 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
 
   return (
     <main className="page-main">
-      <button
-        className="mobile-menu-btn"
-        type="button"
-        aria-label="Open navigation"
-        onClick={() => window.dispatchEvent(new Event("wault-sidebar-toggle"))}
-      >
-        <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-          <path d="M3 5h14M3 10h14M3 15h14"/>
-        </svg>
-      </button>
       <div className="page-container" key={page.id}>
         <div className="page-header">
           <PageIconPicker
