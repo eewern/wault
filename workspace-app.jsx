@@ -3423,7 +3423,19 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     clearCellHighlight();
   };
 
-  // Intercept copy so pasted content preserves block structure (headings stay headings, etc.)
+  // Intercept copy/cut/range-delete so the clipboard + deletions preserve block
+  // structure (headings stay headings, nested list items keep their nesting, etc.).
+  //
+  // ⚠️ REGRESSION GUARD — DO NOT change the dependency array below to []. ⚠️
+  // `.page-container` is keyed by `page.id` (see render: `key={page.id}`), so its
+  // child `.page-body` is a BRAND-NEW DOM node every time you open a different page.
+  // These three listeners (copy/cut/keydown) are the only ones in this file bound
+  // directly to the captured `pageBody` node. With [] deps the effect runs once and
+  // stays bound to the FIRST page's body — after you navigate to any other page the
+  // listeners are orphaned on a detached node and copy/cut/multi-row-delete silently
+  // fall back to broken native behaviour. The [page?.id] dep re-runs this effect on
+  // every page switch so it always binds to the live body. This has regressed
+  // repeatedly; keep the dep.
   useEffect(() => {
     const pageBody = pageBodyRef.current;
     if (!pageBody) return;
@@ -3774,7 +3786,9 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       pageBody.removeEventListener("copy", onCopy);
       pageBody.removeEventListener("cut", onCut);
     };
-  }, []);
+    // page?.id: rebind to the fresh page-body node after every page switch
+    // (page-container is keyed). See the regression-guard comment above. Keep this dep.
+  }, [page?.id]);
 
   useEffect(() => {
     if (!page || page.system || blocks.length > 0) return;

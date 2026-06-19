@@ -639,6 +639,57 @@ function serializeBlocksForClipboard(blocks) {
 }
 window.serializeBlocksForClipboard = serializeBlocksForClipboard;
 
+// ── Clipboard fidelity self-test (regression guard) ─────────────────────────
+// Copy/paste of nested lists & formatting has regressed repeatedly. This runs a
+// serialize → parse round-trip on a fixture and asserts structure + nesting are
+// preserved. Localhost + ?selftest=clipboard only; no production surface.
+// If this ever logs ❌, the copy/paste fidelity pipeline is broken — fix before shipping.
+window.runClipboardSelfTest = function runClipboardSelfTest() {
+  const fixture = [
+    { id: "h1", type: "heading", level: 2, text: "Project Plan" },
+    { id: "p1", type: "text", text: "Ship the <b>deck</b> by <i>Friday</i>." },
+    { id: "b1", type: "bullets", items: [
+      { id: "i1", text: "Top level item",     indent: 0 },
+      { id: "i2", text: "Nested child",        indent: 1 },
+      { id: "i3", text: "Deeper grandchild",   indent: 2 },
+      { id: "i4", text: "Back to top",         indent: 0 },
+    ]},
+    { id: "n1", type: "numbers", items: [
+      { id: "j1", text: "First",  indent: 0 },
+      { id: "j2", text: "Second", indent: 0 },
+    ]},
+  ];
+  const fails = [];
+  try {
+    const { html } = window.serializeBlocksForClipboard(fixture);
+    const out = window.parseHtmlBlocks(html);
+    const check = (cond, msg) => { if (!cond) fails.push(msg); };
+    check(out.length === 4, `expected 4 blocks, got ${out.length}`);
+    check(out[0]?.type === "heading" && out[0]?.level === 2, "block 0 should be heading level 2");
+    check(/<b>deck<\/b>/.test(out[1]?.text || "") && /<i>Friday<\/i>/.test(out[1]?.text || ""), "block 1 should keep bold+italic");
+    check(out[2]?.type === "bullets", "block 2 should be bullets");
+    check(JSON.stringify((out[2]?.items || []).map((i) => i.indent)) === "[0,1,2,0]",
+      `bullet nesting lost: ${JSON.stringify((out[2]?.items || []).map((i) => i.indent))}`);
+    check(JSON.stringify((out[2]?.items || []).map((i) => i.text)) ===
+      JSON.stringify(["Top level item", "Nested child", "Deeper grandchild", "Back to top"]), "bullet text lost");
+    check(out[3]?.type === "numbers" && (out[3]?.items || []).length === 2, "block 3 should be numbers with 2 items");
+  } catch (err) {
+    fails.push("threw: " + (err && err.message));
+  }
+  if (fails.length) console.error("❌ clipboard self-test FAILED:\n  - " + fails.join("\n  - "));
+  else console.log("✅ clipboard self-test passed (nested copy/paste fidelity intact)");
+  return fails.length === 0;
+};
+try {
+  const _h = window.location.hostname;
+  const _local = _h === "localhost" || _h === "127.0.0.1" || _h === "[::1]";
+  if (_local && new URLSearchParams(window.location.search).has("selftest")) {
+    // Defer until the whole script has finished parsing — serialize() depends on
+    // helpers (e.g. markerForNumberLevel) declared further down this file.
+    setTimeout(() => window.runClipboardSelfTest(), 0);
+  }
+} catch (_) {}
+
 // If the pasted plain text is exactly what we last copied inside WAULT, return
 // the stored blocks (with fresh ids). Otherwise null → caller parses normally.
 function matchWaultClipboard(plainText) {
