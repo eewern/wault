@@ -3238,7 +3238,7 @@
       overflow-y: auto;
     }
     .page-container {
-      padding: 60px 18px 40px;
+      padding: 60px 16px 40px 38px; /* extra left = gutter for the always-on drag handle */
       max-width: 100%;
     }
 
@@ -3267,8 +3267,15 @@
     /* ── Template / modal: full width ── */
     .template-modal { width: min(96vw, 480px); }
 
-    /* ── Block handle: always visible (no hover on touch) ── */
-    .block-wrap .block-handle { opacity: 0.35; }
+    /* ── Block handle: always visible in the left gutter, and a touch target
+       that drags instead of scrolling the page (touch-action:none). ── */
+    .block-wrap .block-handle {
+      opacity: 0.5;
+      left: -32px;            /* sits in the page-container left gutter (≈6px from edge) */
+      width: 28px;
+      touch-action: none;
+    }
+    .block-wrap .block-handle:active { opacity: 0.9; }
 
     /* ── Slash menu: full width ── */
     .slash-menu { min-width: 88vw; max-width: 92vw; }
@@ -3301,7 +3308,7 @@
   }
 
   @media (max-width: 480px) {
-    .page-container { padding: 56px 12px 32px; }
+    .page-container { padding: 56px 12px 32px 36px; } /* keep the left drag-handle gutter */
     .page-header .editable[style*="font-size:40"] { font-size: 22px !important; }
     .milestone-kanban { gap: 6px; }
     .blockmenu { min-width: 88vw; }
@@ -3654,9 +3661,9 @@
     return null;
   });
 </script>
-<script type="text/babel" src="workspace-blocks.jsx?v=20260618-mobile1"></script>
-<script type="text/babel" src="focus-home.jsx?v=20260618-mobile1"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260618-mobile1"></script>
+<script type="text/babel" src="workspace-blocks.jsx?v=20260618-mobile5"></script>
+<script type="text/babel" src="focus-home.jsx?v=20260618-mobile5"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260618-mobile5"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

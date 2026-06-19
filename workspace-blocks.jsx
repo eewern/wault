@@ -1413,7 +1413,18 @@ function EditableText({
     window.open(href, "_blank", "noopener,noreferrer");
   };
 
+  // When focus arrives from a tap/click we must NOT select-all — the user is
+  // pointing at a spot between letters and expects the caret to land there.
+  // Select-all is only the right behaviour for keyboard/programmatic focus
+  // (Tab into the field, quick rename), so gate it on a pointer flag.
+  const focusViaPointer = useRef(false);
+  const handlePointerDownSelect = () => {
+    focusViaPointer.current = true;
+    // Clear shortly after; a real keyboard focus won't have set it.
+    setTimeout(() => { focusViaPointer.current = false; }, 400);
+  };
   const handleFocus = selectOnFocus ? () => {
+    if (focusViaPointer.current) return; // tapped: let the caret land where touched
     requestAnimationFrame(() => {
       if (!ref.current) return;
       try {
@@ -1438,6 +1449,7 @@ function EditableText({
       onBlur={handleBlur}
       onKeyDown={handleKeyDown}
       onPaste={handlePaste}
+      onPointerDown={selectOnFocus ? handlePointerDownSelect : undefined}
       onFocus={handleFocus}
       onClick={handleClick}
       data-placeholder={placeholder || ""}
@@ -1760,8 +1772,69 @@ function BlockDeleteButton({ onDeleteBlock, title = "Delete block" }) {
 // ====== BLOCK HANDLE ======
 // Click → opens the block action menu (dispatched as a window event so the
 // PageEditor, which holds all block actions, can render it). Drag → reorder.
+// Desktop uses native HTML5 drag-and-drop; touch devices (where HTML5 DnD never
+// fires) get a Pointer-Events fallback that drives the same reorder pipeline.
 function BlockHandle({ blockId, onDragBlockStart, onDragBlockEnd }) {
   const draggedRef = useRef(false);
+  const touchRef = useRef(null);
+
+  const clearDropIndicators = () => {
+    document.querySelectorAll(".block-shell.drop-before, .block-shell.drop-after")
+      .forEach((el) => el.classList.remove("drop-before", "drop-after"));
+  };
+
+  // ── Touch / pen drag (Pointer Events) ──────────────────────────────────────
+  const onPointerDown = (e) => {
+    if (e.pointerType === "mouse") return; // desktop keeps native HTML5 DnD
+    const selfShell = e.currentTarget.closest("[data-block-id]");
+    touchRef.current = { active: false, startX: e.clientX, startY: e.clientY, selfShell, target: null, side: "before" };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
+  };
+  const onPointerMove = (e) => {
+    const st = touchRef.current;
+    if (!st) return;
+    if (!st.active) {
+      // Require a small vertical movement before we treat it as a drag (so a
+      // plain tap still opens the actions menu via onClick).
+      if (Math.abs(e.clientY - st.startY) < 6 && Math.abs(e.clientX - st.startX) < 6) return;
+      st.active = true;
+      draggedRef.current = true;
+      onDragBlockStart?.(blockId);
+      st.selfShell?.classList.add("dragging");
+    }
+    e.preventDefault(); // stop the page from scrolling under the finger
+    const under = document.elementFromPoint(e.clientX, e.clientY);
+    const shell = under?.closest?.(".block-shell[data-block-id]");
+    clearDropIndicators();
+    if (shell && shell !== st.selfShell) {
+      const r = shell.getBoundingClientRect();
+      const side = e.clientY < r.top + r.height / 2 ? "before" : "after";
+      shell.classList.add(`drop-${side}`);
+      st.target = shell.getAttribute("data-block-id");
+      st.side = side;
+    } else {
+      st.target = null;
+    }
+  };
+  const endTouch = (e) => {
+    const st = touchRef.current;
+    touchRef.current = null;
+    if (!st) return;
+    st.selfShell?.classList.remove("dragging");
+    clearDropIndicators();
+    if (st.active) {
+      if (st.target && st.target !== blockId) {
+        window.dispatchEvent(new CustomEvent("block-touch-drop", {
+          detail: { draggedId: blockId, targetId: st.target, side: st.side },
+        }));
+      }
+      onDragBlockEnd?.(e);
+      // Swallow the click that follows this pointerup so the actions menu
+      // doesn't pop open at the end of a drag.
+      setTimeout(() => { draggedRef.current = false; }, 0);
+    }
+  };
+
   return (
     <button
       className="block-handle"
@@ -1774,6 +1847,10 @@ function BlockHandle({ blockId, onDragBlockStart, onDragBlockEnd }) {
         onDragBlockStart?.(blockId);
       }}
       onDragEnd={(e) => { onDragBlockEnd?.(e); setTimeout(() => { draggedRef.current = false; }, 0); }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={endTouch}
+      onPointerCancel={endTouch}
       onClick={(e) => {
         e.preventDefault();
         e.stopPropagation();

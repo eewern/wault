@@ -3398,6 +3398,24 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     return () => window.removeEventListener("block-handle-click", onHandleClick);
   }, []);
 
+  // Touch-drag reorder: the block handle's Pointer-Events fallback dispatches this
+  // when a finger-drag is released over a target block. The event carries the
+  // dragged id explicitly (we can't rely on the dragBlockId state having flushed),
+  // so move directly. Routed through a ref so the once-registered listener always
+  // sees the latest moveBlock prop.
+  const moveBlockRef = useRef(null);
+  moveBlockRef.current = moveBlock;
+  useEffect(() => {
+    const onTouchDrop = (e) => {
+      const { draggedId, targetId, side } = e.detail || {};
+      if (draggedId && targetId && draggedId !== targetId) {
+        moveBlockRef.current?.(draggedId, targetId, side || "before");
+      }
+    };
+    window.addEventListener("block-touch-drop", onTouchDrop);
+    return () => window.removeEventListener("block-touch-drop", onTouchDrop);
+  }, []);
+
   const closeBlockMenu = () => {
     setBlockMenu(null);
     lastMultiKeyRef.current = "";

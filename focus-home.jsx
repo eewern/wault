@@ -847,6 +847,45 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
     writeJson(LS_SEEDED, [...seeded]);
   }, [activeSuggestions, activeWorkspaceId, importSuggestion]);
 
+  // ── Demo seeder: visit any URL with ?demo=1 to populate Focus with a curated
+  // task set spanning every bucket (Overdue / Due Today / Upcoming / No date /
+  // On Hold / Done) plus two pinned to Today's Focus. Seeds once per device
+  // (flagged in localStorage) and routes through commitTask, so it cloud-syncs
+  // to your account when signed in. The ?demo param is stripped afterward so a
+  // reload never re-seeds. Safe to leave in: it does nothing without ?demo.
+  useEffect(() => {
+    let params;
+    try { params = new URLSearchParams(window.location.search); } catch (_) { return; }
+    if (!params.has("demo")) return;
+    const FLAG = "wault_focus_demo_v1";
+    if (!localStorage.getItem(FLAG)) {
+      const t = todayKey();
+      const nowIso = new Date().toISOString();
+      const demo = [
+        { title: "Send Q2 investor update",          dueDate: addDays(t, -2), priority: "high",   pinnedDate: t },
+        { title: "Reply to vendor contract redlines", dueDate: addDays(t, -1), priority: "medium" },
+        { title: "Finalize product launch deck",      dueDate: t,              priority: "high",   pinnedDate: t },
+        { title: "Post standup notes to the team",    dueDate: t,              priority: "low" },
+        { title: "Prep onboarding for new hire",      dueDate: addDays(t, 2),  priority: "medium" },
+        { title: "Quarterly metrics review",          dueDate: addDays(t, 6),  priority: "medium" },
+        { title: "Brainstorm Q3 campaign ideas",      dueDate: "",             priority: "medium" },
+        { title: "Refactor the auth flow",            dueDate: "",             priority: "low" },
+        { title: "Waiting on legal sign-off",         dueDate: "",             priority: "medium", status: "waiting" },
+        { title: "Blocked: partner API access",       dueDate: "",             priority: "high",   status: "waiting" },
+        { title: "Ship mobile-friendly update",       dueDate: addDays(t, -1), priority: "high",   status: "done", completedAt: nowIso },
+        { title: "Set up team MCP server",            dueDate: addDays(t, -3), priority: "medium", status: "done", completedAt: nowIso },
+      ];
+      demo.forEach((d) => commitTask(makeTask(d)));
+      try { localStorage.setItem(FLAG, "1"); } catch (_) {}
+    }
+    // Strip ?demo (keep any other params/hash) so reloads don't re-trigger.
+    params.delete("demo");
+    const qs = params.toString();
+    try {
+      window.history.replaceState({}, "", window.location.pathname + (qs ? "?" + qs : "") + window.location.hash);
+    } catch (_) {}
+  }, [commitTask]);
+
   const pinTask = useCallback((id) => {
     setTasks((prev) => {
       const cur = prev[id];
