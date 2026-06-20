@@ -18,8 +18,9 @@ import http from "node:http";
 import https from "node:https";
 import { createInterface } from "node:readline";
 
-const API_URL   = (process.env.WERNOTION_API_URL   || "http://127.0.0.1:3334").replace(/\/$/, "");
-const API_TOKEN = process.env.WERNOTION_API_TOKEN   || "";
+// Prefer WAULT_* env names (current); fall back to legacy WERNOTION_* for compat.
+const API_URL   = (process.env.WAULT_API_URL   || process.env.WERNOTION_API_URL   || "http://127.0.0.1:3334").replace(/\/$/, "");
+const API_TOKEN = process.env.WAULT_API_TOKEN || process.env.WERNOTION_API_TOKEN || "";
 const VERSION   = "2.0.0";
 
 // ─── tiny HTTP helper ────────────────────────────────────────────────────────
