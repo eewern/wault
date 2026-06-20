@@ -1464,24 +1464,40 @@
   .block-handle:hover { opacity: 1 !important; color: var(--text-strong); background: rgba(var(--ovr),0.10); box-shadow: 0 0 0 1px var(--line); }
 
   /* ── Smooth drag (blocks / table rows / table columns) ── */
-  .smooth-drag-preview {
-    position: fixed; z-index: 2147483646; pointer-events: none;
-    max-width: 260px; padding: 5px 10px; border-radius: 7px;
-    background: var(--accent); color: #fff;
-    font-size: 12.5px; font-weight: 600; line-height: 1.2;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.4); opacity: 0.95;
-    transform: translateZ(0);
+  .smooth-drag-ghost {
+    position: fixed; z-index: 2147483646; pointer-events: none; overflow: hidden;
+    box-sizing: border-box; border: 2px solid rgba(72, 156, 255, 0.82); border-radius: 8px;
+    background: color-mix(in srgb, var(--panel) 92%, #2f80ed 8%);
+    box-shadow: 0 14px 34px rgba(0,0,0,0.34), 0 0 0 3px rgba(72,156,255,0.10);
+    opacity: 0.97; transform: translateZ(0) scale(1.012); transform-origin: top left;
+    will-change: left, top; contain: paint;
   }
-  .smooth-drag-line {
-    position: fixed; z-index: 2147483645; pointer-events: none;
-    background: var(--accent); border-radius: 2px;
-    box-shadow: 0 0 0 1px rgba(255,255,255,0.18), 0 0 10px var(--accent);
+  .smooth-drag-ghost-content { pointer-events: none !important; margin: 0 !important; }
+  .smooth-drag-ghost .block-handle,
+  .smooth-drag-ghost .block-delete-btn,
+  .smooth-drag-ghost .tbl-rowhandle,
+  .smooth-drag-ghost .tbl-colhandle,
+  .smooth-drag-ghost .tbl-resize-handle,
+  .smooth-drag-ghost .tbl-cell-clear { display: none !important; }
+  .smooth-drag-dropbox {
+    position: fixed; z-index: 2147483645; pointer-events: none; box-sizing: border-box;
+    border: 2px solid rgba(72, 156, 255, 0.8); border-radius: 7px;
+    background: rgba(72, 156, 255, 0.13);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08), 0 4px 18px rgba(47,128,237,0.16);
+    transition: left .06s ease-out, top .06s ease-out, width .06s ease-out, height .06s ease-out;
+    will-change: left, top, width, height;
   }
-  .smooth-drag-line-y { height: 3px; }
-  .smooth-drag-line-x { width: 3px; }
-  .smooth-drag-source { opacity: 0.4 !important; }
+  .smooth-drag-source { opacity: 0.18 !important; }
   body.is-smooth-dragging, body.is-smooth-dragging * { cursor: grabbing !important; }
+
+  .tbl-row-drag-visual { display: flex; height: 100%; background: var(--panel); }
+  .tbl-column-drag-visual { display: flex; flex-direction: column; width: 100%; background: var(--panel); }
+  .tbl-drag-cell {
+    box-sizing: border-box; overflow: hidden; flex: 0 0 auto; padding: 8px 10px;
+    border-right: 1px solid var(--line-strong); border-bottom: 1px solid var(--line-strong);
+    color: var(--text); background: rgba(var(--ovr),0.025);
+  }
+  .tbl-column-drag-visual .tbl-drag-cell { width: 100% !important; }
   .block-delete-btn {
     position: absolute;
     top: 7px;
@@ -2185,43 +2201,69 @@
   }
   .tbl-add-row:hover { background: rgba(var(--ovr),0.035); color: var(--text-strong); }
 
-  /* ════ Notion-style table: edge handles + headerless ════════════════════════ */
-  /* Left gutter column (holds the per-row handle) + top rail row (per-column
-     handle). Both are hover-revealed and contain no editable content, so the
-     copy/cell-selection logic ignores them. */
-  .tbl-notion .tbl-rowgutter {
-    width: 20px; padding: 0; border: none; background: transparent;
-    text-align: center; vertical-align: middle; position: relative;
+  /* ════ Seamless table: continuous grid + edge controls ════════════════════ */
+  .tbl-wrap.tbl-notion {
+    margin: 8px 0 12px; border: none; border-radius: 0; overflow: visible;
   }
-  .tbl-notion .tbl-corner { padding: 0; border: none; background: transparent; height: 14px; }
-  .tbl-notion tr.tbl-rail th {
-    padding: 0; border: none; background: transparent; height: 14px;
-    position: relative; vertical-align: bottom;
+  .tbl-notion .tbl-scroll {
+    width: 100%; overflow-x: auto; overflow-y: hidden; padding: 11px 0 0 10px;
+    scrollbar-width: thin;
   }
-  .tbl-notion .tbl-rail-cell { text-align: center; }
-  /* The handles themselves */
+  .tbl-notion .tbl-grid-shell {
+    display: grid; grid-template-columns: max-content 28px; grid-template-rows: auto 28px;
+    width: max-content; min-width: calc(100% - 10px); align-items: stretch;
+  }
+  .tbl-notion .tbl-table {
+    grid-column: 1; grid-row: 1; min-width: 520px; border-collapse: separate; border-spacing: 0;
+    border: 1px solid rgba(var(--ovr),0.16); border-radius: 5px 0 0 0; overflow: visible;
+    background: color-mix(in srgb, var(--panel) 72%, transparent);
+  }
+  .tbl-notion .tbl-table td {
+    position: relative; min-height: 38px; padding: 7px 10px;
+    border-right: 1px solid rgba(var(--ovr),0.14); border-bottom: 1px solid rgba(var(--ovr),0.14);
+    background: transparent; vertical-align: top;
+  }
+  .tbl-notion .tbl-table tr:last-child td { border-bottom: none; }
+  .tbl-notion .tbl-table td:last-child { border-right: none; }
+  .tbl-notion .tbl-hrow.tbl-header-on td {
+    background: rgba(var(--ovr),0.055); color: var(--text-strong);
+  }
+  .tbl-notion .tbl-hrow.tbl-header-on .editable { font-weight: 700; }
+
+  /* Handles sit on the physical table edges rather than consuming a blank rail. */
   .tbl-rowhandle, .tbl-colhandle {
-    display: inline-flex; align-items: center; justify-content: center;
-    border: none; background: rgba(var(--ovr),0.05); color: var(--text-faint);
-    border-radius: 4px; cursor: grab; padding: 0;
+    position: absolute; z-index: 6; display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid transparent; background: var(--panel); color: var(--text-faint);
+    border-radius: 4px; cursor: grab; padding: 0; box-shadow: 0 1px 4px rgba(0,0,0,0.12);
     opacity: 0; transition: opacity .12s, background .12s, color .12s;
     touch-action: none; user-select: none;
   }
-  .tbl-rowhandle { width: 16px; height: 22px; }
-  .tbl-colhandle { width: 24px; height: 13px; }
+  .tbl-rowhandle { width: 17px; height: 24px; left: -10px; top: 50%; transform: translateY(-50%); }
+  .tbl-colhandle { width: 26px; height: 13px; left: 50%; top: -11px; transform: translateX(-50%); }
   .tbl-notion tbody tr:hover .tbl-rowhandle,
-  .tbl-notion .tbl-rail-cell:hover .tbl-colhandle { opacity: 0.85; }
-  .tbl-rowhandle:hover, .tbl-colhandle:hover { background: rgba(var(--ovr),0.12); color: var(--text); }
+  .tbl-notion .tbl-hrow td:hover .tbl-colhandle { opacity: 0.88; }
+  .tbl-rowhandle:hover, .tbl-colhandle:hover { border-color: var(--line-strong); background: var(--panel-active); color: var(--text); }
   .tbl-rowhandle:active, .tbl-colhandle:active { cursor: grabbing; }
-  /* Column resize: a tall-enough grab strip on the rail cell's right edge */
-  .tbl-notion .tbl-rail-cell .tbl-resize-handle { top: 0; right: -3px; height: 24px; }
-  /* Footer add buttons (subtle, replace the in-table +) */
-  .tbl-foot { display: flex; gap: 14px; padding: 7px 4px 2px 24px; }
-  .tbl-foot-btn {
-    background: none; border: none; color: var(--text-faint); cursor: pointer;
-    font-size: 12.5px; padding: 3px 6px; border-radius: 5px; transition: color .12s, background .12s;
+  .tbl-notion .tbl-resize-handle { top: 0; right: -4px; width: 8px; height: 100%; }
+
+  /* Append rails: a single + exactly at the right and bottom edges. */
+  .tbl-add-edge {
+    border: 1px solid rgba(var(--ovr),0.16); background: transparent; color: var(--text-faint);
+    cursor: pointer; font-family: inherit; transition: color .12s, background .12s, border-color .12s;
   }
-  .tbl-foot-btn:hover { color: var(--text-strong); background: rgba(var(--ovr),0.05); }
+  .tbl-add-edge { font-size: 18px; font-weight: 400; }
+  .tbl-add-edge:hover { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, var(--line-strong)); }
+  .tbl-add-col-edge {
+    grid-column: 2; grid-row: 1; border-left: none; border-radius: 0 5px 0 0;
+  }
+  .tbl-add-row-edge {
+    grid-column: 1; grid-row: 2; border-top: none; border-radius: 0 0 0 5px;
+    text-align: left; padding: 0 0 0 11px;
+  }
+  .tbl-add-corner {
+    grid-column: 2; grid-row: 2; border-top: none; border-left: none; border-radius: 0 0 5px 0;
+    border-right: 1px solid rgba(var(--ovr),0.16); border-bottom: 1px solid rgba(var(--ovr),0.16);
+  }
   /* Touch: no hover — keep handles reachable */
   @media (hover: none) {
     .tbl-rowhandle, .tbl-colhandle { opacity: 0.6; }
@@ -3538,7 +3580,7 @@
     font-size: 11px; font-weight: 800; background: var(--accent-soft); color: var(--accent);
     border-radius: 99px; padding: 2px 9px; font-variant-numeric: tabular-nums; transition: background .2s ease;
   }
-  /* Today's Focus — the primary block: large title + extra breathing room. */
+  /* Today's Priorities — the primary block: large title + extra breathing room. */
   .focus-home .fx-focus-block { margin-bottom: 30px; }
   .focus-home .fx-focus-title { font-size: 22px !important; letter-spacing: -0.01em !important; text-transform: none !important; font-weight: 800; color: var(--fx-violet) !important; gap: 11px !important; }
   .focus-home .fx-focus-title::before { width: 10px !important; height: 10px !important; min-width: 10px !important; background: var(--fx-violet) !important; }
@@ -3582,17 +3624,62 @@
   .focus-home .fx-stat-overdue b { color: var(--kpi-red, #ff7369); }
   .focus-home .fx-stat-high b { color: #e8c460; }
 
-  /* ── Under-calendar list panel + tabs ── */
-  .focus-home .fx-listpanel { margin-top: 16px; }
-  .focus-home .fx-tabs { display: flex; gap: 4px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; }
-  .focus-home .fx-tab { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 6px 8px; border: none; background: none; color: var(--text-muted); font-size: 12.5px; font-weight: 600; border-radius: 7px; cursor: pointer; transition: background .12s, color .12s; }
-  .focus-home .fx-tab:hover { color: var(--text); }
-  .focus-home .fx-tab-on { background: var(--panel-active); color: var(--text-strong); }
-  .focus-home .fx-tab-n { font-size: 11px; font-weight: 700; color: var(--text-faint); font-variant-numeric: tabular-nums; }
-  .focus-home .fx-tab-on .fx-tab-n { color: var(--accent); }
-  .focus-home .fx-listbody { margin-top: 6px; }
-  .focus-home .fx-listbody .fx-task { gap: 9px; padding: 8px 6px; }
-  .focus-home .fx-listbody .fx-task-meta { gap: 6px; }
+  /* ── Full Focus navigation ──────────────────────────────────────────────── */
+  .focus-home .fx-viewnav {
+    display: inline-flex; align-items: center; gap: 4px; padding: 4px;
+    margin: 0 0 24px; background: var(--panel); border: 1px solid var(--line-strong);
+    border-radius: 11px; box-shadow: 0 3px 12px rgba(0,0,0,0.06);
+  }
+  .focus-home .fx-viewtab {
+    min-width: 170px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 9px 15px; border: none; border-radius: 8px; background: transparent;
+    color: var(--text-muted); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer;
+    transition: background .14s ease, color .14s ease, box-shadow .14s ease;
+  }
+  .focus-home .fx-viewtab:hover { color: var(--text-strong); background: var(--panel-hover); }
+  .focus-home .fx-viewtab-on { color: var(--text-strong); background: var(--panel-active); box-shadow: 0 1px 5px rgba(0,0,0,0.12); }
+  .focus-home .fx-viewtab span {
+    min-width: 24px; padding: 2px 7px; border-radius: 99px; background: rgba(var(--ovr),0.06);
+    color: var(--text-faint); font-size: 10.5px; font-weight: 800; font-variant-numeric: tabular-nums;
+  }
+  .focus-home .fx-viewtab-on span { background: var(--accent-soft); color: var(--accent); }
+
+  /* ── All Tasks: workspace first, due-date buckets inside ──────────────── */
+  .focus-home .fx-alltasks { width: 100%; min-width: 0; }
+  .focus-home .fx-alltasks-head {
+    display: flex; align-items: flex-end; justify-content: space-between; gap: 18px;
+    margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid var(--line);
+  }
+  .focus-home .fx-alltasks-head h1 { margin: 0; color: var(--text-strong); font-size: 25px; letter-spacing: -0.025em; }
+  .focus-home .fx-alltasks-head p { margin: 5px 0 0; color: var(--text-muted); font-size: 13px; }
+  .focus-home .fx-alltasks-total {
+    flex-shrink: 0; padding: 5px 10px; border-radius: 99px; background: var(--panel);
+    border: 1px solid var(--line); color: var(--text-muted); font-size: 11.5px; font-weight: 700;
+  }
+  .focus-home .fx-workspace-tasks {
+    margin-bottom: 24px; border: 1px solid var(--line-strong); border-radius: 14px;
+    background: color-mix(in srgb, var(--panel) 72%, transparent); overflow: hidden;
+  }
+  .focus-home .fx-workspace-tasks-head {
+    display: flex; align-items: center; gap: 11px; padding: 13px 16px;
+    background: rgba(var(--ovr),0.025); border-bottom: 1px solid var(--line);
+  }
+  .focus-home .fx-workspace-tasks-icon {
+    width: 31px; height: 31px; min-width: 31px; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 9px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 800;
+  }
+  .focus-home .fx-workspace-tasks-title { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .focus-home .fx-workspace-tasks-title strong { color: var(--text-strong); font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .focus-home .fx-workspace-tasks-title small { color: var(--text-faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .focus-home .fx-workspace-tasks-body { padding: 17px 18px 5px; }
+  .focus-home .fx-workspace-tasks-body .fx-bucket { margin-bottom: 21px; }
+  .focus-home .fx-workspace-tasks-body .fx-bucket-head { margin-bottom: 8px; }
+  .focus-home .fx-date-groups { display: flex; flex-direction: column; gap: 12px; }
+  .focus-home .fx-date-group-label {
+    margin-bottom: 3px; padding: 0 4px 5px; border-bottom: 1px solid var(--line);
+    color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .025em;
+  }
+  .focus-home .fx-alltasks-empty { padding: 28px 4px; }
 
   .focus-home .fx-check {
     width: 22px; height: 22px; min-width: 22px; border-radius: 50%;
@@ -3687,6 +3774,11 @@
     .focus-home .fx-quickadd input { flex: 1 1 100%; padding: 8px 0; }
     .focus-home .fx-quickadd-chips { order: 2; }
     .focus-home .fx-quickadd-go { order: 3; margin-left: auto; }
+    .focus-home .fx-viewnav { display: flex; width: 100%; }
+    .focus-home .fx-viewtab { min-width: 0; flex: 1; padding: 9px 8px; font-size: 12px; }
+    .focus-home .fx-alltasks-head { align-items: flex-start; }
+    .focus-home .fx-alltasks-head h1 { font-size: 22px; }
+    .focus-home .fx-workspace-tasks-body { padding: 14px 11px 3px; }
     /* Actions always visible (no hover on touch) + bigger hit areas. */
     .focus-home .fx-task-actions { opacity: 1; }
     .focus-home .fx-mini { padding: 6px 9px; font-size: 15px; }
@@ -3770,9 +3862,9 @@
     return null;
   });
 </script>
-<script type="text/babel" src="workspace-blocks.jsx?v=20260620-layout2"></script>
-<script type="text/babel" src="focus-home.jsx?v=20260620-layout2"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260620-layout2"></script>
+<script type="text/babel" src="workspace-blocks.jsx?v=20260620-dragfix5"></script>
+<script type="text/babel" src="focus-home.jsx?v=20260620-dragfix5"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260620-dragfix5"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

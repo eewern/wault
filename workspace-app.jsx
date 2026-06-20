@@ -4729,6 +4729,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
           number: '<svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h9M8 14h9M3 4l1.5-.5V8M3 8h3"/></svg>',
           todo: '<svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="6" height="6" rx="1.5"/><path d="M4.5 7l1 1 2-2.2M12 6h5M12 13h5"/></svg>',
           quote: '<svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5v10M9 7c-1 0-2 .8-2 2.2M16 7c-1 0-2 .8-2 2.2"/></svg>',
+          header: '<svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="12" rx="2"/><path d="M3 8h14M8 4v12"/></svg>',
         };
         return (
           <>
@@ -4737,6 +4738,9 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
               <Item icon={I.dup} label="Duplicate" onClick={() => { duplicateBlock(blockMenu.blockId); closeBlockMenu(); }} />
               <Item icon={I.copy} label="Copy" onClick={() => { copyBlockToClipboard(blockMenu.blockId); closeBlockMenu(); }} />
               <Item icon={I.del} label="Delete" danger onClick={() => { deleteBlock(blockMenu.blockId); closeBlockMenu(); }} />
+              {b.type === "table" && <div className="blockmenu-sep" />}
+              {b.type === "table" && <div className="blockmenu-label">Table</div>}
+              {b.type === "table" && <Item icon={I.header} label={`${b.headerRow ? "✓  " : ""}Header row`} onClick={() => { updateBlock({ ...b, headerRow: !b.headerRow }); closeBlockMenu(); }} />}
               {canConvert && <div className="blockmenu-sep" />}
               {canConvert && <div className="blockmenu-label">Turn into</div>}
               {canConvert && <Item icon={I.text} label="Text" onClick={() => turn("text")} />}

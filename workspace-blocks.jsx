@@ -1824,58 +1824,103 @@ function BlockDeleteButton({ onDeleteBlock, title = "Delete block" }) {
 
 // ====== SMOOTH POINTER DRAG (shared: blocks, table rows, table columns) ======
 // One pointer-based drag used everywhere so reordering feels identical and
-// smooth on mouse + touch. Shows a floating preview chip that follows the
-// pointer and a bright insertion line at the exact gap where the item will land.
+// smooth on mouse + touch. The dragged item lifts as a full-size ghost while a
+// soft blue destination box shows the exact slot it will occupy (no thin drop
+// lines). Callers can provide custom geometry/ghosts for table columns.
 // Call from a pointerdown handler on a drag handle.
 //   startSmoothDrag({
-//     pointerEvent, axis: "y"|"x", sourceEl, previewLabel,
+//     pointerEvent, axis: "y"|"x", sourceEl,
 //     getTargets: () => [{ el, key }],   // current drop targets (EXCLUDING source)
-//     scrollEl,                           // optional scroll container for auto-scroll
+//     getSourceRect, makeGhost, scrollEl, // optional table-specific adapters
 //     onStart, onCommit: (targetKey, side) => void, onEnd: (didDrag) => void,
 //   })
-function startSmoothDrag({ pointerEvent, axis = "y", sourceEl, previewLabel, getTargets, scrollEl = null, onStart, onCommit, onEnd }) {
+function startSmoothDrag({ pointerEvent, axis = "y", sourceEl, getTargets, getSourceRect, makeGhost, scrollEl = null, onStart, onCommit, onEnd }) {
   const handle = pointerEvent.currentTarget;
   const pointerId = pointerEvent.pointerId;
   const startX = pointerEvent.clientX, startY = pointerEvent.clientY;
   let active = false;
+  let finished = false;
   let pending = null;            // { key, side }
-  let preview = null, line = null;
-  try { handle.setPointerCapture(pointerId); } catch (_) {}
+  let ghost = null, dropBox = null, sourceRect = null;
 
-  const mountChrome = () => {
-    preview = document.createElement("div");
-    preview.className = "smooth-drag-preview";
-    preview.textContent = (previewLabel || "").slice(0, 80) || "Move";
-    document.body.appendChild(preview);
-    line = document.createElement("div");
-    line.className = `smooth-drag-line smooth-drag-line-${axis}`;
-    document.body.appendChild(line);
+  // A previous interrupted drag must never poison the page. This is also a
+  // safety net for browser/OS pointer-capture quirks and hot reloads.
+  document.querySelectorAll(".smooth-drag-ghost,.smooth-drag-dropbox").forEach((el) => el.remove());
+  document.querySelectorAll(".smooth-drag-source").forEach((el) => el.classList.remove("smooth-drag-source"));
+  document.body.classList.remove("is-smooth-dragging");
+
+  const safeRect = (value) => {
+    const r = typeof value === "function" ? value() : value;
+    return r && Number.isFinite(r.left) ? r : null;
   };
-  const unmountChrome = () => { preview?.remove(); line?.remove(); preview = line = null; };
+  const defaultGhost = () => {
+    const clone = sourceEl?.cloneNode?.(true);
+    if (!clone) return document.createElement("div");
+    clone.removeAttribute?.("id");
+    clone.querySelectorAll?.("[id]").forEach((el) => el.removeAttribute("id"));
+    clone.querySelectorAll?.("[contenteditable]").forEach((el) => el.setAttribute("contenteditable", "false"));
+    clone.querySelectorAll?.("input,textarea,select,button").forEach((el) => { el.tabIndex = -1; el.disabled = true; });
+    return clone;
+  };
+  const mountChrome = () => {
+    sourceRect = safeRect(getSourceRect) || sourceEl?.getBoundingClientRect?.();
+    ghost = document.createElement("div");
+    ghost.className = `smooth-drag-ghost smooth-drag-ghost-${axis}`;
+    ghost.setAttribute("aria-hidden", "true");
+    const content = (makeGhost?.(sourceRect) || defaultGhost());
+    content.classList?.add("smooth-drag-ghost-content");
+    ghost.appendChild(content);
+    if (sourceRect) {
+      ghost.style.width = Math.max(40, sourceRect.width) + "px";
+      ghost.style.height = Math.max(24, sourceRect.height) + "px";
+    }
+    document.body.appendChild(ghost);
+    dropBox = document.createElement("div");
+    dropBox.className = `smooth-drag-dropbox smooth-drag-dropbox-${axis}`;
+    document.body.appendChild(dropBox);
+    document.body.classList.add("is-smooth-dragging");
+  };
+  const unmountChrome = () => {
+    ghost?.remove();
+    dropBox?.remove();
+    ghost = dropBox = null;
+    document.body.classList.remove("is-smooth-dragging");
+  };
 
-  const updateLine = (x, y) => {
+  const updateDropBox = (x, y) => {
     const targets = (getTargets && getTargets()) || [];
-    if (!targets.length) { pending = null; if (line) line.style.display = "none"; return; }
+    if (!targets.length) { pending = null; if (dropBox) dropBox.style.display = "none"; return; }
     const p = axis === "y" ? y : x;
     let best = null, bestDist = Infinity;
     for (const t of targets) {
-      const r = t.el.getBoundingClientRect();
+      const r = safeRect(t.getRect) || t.el?.getBoundingClientRect?.();
+      if (!r) continue;
       const mid = axis === "y" ? r.top + r.height / 2 : r.left + r.width / 2;
       const d = Math.abs(p - mid);
       if (d < bestDist) { bestDist = d; best = { t, r, mid }; }
     }
     if (!best) { pending = null; return; }
-    const side = p < best.mid ? "before" : "after";
+    const side = best.t.slot ? "slot" : (p < best.mid ? "before" : "after");
     pending = { key: best.t.key, side };
-    if (!line) return;
-    line.style.display = "block";
+    if (!dropBox || !sourceRect) return;
+    dropBox.style.display = "block";
     const r = best.r;
     if (axis === "y") {
-      const ly = side === "before" ? r.top : r.bottom;
-      line.style.left = r.left + "px"; line.style.width = r.width + "px"; line.style.top = (ly - 1.5) + "px";
+      const h = Math.max(24, sourceRect.height);
+      // "Before" occupies the target's current slot; "after" starts at the
+      // target's far edge. Equal-height rows therefore never show the same box.
+      const top = side === "slot" ? r.top : side === "before" ? r.top : r.bottom;
+      dropBox.style.left = r.left + "px";
+      dropBox.style.width = r.width + "px";
+      dropBox.style.top = top + "px";
+      dropBox.style.height = h + "px";
     } else {
-      const lx = side === "before" ? r.left : r.right;
-      line.style.top = r.top + "px"; line.style.height = r.height + "px"; line.style.left = (lx - 1.5) + "px";
+      const w = Math.max(40, sourceRect.width);
+      const left = side === "slot" ? r.left : side === "before" ? r.left : r.right;
+      dropBox.style.top = r.top + "px";
+      dropBox.style.height = r.height + "px";
+      dropBox.style.left = left + "px";
+      dropBox.style.width = w + "px";
     }
   };
   const autoScroll = (x, y) => {
@@ -1891,6 +1936,7 @@ function startSmoothDrag({ pointerEvent, axis = "y", sourceEl, previewLabel, get
   };
 
   const onMove = (e) => {
+    if (finished || (e.pointerId != null && e.pointerId !== pointerId)) return;
     if (!active) {
       if (Math.abs(e.clientX - startX) < 5 && Math.abs(e.clientY - startY) < 5) return;
       active = true;
@@ -1899,30 +1945,59 @@ function startSmoothDrag({ pointerEvent, axis = "y", sourceEl, previewLabel, get
       onStart?.();
     }
     e.preventDefault();
-    if (preview) { preview.style.left = (e.clientX + 14) + "px"; preview.style.top = (e.clientY + 14) + "px"; }
-    updateLine(e.clientX, e.clientY);
+    if (ghost && sourceRect) {
+      if (axis === "y") {
+        ghost.style.left = sourceRect.left + "px";
+        ghost.style.top = (e.clientY + 12) + "px";
+      } else {
+        ghost.style.left = (e.clientX + 12) + "px";
+        ghost.style.top = sourceRect.top + "px";
+      }
+    }
+    updateDropBox(e.clientX, e.clientY);
     autoScroll(e.clientX, e.clientY);
   };
-  const finish = (e) => {
-    handle.removeEventListener("pointermove", onMove);
-    handle.removeEventListener("pointerup", finish);
-    handle.removeEventListener("pointercancel", finish);
+  const removeListeners = () => {
+    window.removeEventListener("pointermove", onMove, true);
+    window.removeEventListener("pointerup", finish, true);
+    window.removeEventListener("pointercancel", cancel, true);
+    window.removeEventListener("blur", cancel, true);
+    document.removeEventListener("visibilitychange", onVisibilityChange, true);
+    document.removeEventListener("keydown", onKeyDown, true);
+    handle.removeEventListener("lostpointercapture", cancel, true);
+  };
+  const finish = (e, cancelled = false) => {
+    if (finished || (e?.pointerId != null && e.pointerId !== pointerId)) return;
+    finished = true;
+    const finalTarget = pending;
+    removeListeners();
     try { handle.releasePointerCapture(pointerId); } catch (_) {}
     sourceEl?.classList.remove("smooth-drag-source");
     unmountChrome();
-    if (active && pending && e.type !== "pointercancel") onCommit?.(pending.key, pending.side);
     onEnd?.(active);
+    if (active && finalTarget && !cancelled) onCommit?.(finalTarget.key, finalTarget.side);
   };
-  handle.addEventListener("pointermove", onMove);
-  handle.addEventListener("pointerup", finish);
-  handle.addEventListener("pointercancel", finish);
+  const cancel = (e) => finish(e, true);
+  const onVisibilityChange = () => { if (document.visibilityState === "hidden") cancel({ type:"visibilitychange" }); };
+  const onKeyDown = (e) => { if (e.key === "Escape") { e.preventDefault(); cancel(e); } };
+
+  // Window-level listeners guarantee cleanup even when the pointer leaves the
+  // handle/table or the browser unexpectedly drops pointer capture.
+  window.addEventListener("pointermove", onMove, { capture:true, passive:false });
+  window.addEventListener("pointerup", finish, true);
+  window.addEventListener("pointercancel", cancel, true);
+  window.addEventListener("blur", cancel, true);
+  document.addEventListener("visibilitychange", onVisibilityChange, true);
+  document.addEventListener("keydown", onKeyDown, true);
+  handle.addEventListener("lostpointercapture", cancel, true);
+  try { handle.setPointerCapture(pointerId); } catch (_) {}
 }
 window.startSmoothDrag = startSmoothDrag;
 
 // ====== BLOCK HANDLE ======
 // Click → opens the block action menu (dispatched as a window event so the
 // PageEditor, which holds all block actions, can render it). Drag → reorder
-// (smooth pointer drag with floating preview + live insertion line).
+// (smooth pointer drag with a lifted ghost + destination box).
 function BlockHandle({ blockId, onDragBlockStart, onDragBlockEnd }) {
   const draggedRef = useRef(false);
 
@@ -1930,12 +2005,10 @@ function BlockHandle({ blockId, onDragBlockStart, onDragBlockEnd }) {
     if (e.button != null && e.button !== 0) return;
     const selfShell = e.currentTarget.closest("[data-block-id]");
     const pageBody = selfShell?.closest(".page-body");
-    const label = (selfShell?.innerText || "").trim().split("\n")[0] || "Block";
     startSmoothDrag({
       pointerEvent: e,
       axis: "y",
       sourceEl: selfShell,
-      previewLabel: label,
       scrollEl: pageBody?.closest(".page-main") || null,
       getTargets: () => [...(pageBody ? pageBody.querySelectorAll(".block-shell[data-block-id]") : [])]
         .filter((el) => el.getAttribute("data-block-id") !== blockId)
@@ -3162,16 +3235,53 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     updateBlock({ ...block, headers: block.headers.filter((_, i) => i !== idx), colTypes: colTypes.filter((_, i) => i !== idx), columnWidths: columnWidths.filter((_, i) => i !== idx), rows: block.rows.map(r => ({ ...r, cells: r.cells.filter((_, i) => i !== idx) })) });
   };
   // ── Reorder (used by the smooth drag) ───────────────────────────────────────
-  const reorderArray = (arr, from, to) => { const a = [...arr]; const [m] = a.splice(from, 1); let ins = to; if (from < to) ins -= 1; a.splice(Math.max(0, ins), 0, m); return a; };
-  const moveRow = (from, to) => { if (from == null || from === to) return; updateBlock({ ...block, columnWidths, rows: reorderArray(block.rows, from, to) }); };
+  // Table drag targets are numbered destination SLOTS, not before/after gaps.
+  // Dropping row 2 on row 4 must therefore leave it in visible position 4.
+  const reorderToSlot = (arr, from, slot) => {
+    const a = [...arr];
+    const [moved] = a.splice(from, 1);
+    a.splice(Math.max(0, Math.min(slot, a.length)), 0, moved);
+    return a;
+  };
+  const moveRow = (from, slot) => { if (from == null || from === slot) return; updateBlock({ ...block, columnWidths, rows: reorderToSlot(block.rows, from, slot) }); };
   const moveCol = (from, to) => {
     if (from == null || from === to) return;
-    updateBlock({ ...block, headers: reorderArray(block.headers, from, to), colTypes: reorderArray(colTypes, from, to), columnWidths: reorderArray(columnWidths, from, to), rows: block.rows.map(r => ({ ...r, cells: reorderArray(r.cells, from, to) })) });
+    updateBlock({ ...block, headers: reorderToSlot(block.headers, from, to), colTypes: reorderToSlot(colTypes, from, to), columnWidths: reorderToSlot(columnWidths, from, to), rows: block.rows.map(r => ({ ...r, cells: reorderToSlot(r.cells, from, to) })) });
   };
   // ── Edge handles: smooth drag (reuse shared helper) + click → menu ───────────
   const [menu, setMenu] = useState(null); // { type:"row"|"col", index, x, y }
   const rowDragRef = useRef(false);
   const colDragRef = useRef(false);
+  const cleanDragClone = (root) => {
+    root.querySelectorAll?.(".tbl-rowhandle,.tbl-colhandle,.tbl-resize-handle,.tbl-cell-clear").forEach((el) => el.remove());
+    root.querySelectorAll?.("[contenteditable]").forEach((el) => el.setAttribute("contenteditable", "false"));
+    root.querySelectorAll?.("button,input,textarea,select").forEach((el) => { el.tabIndex = -1; el.disabled = true; });
+    return root;
+  };
+  const makeCellStripGhost = (cells, className) => {
+    const strip = document.createElement("div");
+    strip.className = className;
+    cells.forEach((cell) => {
+      const r = cell.getBoundingClientRect();
+      const clone = document.createElement("div");
+      clone.className = "tbl-drag-cell";
+      clone.style.width = r.width + "px";
+      clone.style.height = r.height + "px";
+      clone.innerHTML = cell.innerHTML;
+      strip.appendChild(cleanDragClone(clone));
+    });
+    return strip;
+  };
+  const getColumnCells = (table, colIdx) => [...(table?.querySelectorAll("tr") || [])]
+    .map((row) => row.children[colIdx])
+    .filter(Boolean);
+  const getColumnRect = (table, colIdx) => {
+    const cell = table?.querySelector("tr.tbl-hrow")?.children?.[colIdx];
+    if (!cell) return null;
+    const cellRect = cell.getBoundingClientRect();
+    const tableRect = table.getBoundingClientRect();
+    return { left:cellRect.left, right:cellRect.right, top:tableRect.top, bottom:tableRect.bottom, width:cellRect.width, height:tableRect.height };
+  };
   const startRowHandleDrag = (e, rowIdx) => {
     if (e.button != null && e.button !== 0) return;
     const tr = e.currentTarget.closest("tr");
@@ -3179,27 +3289,35 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     if (!tbody) return;
     window.startSmoothDrag({
       pointerEvent: e, axis: "y", sourceEl: tr,
-      previewLabel: ([...tr.querySelectorAll(".tbl-cell-inner .editable")].map((el) => el.textContent.trim()).find(Boolean)) || "Row",
-      scrollEl: tr.closest(".tbl-wrap"),
-      getTargets: () => [...tbody.querySelectorAll("tr[data-row-id]")].map((el, i) => ({ el, key: i })).filter(t => t.key !== rowIdx),
+      makeGhost: () => makeCellStripGhost([...tr.children], "tbl-row-drag-visual"),
+      scrollEl: tr.closest(".page-main") || tr.closest(".tbl-scroll"),
+      getTargets: () => [...tbody.querySelectorAll("tr[data-row-id]")].map((el, i) => ({ el, key: i, slot:true })).filter(t => t.key !== rowIdx),
       onStart: () => { rowDragRef.current = true; },
-      onCommit: (ti, side) => moveRow(rowIdx, side === "after" ? ti + 1 : ti),
+      onCommit: (ti) => moveRow(rowIdx, ti),
       onEnd: () => setTimeout(() => { rowDragRef.current = false; }, 0),
     });
   };
   const startColHandleDrag = (e, colIdx) => {
     if (e.button != null && e.button !== 0) return;
-    const cell = e.currentTarget.closest("th");
-    const rail = cell?.closest("tr");
-    if (!rail) return;
+    const cell = e.currentTarget.closest("td");
+    const table = cell?.closest("table");
+    const headerRow = cell?.closest("tr");
+    if (!table || !headerRow) return;
     window.startSmoothDrag({
       pointerEvent: e, axis: "x", sourceEl: cell,
-      previewLabel: block.headers[colIdx] || "Column",
-      scrollEl: cell.closest(".tbl-wrap"),
-      getTargets: () => [...rail.querySelectorAll("th.tbl-rail-cell")].map((el, i) => ({ el, key: i })).filter(t => t.key !== colIdx),
-      onStart: () => { colDragRef.current = true; },
-      onCommit: (ti, side) => moveCol(colIdx, side === "after" ? ti + 1 : ti),
-      onEnd: () => setTimeout(() => { colDragRef.current = false; }, 0),
+      getSourceRect: () => getColumnRect(table, colIdx),
+      makeGhost: () => makeCellStripGhost(getColumnCells(table, colIdx), "tbl-column-drag-visual"),
+      scrollEl: cell.closest(".tbl-scroll"),
+      getTargets: () => [...headerRow.children].map((el, i) => ({ el, key: i, slot:true, getRect: () => getColumnRect(table, i) })).filter(t => t.key !== colIdx),
+      onStart: () => {
+        colDragRef.current = true;
+        getColumnCells(table, colIdx).forEach((el) => el.classList.add("smooth-drag-source"));
+      },
+      onCommit: (ti) => moveCol(colIdx, ti),
+      onEnd: () => {
+        getColumnCells(table, colIdx).forEach((el) => el.classList.remove("smooth-drag-source"));
+        setTimeout(() => { colDragRef.current = false; }, 0);
+      },
     });
   };
   const openRowMenu = (e, rowIdx) => { if (rowDragRef.current) return; const r = e.currentTarget.getBoundingClientRect(); setMenu({ type: "row", index: rowIdx, x: r.right + 4, y: r.top }); };
@@ -3213,8 +3331,7 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     // Resolve the live <col> element so we can preview the new width during the drag
     // WITHOUT writing to React state / history on every mousemove (which floods sync
     // and creates one undo step per pixel). We commit a single update on mouseup.
-    // +1: colgroup has a leading gutter <col> before the data columns.
-    const colEl = e.target?.closest?.("table")?.querySelectorAll?.("colgroup col")?.[index + 1] || null;
+    const colEl = e.target?.closest?.("table")?.querySelectorAll?.("colgroup col")?.[index] || null;
     let finalWidth = startWidth;
     const onMove = (ev) => {
       finalWidth = Math.max(80, startWidth + ev.clientX - startX);
@@ -3234,8 +3351,10 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
   };
   // One cell renderer for header row AND body rows so they look identical
   // (headerless tables). `type` is the column's type; `onChange` writes the value.
-  const renderCell = (value, type, onChange, key) => (
-    <td key={key} className={type === "checkbox" ? "tbl-td-check" : ""}>
+  const renderCell = (value, type, onChange, key, chrome = null) => (
+    <td key={key} className={`${type === "checkbox" ? "tbl-td-check" : ""}${chrome?.rowHandle ? " tbl-has-rowhandle" : ""}${chrome?.colHandle ? " tbl-has-colhandle" : ""}`}>
+      {chrome?.rowHandle}
+      {chrome?.colHandle}
       {type === "checkbox" ? (
         <button
           className={`tbl-checkcell${value ? " tbl-checked" : ""}`}
@@ -3263,6 +3382,7 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
           >×</button>
         </div>
       )}
+      {chrome?.resizeHandle}
     </td>
   );
   const MenuItem = ({ onClick, danger, children }) => (
@@ -3281,54 +3401,36 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
       <BlockHandle blockId={blockId} onDragBlockStart={onDragBlockStart} onDragBlockEnd={onDragBlockEnd} />
       <BlockDeleteButton onDeleteBlock={onDeleteBlock} />
       <div className="tbl-wrap tbl-notion">
-        <table style={{ tableLayout:"fixed", width:"max-content", minWidth:"100%" }}>
-          <colgroup>
-            <col className="tbl-gutter-col" style={{ width: 20 }} />
-            {block.headers.map((_, i) => <col key={i} style={{ width: columnWidths[i] || 180 }} />)}
-          </colgroup>
-          {/* Top rail: one drag/menu handle per column (Notion-style edge handle) */}
-          <thead>
-            <tr className="tbl-rail">
-              <th className="tbl-corner" />
-              {block.headers.map((_, i) => (
-                <th key={i} className="tbl-rail-cell">
-                  <button
-                    className="tbl-colhandle"
-                    onPointerDown={(e) => startColHandleDrag(e, i)}
-                    onClick={(e) => openColMenu(e, i)}
-                    title="Drag to move · click for options"
-                    type="button"
-                  >{handleGlyph}</button>
-                  <span className="tbl-resize-handle" onMouseDown={(e) => startResize(i, e)} title="Resize column" />
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {/* Header row rendered identical to body rows (no distinct header) */}
-            <tr className="tbl-hrow">
-              <td className="tbl-rowgutter" />
-              {block.headers.map((h, i) => renderCell(h, colTypes[i], (v) => updHead(i, v), i))}
-            </tr>
-            {block.rows.map((row, rowIdx) => (
-              <tr key={row.id} data-row-id={row.id}>
-                <td className="tbl-rowgutter">
-                  <button
-                    className="tbl-rowhandle"
-                    onPointerDown={(e) => startRowHandleDrag(e, rowIdx)}
-                    onClick={(e) => openRowMenu(e, rowIdx)}
-                    title="Drag to move · click for options"
-                    type="button"
-                  >{handleGlyph}</button>
-                </td>
-                {row.cells.map((c, i) => renderCell(c, colTypes[i], (v) => updCell(row.id, i, v), i))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className="tbl-foot">
-          <button onClick={addRow} className="tbl-foot-btn" title="Add row" type="button">+ Row</button>
-          <button onClick={addCol} className="tbl-foot-btn" title="Add column" type="button">+ Column</button>
+        <div className="tbl-scroll">
+          <div className="tbl-grid-shell">
+            <table className="tbl-table" style={{ tableLayout:"fixed", width:"max-content" }}>
+              <colgroup>
+                {block.headers.map((_, i) => <col key={i} style={{ width: columnWidths[i] || 180 }} />)}
+              </colgroup>
+              <tbody>
+                <tr className={`tbl-hrow${block.headerRow ? " tbl-header-on" : ""}`}>
+                  {block.headers.map((h, i) => renderCell(h, colTypes[i], (v) => updHead(i, v), i, {
+                    colHandle: (
+                      <button className="tbl-colhandle" onPointerDown={(e) => startColHandleDrag(e, i)} onClick={(e) => openColMenu(e, i)} title="Drag to move · click for options" type="button">{handleGlyph}</button>
+                    ),
+                    resizeHandle: <span className="tbl-resize-handle" onMouseDown={(e) => startResize(i, e)} title="Resize column" />,
+                  }))}
+                </tr>
+                {block.rows.map((row, rowIdx) => (
+                  <tr key={row.id} data-row-id={row.id}>
+                    {row.cells.map((c, i) => renderCell(c, colTypes[i], (v) => updCell(row.id, i, v), i, i === 0 ? {
+                      rowHandle: (
+                        <button className="tbl-rowhandle" onPointerDown={(e) => startRowHandleDrag(e, rowIdx)} onClick={(e) => openRowMenu(e, rowIdx)} title="Drag to move · click for options" type="button">{handleGlyph}</button>
+                      ),
+                    } : null))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <button onClick={addCol} className="tbl-add-edge tbl-add-col-edge" title="Add column" aria-label="Add column" type="button">+</button>
+            <button onClick={addRow} className="tbl-add-edge tbl-add-row-edge" title="Add row" aria-label="Add row" type="button">+</button>
+            <span className="tbl-add-corner" aria-hidden="true" />
+          </div>
         </div>
       </div>
       {menu && (
