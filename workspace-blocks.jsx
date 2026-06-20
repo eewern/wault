@@ -1569,7 +1569,7 @@ const SLASH_COMMANDS = [
   { keys:["kpi","kpis","metric","dashboard"], label:"KPI dashboard", icon:"📊", make: () => ({ id: nid(), type:"kpis", items:[{ id: nid(), label:"Metric", value:"0", target:"", unit:"", change:"" }] }) },
   { keys:["progress","bar","prog"], label:"Progress bar", icon:"▰", make: () => ({ id: nid(), type:"progress", label:"Progress", value:0, total:100, color:"accent" }) },
   { keys:["milestone","milestones"], label:"Milestones", icon:"🎯", make: () => ({ id: nid(), type:"milestones", items:[{ id: nid(), name:"", status:"pending" }] }) },
-  { keys:["table","tbl"], label:"Table", icon:"▦", make: () => ({ id: nid(), type:"table", headers:["Col 1","Col 2","Col 3"], rows:[{ id: nid(), cells:["","",""] }] }) },
+  { keys:["table","tbl"], label:"Table", icon:"▦", make: () => ({ id: nid(), type:"table", headers:["","",""], rows:[{ id: nid(), cells:["","",""] }, { id: nid(), cells:["","",""] }] }) },
   { keys:["calendar","cal"], label:"Calendar", icon:"Cal", make: () => ({ id: nid(), type:"calendar", month:"" }) },
   { keys:["image","img","picture","photo","upload"], label:"Image (upload or URL)", icon:"🖼", make: () => ({ id: nid(), type:"image", src:"", alt:"", caption:"" }) },
   { keys:["callout","quote"], label:"Callout", icon:"💡", make: () => ({ id: nid(), type:"callout", icon:"💡", text:"" }) },
@@ -1822,88 +1822,140 @@ function BlockDeleteButton({ onDeleteBlock, title = "Delete block" }) {
   );
 }
 
+// ====== SMOOTH POINTER DRAG (shared: blocks, table rows, table columns) ======
+// One pointer-based drag used everywhere so reordering feels identical and
+// smooth on mouse + touch. Shows a floating preview chip that follows the
+// pointer and a bright insertion line at the exact gap where the item will land.
+// Call from a pointerdown handler on a drag handle.
+//   startSmoothDrag({
+//     pointerEvent, axis: "y"|"x", sourceEl, previewLabel,
+//     getTargets: () => [{ el, key }],   // current drop targets (EXCLUDING source)
+//     scrollEl,                           // optional scroll container for auto-scroll
+//     onStart, onCommit: (targetKey, side) => void, onEnd: (didDrag) => void,
+//   })
+function startSmoothDrag({ pointerEvent, axis = "y", sourceEl, previewLabel, getTargets, scrollEl = null, onStart, onCommit, onEnd }) {
+  const handle = pointerEvent.currentTarget;
+  const pointerId = pointerEvent.pointerId;
+  const startX = pointerEvent.clientX, startY = pointerEvent.clientY;
+  let active = false;
+  let pending = null;            // { key, side }
+  let preview = null, line = null;
+  try { handle.setPointerCapture(pointerId); } catch (_) {}
+
+  const mountChrome = () => {
+    preview = document.createElement("div");
+    preview.className = "smooth-drag-preview";
+    preview.textContent = (previewLabel || "").slice(0, 80) || "Move";
+    document.body.appendChild(preview);
+    line = document.createElement("div");
+    line.className = `smooth-drag-line smooth-drag-line-${axis}`;
+    document.body.appendChild(line);
+  };
+  const unmountChrome = () => { preview?.remove(); line?.remove(); preview = line = null; };
+
+  const updateLine = (x, y) => {
+    const targets = (getTargets && getTargets()) || [];
+    if (!targets.length) { pending = null; if (line) line.style.display = "none"; return; }
+    const p = axis === "y" ? y : x;
+    let best = null, bestDist = Infinity;
+    for (const t of targets) {
+      const r = t.el.getBoundingClientRect();
+      const mid = axis === "y" ? r.top + r.height / 2 : r.left + r.width / 2;
+      const d = Math.abs(p - mid);
+      if (d < bestDist) { bestDist = d; best = { t, r, mid }; }
+    }
+    if (!best) { pending = null; return; }
+    const side = p < best.mid ? "before" : "after";
+    pending = { key: best.t.key, side };
+    if (!line) return;
+    line.style.display = "block";
+    const r = best.r;
+    if (axis === "y") {
+      const ly = side === "before" ? r.top : r.bottom;
+      line.style.left = r.left + "px"; line.style.width = r.width + "px"; line.style.top = (ly - 1.5) + "px";
+    } else {
+      const lx = side === "before" ? r.left : r.right;
+      line.style.top = r.top + "px"; line.style.height = r.height + "px"; line.style.left = (lx - 1.5) + "px";
+    }
+  };
+  const autoScroll = (x, y) => {
+    if (!scrollEl) return;
+    const r = scrollEl.getBoundingClientRect(); const m = 44;
+    if (axis === "y") {
+      if (y < r.top + m) scrollEl.scrollTop -= 10;
+      else if (y > r.bottom - m) scrollEl.scrollTop += 10;
+    } else {
+      if (x < r.left + m) scrollEl.scrollLeft -= 10;
+      else if (x > r.right - m) scrollEl.scrollLeft += 10;
+    }
+  };
+
+  const onMove = (e) => {
+    if (!active) {
+      if (Math.abs(e.clientX - startX) < 5 && Math.abs(e.clientY - startY) < 5) return;
+      active = true;
+      mountChrome();
+      sourceEl?.classList.add("smooth-drag-source");
+      onStart?.();
+    }
+    e.preventDefault();
+    if (preview) { preview.style.left = (e.clientX + 14) + "px"; preview.style.top = (e.clientY + 14) + "px"; }
+    updateLine(e.clientX, e.clientY);
+    autoScroll(e.clientX, e.clientY);
+  };
+  const finish = (e) => {
+    handle.removeEventListener("pointermove", onMove);
+    handle.removeEventListener("pointerup", finish);
+    handle.removeEventListener("pointercancel", finish);
+    try { handle.releasePointerCapture(pointerId); } catch (_) {}
+    sourceEl?.classList.remove("smooth-drag-source");
+    unmountChrome();
+    if (active && pending && e.type !== "pointercancel") onCommit?.(pending.key, pending.side);
+    onEnd?.(active);
+  };
+  handle.addEventListener("pointermove", onMove);
+  handle.addEventListener("pointerup", finish);
+  handle.addEventListener("pointercancel", finish);
+}
+window.startSmoothDrag = startSmoothDrag;
+
 // ====== BLOCK HANDLE ======
 // Click → opens the block action menu (dispatched as a window event so the
-// PageEditor, which holds all block actions, can render it). Drag → reorder.
-// Desktop uses native HTML5 drag-and-drop; touch devices (where HTML5 DnD never
-// fires) get a Pointer-Events fallback that drives the same reorder pipeline.
+// PageEditor, which holds all block actions, can render it). Drag → reorder
+// (smooth pointer drag with floating preview + live insertion line).
 function BlockHandle({ blockId, onDragBlockStart, onDragBlockEnd }) {
   const draggedRef = useRef(false);
-  const touchRef = useRef(null);
 
-  const clearDropIndicators = () => {
-    document.querySelectorAll(".block-shell.drop-before, .block-shell.drop-after")
-      .forEach((el) => el.classList.remove("drop-before", "drop-after"));
-  };
-
-  // ── Touch / pen drag (Pointer Events) ──────────────────────────────────────
   const onPointerDown = (e) => {
-    if (e.pointerType === "mouse") return; // desktop keeps native HTML5 DnD
+    if (e.button != null && e.button !== 0) return;
     const selfShell = e.currentTarget.closest("[data-block-id]");
-    touchRef.current = { active: false, startX: e.clientX, startY: e.clientY, selfShell, target: null, side: "before" };
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
-  };
-  const onPointerMove = (e) => {
-    const st = touchRef.current;
-    if (!st) return;
-    if (!st.active) {
-      // Require a small vertical movement before we treat it as a drag (so a
-      // plain tap still opens the actions menu via onClick).
-      if (Math.abs(e.clientY - st.startY) < 6 && Math.abs(e.clientX - st.startX) < 6) return;
-      st.active = true;
-      draggedRef.current = true;
-      onDragBlockStart?.(blockId);
-      st.selfShell?.classList.add("dragging");
-    }
-    e.preventDefault(); // stop the page from scrolling under the finger
-    const under = document.elementFromPoint(e.clientX, e.clientY);
-    const shell = under?.closest?.(".block-shell[data-block-id]");
-    clearDropIndicators();
-    if (shell && shell !== st.selfShell) {
-      const r = shell.getBoundingClientRect();
-      const side = e.clientY < r.top + r.height / 2 ? "before" : "after";
-      shell.classList.add(`drop-${side}`);
-      st.target = shell.getAttribute("data-block-id");
-      st.side = side;
-    } else {
-      st.target = null;
-    }
-  };
-  const endTouch = (e) => {
-    const st = touchRef.current;
-    touchRef.current = null;
-    if (!st) return;
-    st.selfShell?.classList.remove("dragging");
-    clearDropIndicators();
-    if (st.active) {
-      if (st.target && st.target !== blockId) {
-        window.dispatchEvent(new CustomEvent("block-touch-drop", {
-          detail: { draggedId: blockId, targetId: st.target, side: st.side },
-        }));
-      }
-      onDragBlockEnd?.(e);
-      // Swallow the click that follows this pointerup so the actions menu
-      // doesn't pop open at the end of a drag.
-      setTimeout(() => { draggedRef.current = false; }, 0);
-    }
+    const pageBody = selfShell?.closest(".page-body");
+    const label = (selfShell?.innerText || "").trim().split("\n")[0] || "Block";
+    startSmoothDrag({
+      pointerEvent: e,
+      axis: "y",
+      sourceEl: selfShell,
+      previewLabel: label,
+      scrollEl: pageBody?.closest(".page-main") || null,
+      getTargets: () => [...(pageBody ? pageBody.querySelectorAll(".block-shell[data-block-id]") : [])]
+        .filter((el) => el.getAttribute("data-block-id") !== blockId)
+        .map((el) => ({ el, key: el.getAttribute("data-block-id") })),
+      onStart: () => { draggedRef.current = true; onDragBlockStart?.(blockId); },
+      onCommit: (targetId, side) => {
+        if (targetId && targetId !== blockId) {
+          window.dispatchEvent(new CustomEvent("block-touch-drop", {
+            detail: { draggedId: blockId, targetId, side },
+          }));
+        }
+      },
+      onEnd: () => { onDragBlockEnd?.(); setTimeout(() => { draggedRef.current = false; }, 0); },
+    });
   };
 
   return (
     <button
       className="block-handle"
-      draggable
-      onDragStart={(e) => {
-        draggedRef.current = true;
-        e.stopPropagation();
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", blockId);
-        onDragBlockStart?.(blockId);
-      }}
-      onDragEnd={(e) => { onDragBlockEnd?.(e); setTimeout(() => { draggedRef.current = false; }, 0); }}
       onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={endTouch}
-      onPointerCancel={endTouch}
       onClick={(e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -3087,92 +3139,72 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     next[i] = next[i] === "checkbox" ? "text" : "checkbox";
     updateBlock({ ...block, colTypes: next });
   };
-  const addRow = () => updateBlock({ ...block, columnWidths, rows: [...block.rows, { id: nid(), cells: block.headers.map(() => "") }] });
-  // Insert an empty row directly AFTER a given index (lets you add rows between
-  // existing rows, not only at the end).
-  const insertRowAfter = (idx) => {
-    const rows = [...block.rows];
-    rows.splice(idx + 1, 0, { id: nid(), cells: block.headers.map(() => "") });
-    updateBlock({ ...block, columnWidths, rows });
+  const blankCells = () => block.headers.map(() => "");
+  // ── Row ops ────────────────────────────────────────────────────────────────
+  const addRow = () => updateBlock({ ...block, columnWidths, rows: [...block.rows, { id: nid(), cells: blankCells() }] });
+  const insertRowAt = (idx) => { const rows = [...block.rows]; rows.splice(idx, 0, { id: nid(), cells: blankCells() }); updateBlock({ ...block, columnWidths, rows }); };
+  const duplicateRow = (idx) => { const rows = [...block.rows]; rows.splice(idx + 1, 0, { id: nid(), cells: [...(rows[idx]?.cells || blankCells())] }); updateBlock({ ...block, columnWidths, rows }); };
+  const clearRow = (idx) => updateBlock({ ...block, rows: block.rows.map((r, i) => i === idx ? { ...r, cells: r.cells.map(() => "") } : r) });
+  const remRow = (idx) => { const next = block.rows.filter((_, i) => i !== idx); updateBlock({ ...block, rows: next.length ? next : [{ id: nid(), cells: blankCells() }] }); };
+  // ── Column ops ───────────────────────────────────────────────────────────────
+  const addCol = () => updateBlock({ ...block, headers: [...block.headers, ""], colTypes: [...colTypes, "text"], columnWidths: [...columnWidths, 180], rows: block.rows.map(r => ({ ...r, cells: [...r.cells, ""] })) });
+  const insertColAt = (idx) => {
+    const ins = (arr, v) => { const a = [...arr]; a.splice(idx, 0, v); return a; };
+    updateBlock({ ...block, headers: ins(block.headers, ""), colTypes: ins(colTypes, "text"), columnWidths: ins(columnWidths, 180), rows: block.rows.map(r => ({ ...r, cells: ins(r.cells, "") })) });
   };
-  // ── Drag-to-reorder rows & columns ──────────────────────────────────────────
-  const reorderArray = (arr, from, to) => {
-    const a = [...arr];
-    const [moved] = a.splice(from, 1);
-    let ins = to; if (from < to) ins -= 1;
-    a.splice(Math.max(0, ins), 0, moved);
-    return a;
+  const duplicateCol = (idx) => {
+    const dup = (arr) => { const a = [...arr]; a.splice(idx + 1, 0, arr[idx]); return a; };
+    updateBlock({ ...block, headers: dup(block.headers), colTypes: dup(colTypes), columnWidths: dup(columnWidths), rows: block.rows.map(r => ({ ...r, cells: dup(r.cells) })) });
   };
-  const moveRow = (from, to) => {
-    if (from == null || from === to) return;
-    updateBlock({ ...block, columnWidths, rows: reorderArray(block.rows, from, to) });
+  const clearCol = (idx) => updateBlock({ ...block, headers: block.headers.map((h, i) => i === idx ? "" : h), rows: block.rows.map(r => ({ ...r, cells: r.cells.map((c, i) => i === idx ? "" : c) })) });
+  const remCol = (idx) => {
+    if (block.headers.length <= 1) return;
+    updateBlock({ ...block, headers: block.headers.filter((_, i) => i !== idx), colTypes: colTypes.filter((_, i) => i !== idx), columnWidths: columnWidths.filter((_, i) => i !== idx), rows: block.rows.map(r => ({ ...r, cells: r.cells.filter((_, i) => i !== idx) })) });
   };
+  // ── Reorder (used by the smooth drag) ───────────────────────────────────────
+  const reorderArray = (arr, from, to) => { const a = [...arr]; const [m] = a.splice(from, 1); let ins = to; if (from < to) ins -= 1; a.splice(Math.max(0, ins), 0, m); return a; };
+  const moveRow = (from, to) => { if (from == null || from === to) return; updateBlock({ ...block, columnWidths, rows: reorderArray(block.rows, from, to) }); };
   const moveCol = (from, to) => {
     if (from == null || from === to) return;
-    updateBlock({
-      ...block,
-      headers: reorderArray(block.headers, from, to),
-      colTypes: reorderArray(colTypes, from, to),
-      columnWidths: reorderArray(columnWidths, from, to),
-      rows: block.rows.map((r) => ({ ...r, cells: reorderArray(r.cells, from, to) })),
+    updateBlock({ ...block, headers: reorderArray(block.headers, from, to), colTypes: reorderArray(colTypes, from, to), columnWidths: reorderArray(columnWidths, from, to), rows: block.rows.map(r => ({ ...r, cells: reorderArray(r.cells, from, to) })) });
+  };
+  // ── Edge handles: smooth drag (reuse shared helper) + click → menu ───────────
+  const [menu, setMenu] = useState(null); // { type:"row"|"col", index, x, y }
+  const rowDragRef = useRef(false);
+  const colDragRef = useRef(false);
+  const startRowHandleDrag = (e, rowIdx) => {
+    if (e.button != null && e.button !== 0) return;
+    const tr = e.currentTarget.closest("tr");
+    const tbody = tr?.closest("tbody");
+    if (!tbody) return;
+    window.startSmoothDrag({
+      pointerEvent: e, axis: "y", sourceEl: tr,
+      previewLabel: ([...tr.querySelectorAll(".tbl-cell-inner .editable")].map((el) => el.textContent.trim()).find(Boolean)) || "Row",
+      scrollEl: tr.closest(".tbl-wrap"),
+      getTargets: () => [...tbody.querySelectorAll("tr[data-row-id]")].map((el, i) => ({ el, key: i })).filter(t => t.key !== rowIdx),
+      onStart: () => { rowDragRef.current = true; },
+      onCommit: (ti, side) => moveRow(rowIdx, side === "after" ? ti + 1 : ti),
+      onEnd: () => setTimeout(() => { rowDragRef.current = false; }, 0),
     });
   };
-  const dragRowRef = useRef(null);
-  const dragColRef = useRef(null);
-  const [dropRow, setDropRow] = useState(null); // { idx, side: "above"|"below" }
-  const [dropCol, setDropCol] = useState(null); // { idx, side: "before"|"after" }
-  const startRowDrag = (e, idx) => {
-    e.stopPropagation();
-    dragRowRef.current = idx;
-    try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", "row"); } catch (_) {}
+  const startColHandleDrag = (e, colIdx) => {
+    if (e.button != null && e.button !== 0) return;
+    const cell = e.currentTarget.closest("th");
+    const rail = cell?.closest("tr");
+    if (!rail) return;
+    window.startSmoothDrag({
+      pointerEvent: e, axis: "x", sourceEl: cell,
+      previewLabel: block.headers[colIdx] || "Column",
+      scrollEl: cell.closest(".tbl-wrap"),
+      getTargets: () => [...rail.querySelectorAll("th.tbl-rail-cell")].map((el, i) => ({ el, key: i })).filter(t => t.key !== colIdx),
+      onStart: () => { colDragRef.current = true; },
+      onCommit: (ti, side) => moveCol(colIdx, side === "after" ? ti + 1 : ti),
+      onEnd: () => setTimeout(() => { colDragRef.current = false; }, 0),
+    });
   };
-  const onRowDragOver = (e, idx) => {
-    if (dragRowRef.current == null) return;
-    e.preventDefault(); e.stopPropagation();
-    const r = e.currentTarget.getBoundingClientRect();
-    setDropRow({ idx, side: e.clientY < r.top + r.height / 2 ? "above" : "below" });
-  };
-  const onRowDrop = (e, idx) => {
-    if (dragRowRef.current == null) return;
-    e.preventDefault(); e.stopPropagation();
-    // Compute the side from the drop event directly (don't rely on dropRow state,
-    // which may not have flushed) — keeps the landing position exact.
-    const r = e.currentTarget.getBoundingClientRect();
-    const side = e.clientY < r.top + r.height / 2 ? "above" : "below";
-    moveRow(dragRowRef.current, side === "below" ? idx + 1 : idx);
-    dragRowRef.current = null; setDropRow(null);
-  };
-  const endRowDrag = () => { dragRowRef.current = null; setDropRow(null); };
-  const startColDrag = (e, idx) => {
-    e.stopPropagation();
-    dragColRef.current = idx;
-    try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", "col"); } catch (_) {}
-  };
-  const onColDragOver = (e, idx) => {
-    if (dragColRef.current == null) return;
-    e.preventDefault(); e.stopPropagation();
-    const r = e.currentTarget.getBoundingClientRect();
-    setDropCol({ idx, side: e.clientX < r.left + r.width / 2 ? "before" : "after" });
-  };
-  const onColDrop = (e, idx) => {
-    if (dragColRef.current == null) return;
-    e.preventDefault(); e.stopPropagation();
-    const r = e.currentTarget.getBoundingClientRect();
-    const side = e.clientX < r.left + r.width / 2 ? "before" : "after";
-    moveCol(dragColRef.current, side === "after" ? idx + 1 : idx);
-    dragColRef.current = null; setDropCol(null);
-  };
-  const endColDrag = () => { dragColRef.current = null; setDropCol(null); };
-  const addCol = () => updateBlock({ ...block, headers: [...block.headers, "New"], colTypes: [...colTypes, "text"], columnWidths: [...columnWidths, 180], rows: block.rows.map(r => ({ ...r, cells: [...r.cells, ""] })) });
+  const openRowMenu = (e, rowIdx) => { if (rowDragRef.current) return; const r = e.currentTarget.getBoundingClientRect(); setMenu({ type: "row", index: rowIdx, x: r.right + 4, y: r.top }); };
+  const openColMenu = (e, colIdx) => { if (colDragRef.current) return; const r = e.currentTarget.getBoundingClientRect(); setMenu({ type: "col", index: colIdx, x: r.left, y: r.bottom + 4 }); };
   const clearCell = (rid, ci) => updCell(rid, ci, "");
-  const remRow = (id) => {
-    const nextRows = block.rows.filter(r => r.id !== id);
-    updateBlock({ ...block, rows: nextRows.length ? nextRows : [{ id: nid(), cells: block.headers.map(() => "") }] });
-  };
-  const remCol = (i) => {
-    if (block.headers.length <= 1) return;
-    updateBlock({ ...block, headers: block.headers.filter((_,idx) => idx !== i), colTypes: colTypes.filter((_, idx) => idx !== i), columnWidths: columnWidths.filter((_, idx) => idx !== i), rows: block.rows.map(r => ({ ...r, cells: r.cells.filter((_,idx) => idx !== i) })) });
-  };
   const startResize = (index, e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -3181,7 +3213,8 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     // Resolve the live <col> element so we can preview the new width during the drag
     // WITHOUT writing to React state / history on every mousemove (which floods sync
     // and creates one undo step per pixel). We commit a single update on mouseup.
-    const colEl = e.target?.closest?.("table")?.querySelectorAll?.("colgroup col")?.[index] || null;
+    // +1: colgroup has a leading gutter <col> before the data columns.
+    const colEl = e.target?.closest?.("table")?.querySelectorAll?.("colgroup col")?.[index + 1] || null;
     let finalWidth = startWidth;
     const onMove = (ev) => {
       finalWidth = Math.max(80, startWidth + ev.clientX - startX);
@@ -3199,144 +3232,132 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     window.addEventListener("mousemove", onMove, true);
     window.addEventListener("mouseup", onUp, true);
   };
+  // One cell renderer for header row AND body rows so they look identical
+  // (headerless tables). `type` is the column's type; `onChange` writes the value.
+  const renderCell = (value, type, onChange, key) => (
+    <td key={key} className={type === "checkbox" ? "tbl-td-check" : ""}>
+      {type === "checkbox" ? (
+        <button
+          className={`tbl-checkcell${value ? " tbl-checked" : ""}`}
+          onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+          onClick={(e) => { e.stopPropagation(); onChange(value ? "" : "1"); }}
+          title={value ? "Mark incomplete" : "Mark complete"}
+          type="button"
+        >{value ? "✓" : ""}</button>
+      ) : (
+        <div className="tbl-cell-inner">
+          <EditableText
+            value={value}
+            onChange={onChange}
+            placeholder="…"
+            multiline
+            softBreakOnEnter
+            style={{ fontSize:14, lineHeight:1.55, color:"var(--text)", minHeight:24, paddingRight:18 }}
+          />
+          <button
+            className="tbl-cell-clear"
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); onChange(""); }}
+            title="Clear cell"
+            type="button"
+          >×</button>
+        </div>
+      )}
+    </td>
+  );
+  const MenuItem = ({ onClick, danger, children }) => (
+    <button className={`tbl-menu-item${danger ? " danger" : ""}`} onMouseDown={(e) => e.preventDefault()} onClick={() => { onClick(); setMenu(null); }} type="button">{children}</button>
+  );
+  const handleGlyph = (
+    <svg viewBox="0 0 16 16" width="11" height="11" fill="currentColor" aria-hidden="true">
+      <circle cx="6" cy="3.5" r="1.25"/><circle cx="10" cy="3.5" r="1.25"/>
+      <circle cx="6" cy="8" r="1.25"/><circle cx="10" cy="8" r="1.25"/>
+      <circle cx="6" cy="12.5" r="1.25"/><circle cx="10" cy="12.5" r="1.25"/>
+    </svg>
+  );
+
   return (
     <div className="block-wrap">
       <BlockHandle blockId={blockId} onDragBlockStart={onDragBlockStart} onDragBlockEnd={onDragBlockEnd} />
       <BlockDeleteButton onDeleteBlock={onDeleteBlock} />
-      <div className="tbl-wrap">
+      <div className="tbl-wrap tbl-notion">
         <table style={{ tableLayout:"fixed", width:"max-content", minWidth:"100%" }}>
           <colgroup>
+            <col className="tbl-gutter-col" style={{ width: 20 }} />
             {block.headers.map((_, i) => <col key={i} style={{ width: columnWidths[i] || 180 }} />)}
-            <col style={{ width: 78 }} />
           </colgroup>
+          {/* Top rail: one drag/menu handle per column (Notion-style edge handle) */}
           <thead>
-            <tr>
-              {block.headers.map((h, i) => (
-                <th
-                  key={i}
-                  className={dropCol && dropCol.idx === i ? `tbl-col-drop-${dropCol.side}` : ""}
-                  onDragOver={(e) => onColDragOver(e, i)}
-                  onDrop={(e) => onColDrop(e, i)}
-                >
-                  <div className="tbl-head">
-                    <span
-                      className="tbl-col-grip"
-                      draggable
-                      onDragStart={(e) => startColDrag(e, i)}
-                      onDragEnd={endColDrag}
-                      onMouseDown={(e) => e.stopPropagation()}
-                      title="Drag to reorder column"
-                    >⠿</span>
-                    <EditableText
-                      value={h}
-                      onChange={(v) => updHead(i, v)}
-                      style={{ flex:1, fontSize:11, fontWeight:600, color:"var(--text-muted)", textTransform:"uppercase", letterSpacing:0, whiteSpace:"nowrap", overflow:"hidden" }}
-                    />
-                    <button
-                      onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleColType(i); }}
-                      className={`tbl-coltype${colTypes[i] === "checkbox" ? " tbl-coltype-on" : ""}`}
-                      title={colTypes[i] === "checkbox" ? "Checkbox column — click for text" : "Make this a checkbox column"}
-                      type="button"
-                    >
-                      ☑
-                    </button>
-                    <button
-                      onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); remCol(i); }}
-                      className="tbl-del"
-                      title="Delete column"
-                      type="button"
-                    >
-                      ×
-                    </button>
-                  </div>
+            <tr className="tbl-rail">
+              <th className="tbl-corner" />
+              {block.headers.map((_, i) => (
+                <th key={i} className="tbl-rail-cell">
+                  <button
+                    className="tbl-colhandle"
+                    onPointerDown={(e) => startColHandleDrag(e, i)}
+                    onClick={(e) => openColMenu(e, i)}
+                    title="Drag to move · click for options"
+                    type="button"
+                  >{handleGlyph}</button>
                   <span className="tbl-resize-handle" onMouseDown={(e) => startResize(i, e)} title="Resize column" />
                 </th>
               ))}
-              <th style={{ width:50 }}>
-                <button onClick={addCol} className="tbl-add">+</button>
-              </th>
             </tr>
           </thead>
           <tbody>
+            {/* Header row rendered identical to body rows (no distinct header) */}
+            <tr className="tbl-hrow">
+              <td className="tbl-rowgutter" />
+              {block.headers.map((h, i) => renderCell(h, colTypes[i], (v) => updHead(i, v), i))}
+            </tr>
             {block.rows.map((row, rowIdx) => (
-              <tr
-                key={row.id}
-                data-row-id={row.id}
-                className={dropRow && dropRow.idx === rowIdx ? `tbl-row-drop-${dropRow.side}` : ""}
-                onDragOver={(e) => onRowDragOver(e, rowIdx)}
-                onDrop={(e) => onRowDrop(e, rowIdx)}
-              >
-                {row.cells.map((c, i) => (
-                  <td key={i} className={colTypes[i] === "checkbox" ? "tbl-td-check" : ""}>
-                    {colTypes[i] === "checkbox" ? (
-                      <button
-                        className={`tbl-checkcell${c ? " tbl-checked" : ""}`}
-                        onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                        onClick={(e) => { e.stopPropagation(); updCell(row.id, i, c ? "" : "1"); }}
-                        title={c ? "Mark incomplete" : "Mark complete"}
-                        type="button"
-                      >
-                        {c ? "✓" : ""}
-                      </button>
-                    ) : (
-                      <div className="tbl-cell-inner">
-                        <EditableText
-                          value={c}
-                          onChange={(v) => updCell(row.id, i, v)}
-                          placeholder="…"
-                          multiline
-                          softBreakOnEnter
-                          style={{ fontSize:14, lineHeight:1.55, color:"var(--text)", minHeight:24, paddingRight:22 }}
-                        />
-                        <button
-                          className="tbl-cell-clear"
-                          onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); clearCell(row.id, i); }}
-                          title="Clear cell"
-                          type="button"
-                        >
-                          ×
-                        </button>
-                      </div>
-                    )}
-                  </td>
-                ))}
-                <td className="tbl-row-actions">
-                  <span
-                    className="tbl-row-grip"
-                    draggable
-                    onDragStart={(e) => startRowDrag(e, rowIdx)}
-                    onDragEnd={endRowDrag}
-                    onMouseDown={(e) => e.stopPropagation()}
-                    title="Drag to reorder row"
-                  >⠿</span>
+              <tr key={row.id} data-row-id={row.id}>
+                <td className="tbl-rowgutter">
                   <button
-                    onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); insertRowAfter(rowIdx); }}
-                    className="tbl-row-insert"
-                    title="Insert row below"
+                    className="tbl-rowhandle"
+                    onPointerDown={(e) => startRowHandleDrag(e, rowIdx)}
+                    onClick={(e) => openRowMenu(e, rowIdx)}
+                    title="Drag to move · click for options"
                     type="button"
-                  >
-                    +
-                  </button>
-                  <button
-                    onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); remRow(row.id); }}
-                    className="row-del"
-                    title="Delete row"
-                    type="button"
-                  >
-                    ×
-                  </button>
+                  >{handleGlyph}</button>
                 </td>
+                {row.cells.map((c, i) => renderCell(c, colTypes[i], (v) => updCell(row.id, i, v), i))}
               </tr>
             ))}
           </tbody>
         </table>
-        <button onClick={addRow} className="tbl-add-row">+ row</button>
+        <div className="tbl-foot">
+          <button onClick={addRow} className="tbl-foot-btn" title="Add row" type="button">+ Row</button>
+          <button onClick={addCol} className="tbl-foot-btn" title="Add column" type="button">+ Column</button>
+        </div>
       </div>
+      {menu && (
+        <React.Fragment>
+          <div className="tbl-menu-backdrop" onMouseDown={() => setMenu(null)} />
+          <div className="tbl-menu" style={{ position:"fixed", left: menu.x, top: menu.y, zIndex: 10001 }}>
+            {menu.type === "row" ? (
+              <React.Fragment>
+                <MenuItem onClick={() => insertRowAt(menu.index)}>↑  Insert row above</MenuItem>
+                <MenuItem onClick={() => insertRowAt(menu.index + 1)}>↓  Insert row below</MenuItem>
+                <MenuItem onClick={() => duplicateRow(menu.index)}>⧉  Duplicate</MenuItem>
+                <MenuItem onClick={() => clearRow(menu.index)}>⌫  Clear contents</MenuItem>
+                <div className="tbl-menu-sep" />
+                <MenuItem onClick={() => remRow(menu.index)} danger>✕  Delete row</MenuItem>
+              </React.Fragment>
+            ) : (
+              <React.Fragment>
+                <MenuItem onClick={() => insertColAt(menu.index)}>←  Insert column left</MenuItem>
+                <MenuItem onClick={() => insertColAt(menu.index + 1)}>→  Insert column right</MenuItem>
+                <MenuItem onClick={() => duplicateCol(menu.index)}>⧉  Duplicate</MenuItem>
+                <MenuItem onClick={() => clearCol(menu.index)}>⌫  Clear contents</MenuItem>
+                <MenuItem onClick={() => toggleColType(menu.index)}>{colTypes[menu.index] === "checkbox" ? "☐  Make text column" : "☑  Make checkbox column"}</MenuItem>
+                <div className="tbl-menu-sep" />
+                <MenuItem onClick={() => remCol(menu.index)} danger>✕  Delete column</MenuItem>
+              </React.Fragment>
+            )}
+          </div>
+        </React.Fragment>
+      )}
     </div>
   );
 }

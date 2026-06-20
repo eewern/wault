@@ -48,6 +48,14 @@ function shortDate(key) {
       : { day: "numeric", month: "short", year: "numeric" });
   } catch { return key; }
 }
+
+// A pulled task's sourceLabel is "Page title · Workspace". Show just the
+// workspace name on the right of the row so you can see where it's from.
+function sourceWsLabel(label) {
+  if (!label) return "";
+  const parts = String(label).split("·");
+  return (parts[parts.length - 1] || label).trim();
+}
 function agoLabel(iso) {
   if (!iso) return "";
   const ms = Date.now() - new Date(iso).getTime();
@@ -407,25 +415,27 @@ function TaskRow({ task, today, onPatch, onDelete, onPin, onOpenSource, big = fa
         ) : (
           <span className="fx-task-title" onClick={() => { setDraft(task.title); setEditing(true); }} data-tooltip="Click to rename this task">{task.title}</span>
         )}
-        <span className="fx-task-meta">
-          <button
-            className={`fx-pill fx-pill-${task.priority}`}
-            onClick={() => onPatch(task.id, { priority: NEXT_PRIORITY[task.priority] || "medium" })}
-            data-tooltip="Click to cycle priority: high → medium → low"
-          >{task.priority}</button>
-          <label className={`fx-pill fx-pill-due${overdue ? " fx-overdue" : ""}${dueToday ? " fx-today" : ""}`} data-tooltip="Click to pick a due date">
-            {task.dueDate ? shortDate(task.dueDate) : "no date"}
-            <input
-              type="date"
-              value={task.dueDate || ""}
-              onChange={(e) => onPatch(task.id, { dueDate: e.target.value })}
-            />
-          </label>
-          {task.sourceType === "document" && task.sourceLabel && (
-            <button className="fx-task-src" onClick={() => onOpenSource?.(task)} data-tooltip={`Open the source page: ${task.sourceLabel}`}>📄 {task.sourceLabel}</button>
-          )}
-        </span>
       </div>
+      {/* Meta on the RIGHT so dates line up vertically and compare at a glance:
+          workspace · priority · date (date rightmost). */}
+      <span className="fx-task-meta">
+        {task.sourceType === "document" && task.sourceLabel && (
+          <button className="fx-task-src" onClick={() => onOpenSource?.(task)} data-tooltip={`Open the source page: ${task.sourceLabel}`}>📄 {sourceWsLabel(task.sourceLabel)}</button>
+        )}
+        <button
+          className={`fx-pill fx-pill-${task.priority}`}
+          onClick={() => onPatch(task.id, { priority: NEXT_PRIORITY[task.priority] || "medium" })}
+          data-tooltip="Click to cycle priority: high → medium → low"
+        >{task.priority}</button>
+        <label className={`fx-pill fx-pill-due${overdue ? " fx-overdue" : ""}${dueToday ? " fx-today" : ""}`} data-tooltip="Click to pick a due date">
+          {task.dueDate ? shortDate(task.dueDate) : "no date"}
+          <input
+            type="date"
+            value={task.dueDate || ""}
+            onChange={(e) => onPatch(task.id, { dueDate: e.target.value })}
+          />
+        </label>
+      </span>
       <span className="fx-task-actions">
         {!done && (
           <React.Fragment>
@@ -1007,15 +1017,29 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
   const pinnedIds = new Set(pinned.map((t) => t.id));
   const visible = (list) => list.filter((t) => !pinnedIds.has(t.id));
 
-  // ── Auto-fill Today's Focus: top up EMPTY pin slots (up to 3) with the most
-  // urgent tasks. Never overrides your own pins and never re-adds something you
-  // unpinned today. Pure fill-empty-only behaviour.
+  // Efficiency counts (real numbers, not decoration).
+  const openAll = [...buckets.overdue, ...buckets.today, ...buckets.upcoming, ...buckets.nodate, ...buckets.waiting];
+  const stats = {
+    due: buckets.today.length,
+    overdue: buckets.overdue.length,
+    pending: openAll.length,
+    high: openAll.filter((t) => t.priority === "high").length,
+  };
+  // Lists for the under-calendar tabs.
+  const [listTab, setListTab] = useState("today"); // today | all | done
+  const todayList = [...buckets.overdue, ...buckets.today].sort(taskOrder);
+  const allList = [...buckets.overdue, ...buckets.today, ...buckets.upcoming, ...buckets.nodate].sort(taskOrder);
+
+  // ── Auto-fill Today's Priorities: top up EMPTY pin slots (up to 3) from
+  // DUE-TODAY tasks only. Finishing a priority frees a slot → the next due-today
+  // task pushes up. If nothing is due today, Priorities stays empty. Never
+  // overrides your own pins and never re-adds something you unpinned today.
   useEffect(() => {
     if (pinned.length >= 3) return;
     const seed = readJson(LS_PINSEED, null);
     const unpinned = new Set(seed && seed.date === today ? (seed.userUnpinned || []) : []);
     const pinnedSet = new Set(pinned.map((t) => t.id));
-    const candidates = [...buckets.overdue, ...buckets.today, ...buckets.upcoming, ...buckets.nodate]
+    const candidates = buckets.today
       .filter((t) => t && t.status !== "done" && !pinnedSet.has(t.id) && !unpinned.has(t.id));
     candidates.slice(0, 3 - pinned.length).forEach((t) => pinTask(t.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1046,6 +1070,14 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
           </div>
         </div>
 
+        {/* Efficiency counts — real numbers up top */}
+        <div className="fx-stats">
+          <span className={`fx-stat${stats.due > 0 ? " fx-stat-due" : ""}`} data-tooltip="Tasks due today"><b>{stats.due}</b> due today</span>
+          <span className={`fx-stat${stats.overdue > 0 ? " fx-stat-overdue" : ""}`} data-tooltip="Tasks past their due date"><b>{stats.overdue}</b> overdue</span>
+          <span className="fx-stat" data-tooltip="All open tasks (everything not done)"><b>{stats.pending}</b> pending</span>
+          <span className={`fx-stat${stats.high > 0 ? " fx-stat-high" : ""}`} data-tooltip="Open tasks marked high priority"><b>{stats.high}</b> high priority</span>
+        </div>
+
         <WorkspaceCards workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} data={data} onOpen={openWorkspace} />
 
         <QuickAdd onAdd={addTask} />
@@ -1054,24 +1086,35 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
           <div className="fx-main">
             <section className="fx-bucket fx-b-pinned fx-focus-block fx-fade">
               <div className="fx-bucket-head">
-                <h2 className="fx-focus-title">Today's Focus {pinned.length > 0 && <span className="fx-count">{pinned.length}/3</span>}</h2>
-                <span className="fx-bucket-sub">Your top three for the day — auto-filled, pin your own with ☆.</span>
+                <h2 className="fx-focus-title">Today's Priorities {pinned.length > 0 && <span className="fx-count">{pinned.length}/3</span>}</h2>
+                <span className="fx-bucket-sub">Auto-filled from today's due tasks — finish one and the next moves up. Pin your own with ☆.</span>
               </div>
               {pinned.length === 0
-                ? <div className="fx-empty">Nothing pinned yet. Hover a task and hit ☆ to make it today's focus.</div>
+                ? <div className="fx-empty">Nothing due today. When a task is due today it rises here automatically.</div>
                 : pinned.map((t) => (
                     <TaskRow key={t.id} task={t} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} big />
                   ))}
             </section>
-            <Bucket id="overdue"  tasks={visible(buckets.overdue)}  today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
             <Bucket id="today"    tasks={visible(buckets.today)}    today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
-            <Bucket id="upcoming" tasks={visible(buckets.upcoming)} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
-            <Bucket id="nodate"   tasks={visible(buckets.nodate)}   today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
-            <Bucket id="waiting"  tasks={visible(buckets.waiting)}  today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
-            <DoneSection tasks={buckets.done} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
           </div>
           <aside className="fx-side">
             <MiniCalendar tasks={tasks} events={events} today={today} weekDone={completedThisWeek} />
+            <div className="fx-listpanel">
+              <div className="fx-tabs">
+                <button className={`fx-tab${listTab === "today" ? " fx-tab-on" : ""}`} onClick={() => setListTab("today")} type="button">Today <span className="fx-tab-n">{todayList.length}</span></button>
+                <button className={`fx-tab${listTab === "all" ? " fx-tab-on" : ""}`} onClick={() => setListTab("all")} type="button">All tasks <span className="fx-tab-n">{allList.length}</span></button>
+                <button className={`fx-tab${listTab === "done" ? " fx-tab-on" : ""}`} onClick={() => setListTab("done")} type="button">Done <span className="fx-tab-n">{buckets.done.length}</span></button>
+              </div>
+              <div className="fx-listbody">
+                {(() => {
+                  const list = listTab === "today" ? todayList : listTab === "all" ? allList : buckets.done;
+                  if (!list.length) return <div className="fx-empty">{listTab === "done" ? "Nothing finished in the last 7 days." : listTab === "today" ? "Nothing for today. Enjoy the clear deck." : "No open tasks. All clear."}</div>;
+                  return list.map((t) => (
+                    <TaskRow key={t.id} task={t} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
+                  ));
+                })()}
+              </div>
+            </div>
           </aside>
         </div>
       </div>
