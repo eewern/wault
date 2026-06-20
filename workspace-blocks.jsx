@@ -683,10 +683,12 @@ window.runClipboardSelfTest = function runClipboardSelfTest() {
 try {
   const _h = window.location.hostname;
   const _local = _h === "localhost" || _h === "127.0.0.1" || _h === "[::1]";
-  if (_local && new URLSearchParams(window.location.search).has("selftest")) {
-    // Defer until the whole script has finished parsing — serialize() depends on
-    // helpers (e.g. markerForNumberLevel) declared further down this file.
-    setTimeout(() => window.runClipboardSelfTest(), 0);
+  // Auto-run on EVERY localhost load (not just ?selftest) so a copy/paste-fidelity
+  // regression surfaces immediately during local dev — one quiet ✅ line, or a loud
+  // ❌ if it ever breaks. Deferred until the whole script has parsed (serialize()
+  // depends on helpers like markerForNumberLevel declared further down this file).
+  if (_local) {
+    setTimeout(() => { try { window.runClipboardSelfTest(); } catch (_) {} }, 0);
   }
 } catch (_) {}
 
@@ -3086,6 +3088,81 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     updateBlock({ ...block, colTypes: next });
   };
   const addRow = () => updateBlock({ ...block, columnWidths, rows: [...block.rows, { id: nid(), cells: block.headers.map(() => "") }] });
+  // Insert an empty row directly AFTER a given index (lets you add rows between
+  // existing rows, not only at the end).
+  const insertRowAfter = (idx) => {
+    const rows = [...block.rows];
+    rows.splice(idx + 1, 0, { id: nid(), cells: block.headers.map(() => "") });
+    updateBlock({ ...block, columnWidths, rows });
+  };
+  // ── Drag-to-reorder rows & columns ──────────────────────────────────────────
+  const reorderArray = (arr, from, to) => {
+    const a = [...arr];
+    const [moved] = a.splice(from, 1);
+    let ins = to; if (from < to) ins -= 1;
+    a.splice(Math.max(0, ins), 0, moved);
+    return a;
+  };
+  const moveRow = (from, to) => {
+    if (from == null || from === to) return;
+    updateBlock({ ...block, columnWidths, rows: reorderArray(block.rows, from, to) });
+  };
+  const moveCol = (from, to) => {
+    if (from == null || from === to) return;
+    updateBlock({
+      ...block,
+      headers: reorderArray(block.headers, from, to),
+      colTypes: reorderArray(colTypes, from, to),
+      columnWidths: reorderArray(columnWidths, from, to),
+      rows: block.rows.map((r) => ({ ...r, cells: reorderArray(r.cells, from, to) })),
+    });
+  };
+  const dragRowRef = useRef(null);
+  const dragColRef = useRef(null);
+  const [dropRow, setDropRow] = useState(null); // { idx, side: "above"|"below" }
+  const [dropCol, setDropCol] = useState(null); // { idx, side: "before"|"after" }
+  const startRowDrag = (e, idx) => {
+    e.stopPropagation();
+    dragRowRef.current = idx;
+    try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", "row"); } catch (_) {}
+  };
+  const onRowDragOver = (e, idx) => {
+    if (dragRowRef.current == null) return;
+    e.preventDefault(); e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    setDropRow({ idx, side: e.clientY < r.top + r.height / 2 ? "above" : "below" });
+  };
+  const onRowDrop = (e, idx) => {
+    if (dragRowRef.current == null) return;
+    e.preventDefault(); e.stopPropagation();
+    // Compute the side from the drop event directly (don't rely on dropRow state,
+    // which may not have flushed) — keeps the landing position exact.
+    const r = e.currentTarget.getBoundingClientRect();
+    const side = e.clientY < r.top + r.height / 2 ? "above" : "below";
+    moveRow(dragRowRef.current, side === "below" ? idx + 1 : idx);
+    dragRowRef.current = null; setDropRow(null);
+  };
+  const endRowDrag = () => { dragRowRef.current = null; setDropRow(null); };
+  const startColDrag = (e, idx) => {
+    e.stopPropagation();
+    dragColRef.current = idx;
+    try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", "col"); } catch (_) {}
+  };
+  const onColDragOver = (e, idx) => {
+    if (dragColRef.current == null) return;
+    e.preventDefault(); e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    setDropCol({ idx, side: e.clientX < r.left + r.width / 2 ? "before" : "after" });
+  };
+  const onColDrop = (e, idx) => {
+    if (dragColRef.current == null) return;
+    e.preventDefault(); e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    const side = e.clientX < r.left + r.width / 2 ? "before" : "after";
+    moveCol(dragColRef.current, side === "after" ? idx + 1 : idx);
+    dragColRef.current = null; setDropCol(null);
+  };
+  const endColDrag = () => { dragColRef.current = null; setDropCol(null); };
   const addCol = () => updateBlock({ ...block, headers: [...block.headers, "New"], colTypes: [...colTypes, "text"], columnWidths: [...columnWidths, 180], rows: block.rows.map(r => ({ ...r, cells: [...r.cells, ""] })) });
   const clearCell = (rid, ci) => updCell(rid, ci, "");
   const remRow = (id) => {
@@ -3130,13 +3207,26 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
         <table style={{ tableLayout:"fixed", width:"max-content", minWidth:"100%" }}>
           <colgroup>
             {block.headers.map((_, i) => <col key={i} style={{ width: columnWidths[i] || 180 }} />)}
-            <col style={{ width: 50 }} />
+            <col style={{ width: 78 }} />
           </colgroup>
           <thead>
             <tr>
               {block.headers.map((h, i) => (
-                <th key={i}>
+                <th
+                  key={i}
+                  className={dropCol && dropCol.idx === i ? `tbl-col-drop-${dropCol.side}` : ""}
+                  onDragOver={(e) => onColDragOver(e, i)}
+                  onDrop={(e) => onColDrop(e, i)}
+                >
                   <div className="tbl-head">
+                    <span
+                      className="tbl-col-grip"
+                      draggable
+                      onDragStart={(e) => startColDrag(e, i)}
+                      onDragEnd={endColDrag}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      title="Drag to reorder column"
+                    >⠿</span>
                     <EditableText
                       value={h}
                       onChange={(v) => updHead(i, v)}
@@ -3170,8 +3260,14 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
             </tr>
           </thead>
           <tbody>
-            {block.rows.map(row => (
-              <tr key={row.id}>
+            {block.rows.map((row, rowIdx) => (
+              <tr
+                key={row.id}
+                data-row-id={row.id}
+                className={dropRow && dropRow.idx === rowIdx ? `tbl-row-drop-${dropRow.side}` : ""}
+                onDragOver={(e) => onRowDragOver(e, rowIdx)}
+                onDrop={(e) => onRowDrop(e, rowIdx)}
+              >
                 {row.cells.map((c, i) => (
                   <td key={i} className={colTypes[i] === "checkbox" ? "tbl-td-check" : ""}>
                     {colTypes[i] === "checkbox" ? (
@@ -3207,7 +3303,24 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
                     )}
                   </td>
                 ))}
-                <td style={{ textAlign:"center", width:30 }}>
+                <td className="tbl-row-actions">
+                  <span
+                    className="tbl-row-grip"
+                    draggable
+                    onDragStart={(e) => startRowDrag(e, rowIdx)}
+                    onDragEnd={endRowDrag}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    title="Drag to reorder row"
+                  >⠿</span>
+                  <button
+                    onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); insertRowAfter(rowIdx); }}
+                    className="tbl-row-insert"
+                    title="Insert row below"
+                    type="button"
+                  >
+                    +
+                  </button>
                   <button
                     onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
                     onClick={(e) => { e.preventDefault(); e.stopPropagation(); remRow(row.id); }}
