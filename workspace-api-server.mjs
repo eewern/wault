@@ -1,3 +1,6 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import http from "node:http";
 import https from "node:https";
 import { createSign } from "node:crypto";
@@ -101,6 +104,34 @@ async function firebaseGet(path, searchParams = {}) {
   });
 }
 
+async function firebasePut(path, data) {
+  const accessToken = await getFirebaseAccessToken();
+  const url = new URL(`${FIREBASE_DB_URL}/${path.replace(/^\/+/, "")}.json`);
+  const body = JSON.stringify(data);
+  return await new Promise((resolve, reject) => {
+    const lib = url.protocol === "https:" ? https : http;
+    const opts = {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+        ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
+      },
+    };
+    const req = lib.request(url, opts, (res) => {
+      const chunks = [];
+      res.on("data", c => chunks.push(c));
+      res.on("end", () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+        catch { resolve(null); }
+      });
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 async function resolveApiKey(token) {
   if (!token || !token.startsWith("wn_")) return null;
   const cached = apiKeyCache.get(token);
@@ -182,6 +213,22 @@ async function readBody(req) {
 }
 
 async function readStore() {
+  // If Firebase is configured, use it as the primary store
+  if (FIREBASE_DB_URL && (FIREBASE_SERVICE_ACCOUNT_JSON || FIREBASE_SERVICE_ACCOUNT_PATH)) {
+    try {
+      const data = await firebaseGet("store");
+      if (data && typeof data === "object" && !data.error) {
+        return {
+          version: 1,
+          workspaces: data.workspaces || {},
+          updatedAt: data.updatedAt || null,
+        };
+      }
+    } catch (e) {
+      console.error("Firebase read failed, falling back to local store:", e.message);
+    }
+  }
+  // Fall back to local JSON
   try {
     const raw = await readFile(STORE_PATH, "utf8");
     const parsed = JSON.parse(raw);
@@ -197,8 +244,17 @@ async function readStore() {
 }
 
 async function writeStore(store) {
-  await mkdir(dirname(STORE_PATH), { recursive: true });
   const nextStore = { ...store, version: 1, updatedAt: now() };
+  // Write to Firebase if configured
+  if (FIREBASE_DB_URL && (FIREBASE_SERVICE_ACCOUNT_JSON || FIREBASE_SERVICE_ACCOUNT_PATH)) {
+    try {
+      await firebasePut("store", nextStore);
+    } catch (e) {
+      console.error("Firebase write failed:", e.message);
+    }
+  }
+  // Always write local JSON as backup
+  await mkdir(dirname(STORE_PATH), { recursive: true });
   const tmpPath = `${STORE_PATH}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
   await writeFile(tmpPath, JSON.stringify(nextStore, null, 2));
   await rename(tmpPath, STORE_PATH);
