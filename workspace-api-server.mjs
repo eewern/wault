@@ -213,16 +213,23 @@ async function readBody(req) {
 }
 
 async function readStore() {
-  // If Firebase is configured, use it as the primary store
+  // Firebase primary: read from /workspaces (same path firebase-sync.mjs uses)
+  // Fall back to /store (legacy migration path) if /workspaces is empty/bad
   if (FIREBASE_DB_URL && (FIREBASE_SERVICE_ACCOUNT_JSON || FIREBASE_SERVICE_ACCOUNT_PATH)) {
     try {
-      const data = await firebaseGet("store");
-      if (data && typeof data === "object" && !data.error) {
-        return {
-          version: 1,
-          workspaces: data.workspaces || {},
-          updatedAt: data.updatedAt || null,
-        };
+      const data = await firebaseGet("workspaces");
+      const hasRealData = data && typeof data === "object" && !data.error &&
+        Object.values(data).some(w => w && w.name && w.name !== null);
+      if (hasRealData) {
+        return { version: 1, workspaces: data, updatedAt: null };
+      }
+      // Fall back to /store (the first migration wrote here)
+      const legacy = await firebaseGet("store");
+      if (legacy && typeof legacy === "object" && !legacy.error && legacy.workspaces) {
+        console.log("Restoring from /store fallback and migrating to /workspaces...");
+        // Write to /workspaces so next read uses the correct path
+        await firebasePut("workspaces", legacy.workspaces);
+        return { version: 1, workspaces: legacy.workspaces, updatedAt: legacy.updatedAt || null };
       }
     } catch (e) {
       console.error("Firebase read failed, falling back to local store:", e.message);
@@ -245,10 +252,10 @@ async function readStore() {
 
 async function writeStore(store) {
   const nextStore = { ...store, version: 1, updatedAt: now() };
-  // Write to Firebase if configured
+  // Firebase primary: write each workspace to /workspaces/{id} (same path firebase-sync.mjs uses)
   if (FIREBASE_DB_URL && (FIREBASE_SERVICE_ACCOUNT_JSON || FIREBASE_SERVICE_ACCOUNT_PATH)) {
     try {
-      await firebasePut("store", nextStore);
+      await firebasePut("workspaces", nextStore.workspaces ?? {});
     } catch (e) {
       console.error("Firebase write failed:", e.message);
     }
