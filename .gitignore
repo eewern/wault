@@ -3,3 +3,13 @@
 
 # Dependencies
 node_modules/
+
+# Secrets — never commit
+.env
+.env.*
+*adminsdk*.json
+wernotion-firebase-*.json
+
+# Local backups / one-off migration scripts
+firebase-*backup*.json
+migrate-to-firebase.mjs

@@ -1,0 +1,13 @@
+# Secrets — provided via Railway env vars, never upload
+.env
+.env.*
+*adminsdk*.json
+wernotion-firebase-*.json
+
+# Local backups / one-off scripts
+firebase-*backup*.json
+migrate-to-firebase.mjs
+
+# Local-only
+.netlify
+node_modules/
