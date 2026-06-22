@@ -1,5 +1,8 @@
 # Local Netlify folder
 .netlify
+.netlify-publish/
+.DS_Store
+.claude/
 
 # Dependencies
 node_modules/
@@ -9,6 +12,7 @@ node_modules/
 .env.*
 *adminsdk*.json
 wernotion-firebase-*.json
+workspace-api-store.json
 
 # Local backups / one-off migration scripts
 firebase-*backup*.json

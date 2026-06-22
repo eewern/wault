@@ -5,7 +5,9 @@
 (function () {
   const params  = new URLSearchParams(window.location.search);
   const apiUrl  = (params.get("api") || window.WORKSPACE_API_URL || "").replace(/\/$/, "");
-  const apiToken = params.get("apiToken") || window.WORKSPACE_API_TOKEN || "";
+  // Set only after Firebase sign-in. Never persist this token or accept it via
+  // URL parameters (URLs leak into browser history, logs, and referrers).
+  let apiToken = "";
   if (!apiUrl) return;
 
   const DATA_PREFIX        = "workspace_v4_data_";
@@ -26,6 +28,10 @@
     if (apiToken) h.authorization = `Bearer ${apiToken}`;
     return h;
   };
+
+  function setApiToken(token) {
+    apiToken = String(token || "").trim();
+  }
 
   const readJson = (key, fallback) => {
     try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; }
@@ -132,11 +138,29 @@
     setInterval(pollActive, POLL_INTERVAL_MS);
   });
 
+  // List every workspace the server (Firebase-backed) knows about, as {id, name}.
+  // Used by the app to DISCOVER workspaces created on other devices / by the API —
+  // the web app's own list is per-browser, and Firebase rules only allow reading
+  // individual /workspaces/{id}, not the whole node, so we go through the API
+  // (admin service account) for the catalogue.
+  async function listWorkspaces() {
+    if (!apiUrl) return [];
+    try {
+      const res = await fetch(`${apiUrl}/api/workspaces`, { headers: headers() });
+      if (!res.ok) return [];
+      const json = await res.json();
+      const list = Array.isArray(json) ? json : (json.workspaces || []);
+      return list.map((w) => ({ id: w.id, name: w.name || "" })).filter((w) => w.id);
+    } catch { return []; }
+  }
+
   // ── Public API ─────────────────────────────────────────────────────────────
   window.WorkspaceApiBridge = {
     apiUrl,
+    setApiToken,
     pushNow:        pushAll,
     pullWorkspace,
     pushWorkspace,
+    listWorkspaces,
   };
 })();

@@ -469,6 +469,23 @@ function saveLocalWorkspaceData(workspaceId, data) {
   return next;
 }
 
+// Merge workspaces DISCOVERED from the server (Firebase, via the API) into the
+// per-browser local list, so workspaces created on another device / by Claude
+// show up in the switcher here. Only ADDS missing ids (never removes/renames
+// existing local entries). Returns the merged array, or null if nothing changed.
+function mergeDiscoveredWorkspaces(discovered) {
+  if (!Array.isArray(discovered) || !discovered.length) return null;
+  const workspaces = readJson(LOCAL_WORKSPACES_KEY, []);
+  const have = new Set((workspaces || []).map((w) => w.id));
+  const additions = discovered
+    .filter((w) => w && w.id && !have.has(w.id))
+    .map((w) => ({ id: w.id, name: w.name || w.id, updatedAt: new Date().toISOString() }));
+  if (!additions.length) return null;
+  const next = [...(workspaces || []), ...additions];
+  localStorage.setItem(LOCAL_WORKSPACES_KEY, JSON.stringify(next));
+  return next;
+}
+
 function localBackupKey(workspaceId) {
   return `workspace_v4_backups_${workspaceId}`;
 }
@@ -1457,6 +1474,26 @@ function App() {
   useEffect(() => {
     let cancelled = false;
 
+    const connectWorkspaceBridge = async (firebaseSync) => {
+      const bridge = window.WorkspaceApiBridge;
+      if (!bridge?.setApiToken) return;
+      try {
+        // Use the signed-in user's revocable Firebase-backed key. Create one on
+        // first use, keep it in memory only, and clear it again on sign-out.
+        let key = await firebaseSync.getApiKey?.();
+        if (!key) key = await firebaseSync.generateApiKey?.();
+        if (cancelled || !key) return;
+        bridge.setApiToken(key);
+        const list = await bridge.listWorkspaces?.();
+        if (cancelled) return;
+        const merged = mergeDiscoveredWorkspaces(list);
+        if (merged) setLocalWorkspaces(merged);
+      } catch (err) {
+        bridge.setApiToken("");
+        console.warn("⚠️ Workspace discovery unavailable:", err.message);
+      }
+    };
+
     const setupListener = (firebaseSync, workspaceId) => {
       // Tear down any previous listener for this workspace
       if (firebaseListenerUnsubRef.current) {
@@ -1543,6 +1580,7 @@ function App() {
             if (cancelled) return;
             if (!fbUser) {
               // Signed out
+              window.WorkspaceApiBridge?.setApiToken?.("");
               setAuthUser(null);
               setUserAccess(null);
               setFirebaseAccessDenied(false);
@@ -1557,11 +1595,14 @@ function App() {
               if (access && !access.blocked) {
                 setUserAccess(access);
                 setFirebaseAccessDenied(false);
+                await connectWorkspaceBridge(firebaseSync);
               } else {
+                window.WorkspaceApiBridge?.setApiToken?.("");
                 setUserAccess(null);
                 setFirebaseAccessDenied(true);
               }
             } catch (err) {
+              window.WorkspaceApiBridge?.setApiToken?.("");
               console.warn('⚠️ Access check failed:', err.message);
               if (!cancelled) { setUserAccess(null); setFirebaseAccessDenied(false); }
             }
@@ -1579,14 +1620,17 @@ function App() {
         const currentUser = firebaseSync.getCurrentUser?.();
         if (currentUser) {
           setAuthUser(currentUser);
-          firebaseSync.checkUserAccess(currentUser).then(access => {
+          firebaseSync.checkUserAccess(currentUser).then(async access => {
             if (cancelled) return;
             const ok = access && !access.blocked;
             setUserAccess(ok ? access : null);
             setFirebaseAccessDenied(!ok);
+            if (ok) await connectWorkspaceBridge(firebaseSync);
+            else window.WorkspaceApiBridge?.setApiToken?.("");
             setAuthLoading(false);
           }).catch(() => { if (!cancelled) setAuthLoading(false); });
         } else {
+          window.WorkspaceApiBridge?.setApiToken?.("");
           setAuthLoading(false);
         }
       }

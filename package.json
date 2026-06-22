@@ -4,12 +4,17 @@
   "type": "module",
   "description": "WAULT — workspace app API + MCP server",
   "scripts": {
-    "start":     "node wault-mcp-http.mjs",
+    "start": "node wault-mcp-http.mjs",
+    "build:netlify": "node scripts/build-netlify-public.mjs",
     "start:api": "node workspace-api-server.mjs",
     "start:mcp": "node wault-mcp-http.mjs",
     "start:mcp:local": "node wault-mcp.mjs"
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "firebase-admin": "^14.0.0"
   }
 }
