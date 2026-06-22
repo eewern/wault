@@ -390,7 +390,7 @@ function touchWorkspace(workspace) {
   return workspace;
 }
 
-async function handleWorkspaces(req, res, store, parts) {
+async function handleWorkspaces(req, res, store, parts, actor = {}) {
   if (parts.length === 2 && req.method === "GET") {
     const workspaces = Object.values(store.workspaces)
       .map(workspaceSummary)
@@ -463,6 +463,11 @@ async function handleWorkspaces(req, res, store, parts) {
     }
 
     if (parts.length === 3 && req.method === "DELETE") {
+      if (actor.uid && actor.role !== "owner") {
+        const error = new Error("Only the workspace owner can delete workspaces.");
+        error.statusCode = 403;
+        throw error;
+      }
       delete store.workspaces[id];
       await writeStore(store);
       sendNoContent(res);
@@ -631,7 +636,7 @@ async function router(req, res) {
     return;
   }
 
-  await requireAuth(req);
+  const actor = await requireAuth(req);
   const store = await readStore();
 
   // Convenience: /api/workspace/active → most-recently-updated workspace
@@ -644,7 +649,7 @@ async function router(req, res) {
   }
 
   if (parts[0] === "api" && parts[1] === "workspaces") {
-    const handled = await handleWorkspaces(req, res, store, parts);
+    const handled = await handleWorkspaces(req, res, store, parts, actor);
     if (handled) return;
   }
 

@@ -121,22 +121,17 @@
     if (activeId) await pullWorkspace(activeId);
   }
 
-  // ── Hook localStorage.setItem to detect saves ──────────────────────────────
-  try {
-    const origSet = localStorage.setItem.bind(localStorage);
-    localStorage.setItem = function (key, value) {
-      origSet(key, value);
-      if (key === ACTIVE_KEY || key === WORKSPACES_KEY || key.startsWith(DATA_PREFIX)) schedulePush();
-    };
-  } catch {
-    setInterval(pushAll, 5000);
-  }
-
-  // ── Start polling ──────────────────────────────────────────────────────────
-  window.addEventListener("load", () => {
-    setTimeout(pushAll, 1200);          // initial push after app boot
-    setInterval(pollActive, POLL_INTERVAL_MS);
-  });
+  // ── Content sync is handled by firebase-sync.mjs (real-time, echo-suppressed,
+  //    and it preserves the block your cursor is in). This bridge's push/pull/poll
+  //    duplicated that path and FOUGHT it: the 8s pull called setData() with the
+  //    pre-edit server snapshot, making freshly-typed blocks vanish then reappear,
+  //    and reverting table drags. So we DISABLE the polling/push loops here.
+  //    Claude/MCP edits still reach the app: they're written to Firebase by the API
+  //    server and picked up live by firebase-sync's onWorkspaceUpdate listener.
+  //    The bridge stays loaded only for listWorkspaces() (discovery) + deleteWorkspace().
+  //
+  //    (Intentionally NOT hooking localStorage.setItem and NOT starting setInterval
+  //     pollActive / initial pushAll.)
 
   // List every workspace the server (Firebase-backed) knows about, as {id, name}.
   // Used by the app to DISCOVER workspaces created on other devices / by the API —
@@ -154,6 +149,24 @@
     } catch { return []; }
   }
 
+  // Delete from the Firebase-backed server catalogue as well as the browser.
+  // Without this, workspace discovery adds a locally-deleted workspace back on
+  // the next sign-in/reload because the remote copy still exists.
+  async function deleteWorkspace(id) {
+    if (!apiUrl || !id) throw new Error("Workspace API is unavailable.");
+    const res = await fetch(`${apiUrl}/api/workspaces/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: headers(),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `Workspace deletion failed (${res.status}).`);
+    }
+    lastPushedJson.delete(id);
+    lastPulledAt.delete(id);
+    return true;
+  }
+
   // ── Public API ─────────────────────────────────────────────────────────────
   window.WorkspaceApiBridge = {
     apiUrl,
@@ -162,5 +175,6 @@
     pullWorkspace,
     pushWorkspace,
     listWorkspaces,
+    deleteWorkspace,
   };
 })();

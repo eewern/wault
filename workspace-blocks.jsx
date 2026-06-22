@@ -3215,10 +3215,68 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
   const blankCells = () => block.headers.map(() => "");
   // ── Row ops ────────────────────────────────────────────────────────────────
   const addRow = () => updateBlock({ ...block, columnWidths, rows: [...block.rows, { id: nid(), cells: blankCells() }] });
-  const insertRowAt = (idx) => { const rows = [...block.rows]; rows.splice(idx, 0, { id: nid(), cells: blankCells() }); updateBlock({ ...block, columnWidths, rows }); };
-  const duplicateRow = (idx) => { const rows = [...block.rows]; rows.splice(idx + 1, 0, { id: nid(), cells: [...(rows[idx]?.cells || blankCells())] }); updateBlock({ ...block, columnWidths, rows }); };
-  const clearRow = (idx) => updateBlock({ ...block, rows: block.rows.map((r, i) => i === idx ? { ...r, cells: r.cells.map(() => "") } : r) });
-  const remRow = (idx) => { const next = block.rows.filter((_, i) => i !== idx); updateBlock({ ...block, rows: next.length ? next : [{ id: nid(), cells: blankCells() }] }); };
+  // In headerless mode the visually-first row lives in `headers` for backwards
+  // data compatibility. Treat it and `rows` as one visible list for every row
+  // operation, then map the first visible item back into `headers`.
+  const visibleRows = () => [
+    { id: "__table_first_row__", cells: [...block.headers], wasFirst: true },
+    ...block.rows.map((row) => ({ ...row, cells: [...row.cells] })),
+  ];
+  const commitVisibleRows = (items) => {
+    if (!items.length) return;
+    updateBlock({
+      ...block,
+      columnWidths,
+      headers: [...items[0].cells],
+      rows: items.slice(1).map((item) => ({
+        id: item.wasFirst ? nid() : (item.id || nid()),
+        cells: [...item.cells],
+      })),
+    });
+  };
+  const insertRowAt = (slot) => {
+    if (block.headerRow) {
+      const rows = [...block.rows];
+      rows.splice(slot, 0, { id: nid(), cells: blankCells() });
+      updateBlock({ ...block, columnWidths, rows });
+      return;
+    }
+    const rows = visibleRows();
+    rows.splice(slot, 0, { id: nid(), cells: blankCells() });
+    commitVisibleRows(rows);
+  };
+  const duplicateRow = (slot) => {
+    if (block.headerRow) {
+      const rows = [...block.rows];
+      rows.splice(slot + 1, 0, { id: nid(), cells: [...(rows[slot]?.cells || blankCells())] });
+      updateBlock({ ...block, columnWidths, rows });
+      return;
+    }
+    const rows = visibleRows();
+    rows.splice(slot + 1, 0, { id: nid(), cells: [...(rows[slot]?.cells || blankCells())] });
+    commitVisibleRows(rows);
+  };
+  const clearRow = (slot) => {
+    if (block.headerRow) {
+      updateBlock({ ...block, rows: block.rows.map((r, i) => i === slot ? { ...r, cells: r.cells.map(() => "") } : r) });
+      return;
+    }
+    const rows = visibleRows();
+    if (!rows[slot]) return;
+    rows[slot] = { ...rows[slot], cells: blankCells() };
+    commitVisibleRows(rows);
+  };
+  const remRow = (slot) => {
+    if (block.headerRow) {
+      const next = block.rows.filter((_, i) => i !== slot);
+      updateBlock({ ...block, rows: next.length ? next : [{ id: nid(), cells: blankCells() }] });
+      return;
+    }
+    const rows = visibleRows();
+    if (rows.length <= 1) return;
+    rows.splice(slot, 1);
+    commitVisibleRows(rows);
+  };
   // ── Column ops ───────────────────────────────────────────────────────────────
   const addCol = () => updateBlock({ ...block, headers: [...block.headers, ""], colTypes: [...colTypes, "text"], columnWidths: [...columnWidths, 180], rows: block.rows.map(r => ({ ...r, cells: [...r.cells, ""] })) });
   const insertColAt = (idx) => {
@@ -3243,7 +3301,14 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     a.splice(Math.max(0, Math.min(slot, a.length)), 0, moved);
     return a;
   };
-  const moveRow = (from, slot) => { if (from == null || from === slot) return; updateBlock({ ...block, columnWidths, rows: reorderToSlot(block.rows, from, slot) }); };
+  const moveRow = (from, slot) => {
+    if (from == null || from === slot) return;
+    if (block.headerRow) {
+      updateBlock({ ...block, columnWidths, rows: reorderToSlot(block.rows, from, slot) });
+      return;
+    }
+    commitVisibleRows(reorderToSlot(visibleRows(), from, slot));
+  };
   const moveCol = (from, to) => {
     if (from == null || from === to) return;
     updateBlock({ ...block, headers: reorderToSlot(block.headers, from, to), colTypes: reorderToSlot(colTypes, from, to), columnWidths: reorderToSlot(columnWidths, from, to), rows: block.rows.map(r => ({ ...r, cells: reorderToSlot(r.cells, from, to) })) });
@@ -3282,7 +3347,7 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     const tableRect = table.getBoundingClientRect();
     return { left:cellRect.left, right:cellRect.right, top:tableRect.top, bottom:tableRect.bottom, width:cellRect.width, height:tableRect.height };
   };
-  const startRowHandleDrag = (e, rowIdx) => {
+  const startRowHandleDrag = (e, rowSlot) => {
     if (e.button != null && e.button !== 0) return;
     const tr = e.currentTarget.closest("tr");
     const tbody = tr?.closest("tbody");
@@ -3291,9 +3356,11 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
       pointerEvent: e, axis: "y", sourceEl: tr,
       makeGhost: () => makeCellStripGhost([...tr.children], "tbl-row-drag-visual"),
       scrollEl: tr.closest(".page-main") || tr.closest(".tbl-scroll"),
-      getTargets: () => [...tbody.querySelectorAll("tr[data-row-id]")].map((el, i) => ({ el, key: i, slot:true })).filter(t => t.key !== rowIdx),
+      getTargets: () => [...tbody.querySelectorAll("tr[data-row-slot]")]
+        .map((el) => ({ el, key: Number(el.dataset.rowSlot), slot:true }))
+        .filter((target) => target.key !== rowSlot),
       onStart: () => { rowDragRef.current = true; },
-      onCommit: (ti) => moveRow(rowIdx, ti),
+      onCommit: (targetSlot) => moveRow(rowSlot, targetSlot),
       onEnd: () => setTimeout(() => { rowDragRef.current = false; }, 0),
     });
   };
@@ -3320,7 +3387,8 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
       },
     });
   };
-  const openRowMenu = (e, rowIdx) => { if (rowDragRef.current) return; const r = e.currentTarget.getBoundingClientRect(); setMenu({ type: "row", index: rowIdx, x: r.right + 4, y: r.top }); };
+  const openRowMenu = (e, rowIdx, isHeader = false) => { if (rowDragRef.current) return; const r = e.currentTarget.getBoundingClientRect(); setMenu({ type: "row", index: rowIdx, isHeader, x: r.right + 4, y: r.top }); };
+  const toggleHeaderRow = () => updateBlock({ ...block, headerRow: !block.headerRow });
   const openColMenu = (e, colIdx) => { if (colDragRef.current) return; const r = e.currentTarget.getBoundingClientRect(); setMenu({ type: "col", index: colIdx, x: r.left, y: r.bottom + 4 }); };
   const clearCell = (rid, ci) => updCell(rid, ci, "");
   const startResize = (index, e) => {
@@ -3408,8 +3476,17 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
                 {block.headers.map((_, i) => <col key={i} style={{ width: columnWidths[i] || 180 }} />)}
               </colgroup>
               <tbody>
-                <tr className={`tbl-hrow${block.headerRow ? " tbl-header-on" : ""}`}>
+                <tr className={`tbl-hrow${block.headerRow ? " tbl-header-on" : ""}`} data-row-slot={block.headerRow ? undefined : 0}>
                   {block.headers.map((h, i) => renderCell(h, colTypes[i], (v) => updHead(i, v), i, {
+                    rowHandle: i === 0 ? (
+                      <button
+                        className="tbl-rowhandle"
+                        onPointerDown={(e) => { if (!block.headerRow) startRowHandleDrag(e, 0); }}
+                        onClick={(e) => openRowMenu(e, 0, true)}
+                        title={block.headerRow ? "Header row · click for options" : "Drag to move · click for options"}
+                        type="button"
+                      >{handleGlyph}</button>
+                    ) : null,
                     colHandle: (
                       <button className="tbl-colhandle" onPointerDown={(e) => startColHandleDrag(e, i)} onClick={(e) => openColMenu(e, i)} title="Drag to move · click for options" type="button">{handleGlyph}</button>
                     ),
@@ -3417,10 +3494,10 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
                   }))}
                 </tr>
                 {block.rows.map((row, rowIdx) => (
-                  <tr key={row.id} data-row-id={row.id}>
+                  <tr key={row.id} data-row-id={row.id} data-row-slot={block.headerRow ? rowIdx : rowIdx + 1}>
                     {row.cells.map((c, i) => renderCell(c, colTypes[i], (v) => updCell(row.id, i, v), i, i === 0 ? {
                       rowHandle: (
-                        <button className="tbl-rowhandle" onPointerDown={(e) => startRowHandleDrag(e, rowIdx)} onClick={(e) => openRowMenu(e, rowIdx)} title="Drag to move · click for options" type="button">{handleGlyph}</button>
+                        <button className="tbl-rowhandle" onPointerDown={(e) => startRowHandleDrag(e, block.headerRow ? rowIdx : rowIdx + 1)} onClick={(e) => openRowMenu(e, block.headerRow ? rowIdx : rowIdx + 1)} title="Drag to move · click for options" type="button">{handleGlyph}</button>
                       ),
                     } : null))}
                   </tr>
@@ -3438,14 +3515,21 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
           <div className="tbl-menu-backdrop" onMouseDown={() => setMenu(null)} />
           <div className="tbl-menu" style={{ position:"fixed", left: menu.x, top: menu.y, zIndex: 10001 }}>
             {menu.type === "row" ? (
-              <React.Fragment>
-                <MenuItem onClick={() => insertRowAt(menu.index)}>↑  Insert row above</MenuItem>
-                <MenuItem onClick={() => insertRowAt(menu.index + 1)}>↓  Insert row below</MenuItem>
-                <MenuItem onClick={() => duplicateRow(menu.index)}>⧉  Duplicate</MenuItem>
-                <MenuItem onClick={() => clearRow(menu.index)}>⌫  Clear contents</MenuItem>
-                <div className="tbl-menu-sep" />
-                <MenuItem onClick={() => remRow(menu.index)} danger>✕  Delete row</MenuItem>
-              </React.Fragment>
+              (menu.isHeader && block.headerRow) ? (
+                // Pinned header row: only the toggle (its content lives in `headers`,
+                // which the slot-based row ops don't address).
+                <MenuItem onClick={toggleHeaderRow}>▭  Turn off header row</MenuItem>
+              ) : (
+                <React.Fragment>
+                  <MenuItem onClick={() => insertRowAt(menu.index)}>↑  Insert row above</MenuItem>
+                  <MenuItem onClick={() => insertRowAt(menu.index + 1)}>↓  Insert row below</MenuItem>
+                  <MenuItem onClick={() => duplicateRow(menu.index)}>⧉  Duplicate</MenuItem>
+                  <MenuItem onClick={() => clearRow(menu.index)}>⌫  Clear contents</MenuItem>
+                  {menu.isHeader && <MenuItem onClick={toggleHeaderRow}>▦  Use as header row</MenuItem>}
+                  <div className="tbl-menu-sep" />
+                  <MenuItem onClick={() => remRow(menu.index)} danger>✕  Delete row</MenuItem>
+                </React.Fragment>
+              )
             ) : (
               <React.Fragment>
                 <MenuItem onClick={() => insertColAt(menu.index)}>←  Insert column left</MenuItem>

@@ -5,6 +5,28 @@ const STORAGE_KEY = "workspace_v4_dark";
 const TEMPLATES_KEY = "workspace_v4_templates";
 const LOCAL_WORKSPACES_KEY = "workspace_v4_workspaces";
 const LOCAL_ACTIVE_WORKSPACE_KEY = "workspace_v4_active_workspace";
+const LOCAL_LAST_PAGE_PREFIX = "workspace_v4_last_page_";
+// Tombstone of deleted workspace ids. Workspaces come back otherwise: seeds are
+// re-added by initializeLocalWorkspaces, and the server discovery merge re-adds
+// from Firebase. Both must honour this set so a delete actually sticks.
+const LOCAL_DELETED_WORKSPACES_KEY = "workspace_v4_deleted";
+const getDeletedWorkspaceIds = () => {
+  try { return new Set(JSON.parse(localStorage.getItem(LOCAL_DELETED_WORKSPACES_KEY) || "[]")); }
+  catch { return new Set(); }
+};
+const isWorkspaceTombstoned = (id) => getDeletedWorkspaceIds().has(id);
+const tombstoneWorkspace = (id) => {
+  if (!id) return;
+  const set = getDeletedWorkspaceIds();
+  set.add(id);
+  try { localStorage.setItem(LOCAL_DELETED_WORKSPACES_KEY, JSON.stringify([...set])); } catch {}
+};
+// If a workspace with this id is intentionally re-created/restored, clear its tombstone.
+const untombstoneWorkspace = (id) => {
+  const set = getDeletedWorkspaceIds();
+  if (!set.delete(id)) return;
+  try { localStorage.setItem(LOCAL_DELETED_WORKSPACES_KEY, JSON.stringify([...set])); } catch {}
+};
 const DEFAULT_LOCAL_WORKSPACE_ID = "local_default";
 const TASK_INDEX_PAGE_ID = "task_index";
 const HOME_PAGE_ID = "wault_home"; // Focus dashboard rendered as the in-app Home view
@@ -41,6 +63,19 @@ const ensureTrailingTextBlock = (blocks = []) => {
   return next;
 };
 const localWorkspaceDataKey = (id) => `workspace_v4_data_${id}`;
+const localLastPageKey = (id) => `${LOCAL_LAST_PAGE_PREFIX}${id}`;
+const rememberLocalPage = (workspaceId, pageId) => {
+  if (!workspaceId || !pageId) return;
+  try { localStorage.setItem(localLastPageKey(workspaceId), pageId); } catch {}
+};
+const restoreRememberedPage = (workspaceId, data) => {
+  if (!workspaceId || !data?.pages) return data;
+  try {
+    const pageId = localStorage.getItem(localLastPageKey(workspaceId));
+    if (pageId && data.pages[pageId]) data.currentPageId = pageId;
+  } catch {}
+  return data;
+};
 const createWorkspaceId = () => `local_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 const PAGE_EMOJIS = ["📄", "📝", "💡", "📌", "🗂️", "📊", "🧭", "🚀", "✨", "🔖", "🧠", "🛠️"];
 // New pages get a clean premium line-icon (not a colour emoji). Falls back to a doc icon.
@@ -372,7 +407,9 @@ function initializeLocalWorkspaces() {
   let workspaces = readJson(LOCAL_WORKSPACES_KEY, null);
   if (!Array.isArray(workspaces) || workspaces.length === 0) {
     const legacy = readJson(STORAGE_KEY, null);
-    const seeds = workspaceSeeds();
+    // Honour tombstones; but never end up with zero workspaces.
+    let seeds = workspaceSeeds().filter((seed, index) => !isWorkspaceTombstoned(seed.id || `${DEFAULT_LOCAL_WORKSPACE_ID}_${index}`));
+    if (!seeds.length) seeds = workspaceSeeds().slice(0, 1);
     workspaces = seeds.map((seed, index) => ({
       id: seed.id || `${DEFAULT_LOCAL_WORKSPACE_ID}_${index}`,
       seedKey: seed.seedKey || seed.id || `seed_${index}`,
@@ -392,6 +429,7 @@ function initializeLocalWorkspaces() {
     workspaceSeeds().forEach((seed, index) => {
       const id = seed.id || `${DEFAULT_LOCAL_WORKSPACE_ID}_${index}`;
       if (existingIds.has(id)) return;
+      if (isWorkspaceTombstoned(id)) return; // user deleted this seed — don't resurrect it
       const workspace = {
         id,
         seedKey: seed.seedKey || seed.id || `seed_${index}`,
@@ -415,11 +453,11 @@ function initializeLocalWorkspaces() {
 
 function loadLocalWorkspaceData(workspaceId) {
   const stored = readJson(localWorkspaceDataKey(workspaceId), null);
-  if (stored) return normalizeWorkspaceData(stored);
+  if (stored) return restoreRememberedPage(workspaceId, normalizeWorkspaceData(stored));
   // Use the workspace-specific seed so churns gets churns data, xalt gets xalt data
   const seed = workspaceSeeds().find(s => s.id === workspaceId || s.seedKey === workspaceId);
   const seedData = seed?.data ? JSON.parse(JSON.stringify(seed.data)) : cloneDefaultWorkspace();
-  return normalizeWorkspaceData(seedData);
+  return restoreRememberedPage(workspaceId, normalizeWorkspaceData(seedData));
 }
 
 // Hybrid load: compare localStorage vs Firebase and pick the newer one
@@ -477,8 +515,9 @@ function mergeDiscoveredWorkspaces(discovered) {
   if (!Array.isArray(discovered) || !discovered.length) return null;
   const workspaces = readJson(LOCAL_WORKSPACES_KEY, []);
   const have = new Set((workspaces || []).map((w) => w.id));
+  const deleted = getDeletedWorkspaceIds(); // don't resurrect locally-deleted workspaces
   const additions = discovered
-    .filter((w) => w && w.id && !have.has(w.id))
+    .filter((w) => w && w.id && !have.has(w.id) && !deleted.has(w.id))
     .map((w) => ({ id: w.id, name: w.name || w.id, updatedAt: new Date().toISOString() }));
   if (!additions.length) return null;
   const next = [...(workspaces || []), ...additions];
@@ -1646,7 +1685,7 @@ function App() {
           const firebaseTime = new Date(firebaseRecord.updated_at || 0).getTime();
           if (firebaseTime > localTime) {
             console.log('📡 Firebase data is newer — loading cloud version');
-            setData(normalizeWorkspaceData(firebaseRecord.workspace));
+            setData(restoreRememberedPage(activeLocalWorkspaceId, normalizeWorkspaceData(firebaseRecord.workspace)));
           } else {
             console.log('✅ localStorage is up to date — no Firebase override needed');
           }
@@ -1790,7 +1829,15 @@ function App() {
   const currentPage = data.pages[data.currentPageId];
 
   // === Page operations ===
-  const setCurrentPage = (id) => setData(d => ({ ...d, currentPageId: id }));
+  const setCurrentPage = (id) => {
+    rememberLocalPage(activeLocalWorkspaceId, id);
+    setData(d => ({ ...d, currentPageId: id }));
+  };
+  useEffect(() => {
+    if (data.currentPageId && data.pages?.[data.currentPageId]) {
+      rememberLocalPage(activeLocalWorkspaceId, data.currentPageId);
+    }
+  }, [activeLocalWorkspaceId, data.currentPageId]);
 
   // Calendar events are part of the workspace data, so they ride the existing
   // localStorage + Firebase sync for free. mutator: (events) => nextEvents
@@ -2223,11 +2270,39 @@ function App() {
       return;
     }
 
+    // Firebase workspace discovery is server-backed, so deletion must reach the
+    // same catalogue before we remove the browser copy. Otherwise the next
+    // discovery pass correctly sees the remote workspace and adds it back.
+    if (authUser && userAccess) {
+      const bridge = window.WorkspaceApiBridge;
+      if (!bridge?.deleteWorkspace) {
+        const message = "Workspace deletion is unavailable. Please check your connection and try again.";
+        setSyncState((s) => ({ ...s, error: message, status: "Delete failed" }));
+        alert(message);
+        return;
+      }
+      setSyncState((s) => ({ ...s, busy: true, error: "", status: "Deleting workspace" }));
+      try {
+        await bridge.deleteWorkspace(id);
+      } catch (error) {
+        setSyncState((s) => ({ ...s, busy: false, error: error.message, status: "Delete failed" }));
+        alert(error.message || "Workspace deletion failed. Please try again.");
+        return;
+      }
+    }
+
+    // Tombstone the id so neither the seed-init nor the server discovery merge
+    // resurrects it on the next reload.
+    tombstoneWorkspace(id);
     const nextWorkspaces = localWorkspaces.filter((item) => item.id !== id);
-    const nextActive = id === activeLocalWorkspaceId ? nextWorkspaces[0] : localWorkspaces.find((item) => item.id === activeLocalWorkspaceId);
+    const nextActive = id === activeLocalWorkspaceId
+      ? nextWorkspaces[0]
+      : (nextWorkspaces.find((item) => item.id === activeLocalWorkspaceId) || nextWorkspaces[0]);
     localStorage.setItem(LOCAL_WORKSPACES_KEY, JSON.stringify(nextWorkspaces));
     localStorage.removeItem(localWorkspaceDataKey(id));
     localStorage.removeItem(localBackupKey(id));
+    localStorage.removeItem(localLastPageKey(id));
+    localStorage.removeItem(`${id}_local_saved_at`);
     localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, nextActive.id);
     const nextData = loadLocalWorkspaceData(nextActive.id);
     setLocalWorkspaces(nextWorkspaces);
@@ -2238,7 +2313,8 @@ function App() {
       workspaceId: nextActive.id,
       workspaceName: nextActive.name,
       workspaces: nextWorkspaces,
-      status: "Local draft",
+      busy: false,
+      status: authUser && userAccess ? "Synced" : "Local draft",
     }));
   };
 
@@ -2385,8 +2461,15 @@ function App() {
 
   // ── Firebase Google Auth gates ─────────────────────────────────────────────
   const firebaseConfigured = !!(window.SUPABASE_CONFIG?.firebaseApiKey);
+  const DEV_PEEK = (() => {
+    try {
+      const host = window.location.hostname;
+      return (host === "localhost" || host === "127.0.0.1" || host === "[::1]")
+        && new URLSearchParams(window.location.search).has("devpeek");
+    } catch { return false; }
+  })();
 
-  if (firebaseConfigured && authLoading) {
+  if (!DEV_PEEK && firebaseConfigured && authLoading) {
     return (
       <main className="auth-gate">
         <section className="auth-card">
@@ -2398,7 +2481,7 @@ function App() {
     );
   }
 
-  if (firebaseConfigured && !authUser) {
+  if (!DEV_PEEK && firebaseConfigured && !authUser) {
     return (
       <GoogleSignInScreen
         busy={googleSignInBusy}
@@ -2408,7 +2491,7 @@ function App() {
     );
   }
 
-  if (firebaseConfigured && authUser && firebaseAccessDenied) {
+  if (!DEV_PEEK && firebaseConfigured && authUser && firebaseAccessDenied) {
     return (
       <FirebaseAccessDeniedScreen
         email={authUser.email}
@@ -2467,7 +2550,7 @@ function App() {
         onRenameWorkspace={renameWorkspace}
         onDeleteWorkspace={deleteWorkspaceById}
         onSwitchWorkspace={switchWorkspace}
-        canManageWorkspace={!configured || syncState.role === "owner" || syncState.role === "admin"}
+        canManageWorkspace={userAccess ? userAccess.role === "owner" : (!configured || syncState.role === "owner" || syncState.role === "admin")}
         onUndo={performUndo}
         onRedo={performRedo}
         authUser={authUser}
