@@ -122,6 +122,8 @@ function makeTask(patch = {}) {
     sourceType: "focus",       // focus | document
     sourceId: "",
     sourceLabel: "",
+    workspaceId: "",           // manual task grouping; blank = Personal / Focus
+    workspaceName: "",
     pinnedDate: "",            // YYYY-MM-DD when pinned to "Today's Priorities"
     notes: "",
     createdAt: now,
@@ -334,13 +336,15 @@ function ProgressRing({ done, total }) {
   );
 }
 
-function QuickAdd({ onAdd }) {
+function QuickAdd({ onAdd, workspaces = [] }) {
   const [value, setValue] = useState("");
+  const [workspaceId, setWorkspaceId] = useState("");
   const parsed = useMemo(() => parseQuickAdd(value), [value]);
   const submit = () => {
     if (!parsed.title) return;
-    onAdd(parsed);
+    onAdd({ ...parsed, workspaceId });
     setValue("");
+    setWorkspaceId("");
   };
   return (
     <div className="fx-quickadd">
@@ -356,6 +360,18 @@ function QuickAdd({ onAdd }) {
         {value.trim() && parsed.hadPriority && <span className={`fx-pill fx-pill-${parsed.priority}`}>{parsed.priority}</span>}
         {value.trim() && parsed.dueDate && <span className="fx-pill fx-pill-due">{shortDate(parsed.dueDate)}</span>}
       </span>
+      <select
+        className="fx-quickadd-workspace"
+        value={workspaceId}
+        onChange={(e) => setWorkspaceId(e.target.value)}
+        aria-label="Task workspace"
+        data-tooltip="Choose which workspace this task belongs to. Leave as Personal for a private Focus task."
+      >
+        <option value="">Personal</option>
+        {(workspaces || []).filter((ws) => ws?.id).map((ws) => (
+          <option key={ws.id} value={ws.id}>{ws.name || ws.id}</option>
+        ))}
+      </select>
       <button className="fx-quickadd-go" onClick={submit} disabled={!parsed.title} data-tooltip="Add this task (or press Enter)">Add</button>
     </div>
   );
@@ -368,6 +384,7 @@ function TaskRow({ task, today, onPatch, onDelete, onPin, onOpenSource, big = fa
   const [draft, setDraft] = useState(task.title);
   const [leaving, setLeaving] = useState(false);
   const inputRef = useRef(null);
+  const dateInputRef = useRef(null);
   useEffect(() => { if (editing) inputRef.current?.focus(); }, [editing]);
 
   const overdue = task.status !== "done" && task.dueDate && task.dueDate < today;
@@ -390,6 +407,17 @@ function TaskRow({ task, today, onPatch, onDelete, onPin, onOpenSource, big = fa
     const t = draft.trim();
     if (t && t !== task.title) onPatch(task.id, { title: t });
     else setDraft(task.title);
+  };
+  const openDatePicker = () => {
+    const input = dateInputRef.current;
+    if (!input) return;
+    try {
+      input.focus({ preventScroll: true });
+      if (typeof input.showPicker === "function") input.showPicker();
+      else input.click();
+    } catch {
+      input.click();
+    }
   };
 
   return (
@@ -427,14 +455,27 @@ function TaskRow({ task, today, onPatch, onDelete, onPin, onOpenSource, big = fa
           onClick={() => onPatch(task.id, { priority: NEXT_PRIORITY[task.priority] || "medium" })}
           data-tooltip="Click to cycle priority: high → medium → low"
         >{task.priority}</button>
-        <label className={`fx-pill fx-pill-due${overdue ? " fx-overdue" : ""}${dueToday ? " fx-today" : ""}`} data-tooltip="Click to pick a due date">
-          {task.dueDate ? shortDate(task.dueDate) : "no date"}
+        <span className="fx-date-control">
+          <button
+            className={`fx-pill fx-pill-due${overdue ? " fx-overdue" : ""}${dueToday ? " fx-today" : ""}`}
+            onClick={openDatePicker}
+            data-tooltip="Open the calendar and choose a due date"
+            aria-label={task.dueDate ? `Change due date, currently ${shortDate(task.dueDate)}` : "Set due date"}
+            type="button"
+          >
+            <span className="fx-date-icon" aria-hidden="true">▣</span>
+            {task.dueDate ? shortDate(task.dueDate) : "Set date"}
+          </button>
           <input
+            ref={dateInputRef}
+            className="fx-date-native"
             type="date"
             value={task.dueDate || ""}
             onChange={(e) => onPatch(task.id, { dueDate: e.target.value })}
+            tabIndex="-1"
+            aria-hidden="true"
           />
-        </label>
+        </span>
       </span>
       <span className="fx-task-actions">
         {!done && (
@@ -528,7 +569,7 @@ function UpcomingByDate({ tasks, today, onPatch, onDelete, onPin, onOpenSource }
   );
 }
 
-function WorkspaceTaskGroup({ group, today, onPatch, onDelete, onPin, onOpenSource }) {
+function WorkspaceTaskGroup({ group, today, onPatch, onDelete, onPin, onOpenSource, doneOnly = false }) {
   const buckets = { overdue: [], today: [], upcoming: [], nodate: [], waiting: [], done: [] };
   group.tasks.forEach((task) => buckets[bucketOf(task, today)]?.push(task));
   ["overdue", "today", "upcoming", "nodate", "waiting"].forEach((key) => buckets[key].sort(taskOrder));
@@ -540,16 +581,23 @@ function WorkspaceTaskGroup({ group, today, onPatch, onDelete, onPin, onOpenSour
         <span className="fx-workspace-tasks-icon">{(group.name || "W").trim().charAt(0).toUpperCase()}</span>
         <span className="fx-workspace-tasks-title">
           <strong>{group.name}</strong>
-          <small>{openCount} open · {group.tasks.length} total</small>
+          <small>{doneOnly ? `${group.tasks.length} completed` : `${openCount} open`}</small>
         </span>
       </div>
       <div className="fx-workspace-tasks-body">
-        <Bucket id="overdue" tasks={buckets.overdue} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} />
-        <Bucket id="today" tasks={buckets.today} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} />
-        <UpcomingByDate tasks={buckets.upcoming} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} />
-        <Bucket id="nodate" tasks={buckets.nodate} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} />
-        <Bucket id="waiting" tasks={buckets.waiting} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} />
-        <DoneSection tasks={buckets.done} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} />
+        {doneOnly ? (
+          [...group.tasks]
+            .sort((a, b) => String(b.completedAt || b.updatedAt || "").localeCompare(String(a.completedAt || a.updatedAt || "")))
+            .map((task) => <TaskRow key={task.id} task={task} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} />)
+        ) : (
+          <React.Fragment>
+            <Bucket id="overdue" tasks={buckets.overdue} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} />
+            <Bucket id="today" tasks={buckets.today} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} />
+            <UpcomingByDate tasks={buckets.upcoming} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} />
+            <Bucket id="nodate" tasks={buckets.nodate} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} />
+            <Bucket id="waiting" tasks={buckets.waiting} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} />
+          </React.Fragment>
+        )}
       </div>
     </section>
   );
@@ -851,26 +899,30 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
   }, []);
 
   const patchTask = useCallback((id, patch) => {
-    setTasks((prev) => {
-      const cur = prev[id];
-      if (!cur) return prev;
-      const updated = stamped({ ...cur, ...patch });
-      // Focus→Main: imported tasks mirror completion into the source checklist.
-      // Active workspace rides host state (full save pipeline + undo); other
-      // workspaces fall back to the legacy localStorage write.
-      if (cur.sourceType === "document" && "status" in patch) {
-        const [wsId, pageId, itemId] = String(cur.sourceId).split(":");
-        if (wsId && wsId === activeWorkspaceId && typeof completeChecklistItem === "function") {
-          completeChecklistItem(pageId, itemId, updated.status === "done");
-        } else {
-          completeWorkspaceItem(cur.sourceId, updated.status === "done");
-        }
+    const cur = tasksRef.current[id];
+    if (!cur) return;
+    const updated = stamped({ ...cur, ...patch });
+
+    // Focus→Main: imported tasks mirror completion into the source checklist.
+    // This side effect must happen OUTSIDE the setTasks updater; calling the
+    // host App's setData while React is calculating FocusHome state causes the
+    // "update a component while rendering another component" warning.
+    if (cur.sourceType === "document" && "status" in patch) {
+      const [wsId, pageId, itemId] = String(cur.sourceId).split(":");
+      if (wsId && wsId === activeWorkspaceId && typeof completeChecklistItem === "function") {
+        completeChecklistItem(pageId, itemId, updated.status === "done");
+      } else {
+        completeWorkspaceItem(cur.sourceId, updated.status === "done");
       }
+    }
+
+    setTasks((prev) => {
+      if (!prev[id]) return prev;
       const next = { ...prev, [id]: updated };
       writeJson(LS_TASKS, next);
-      cloudSaveTask(fbRef.current, uidRef.current, updated);
       return next;
     });
+    cloudSaveTask(fbRef.current, uidRef.current, updated);
   }, [activeWorkspaceId, completeChecklistItem]);
 
   const deleteTask = useCallback((id) => {
@@ -883,9 +935,16 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
     cloudDeleteTask(fbRef.current, uidRef.current, id);
   }, []);
 
-  const addTask = useCallback(({ title, priority, dueDate }) => {
-    commitTask(makeTask({ title, priority, dueDate }));
-  }, [commitTask]);
+  const addTask = useCallback(({ title, priority, dueDate, workspaceId = "" }) => {
+    const workspace = (workspaces || []).find((ws) => ws?.id === workspaceId);
+    commitTask(makeTask({
+      title,
+      priority,
+      dueDate,
+      workspaceId: workspace?.id || "",
+      workspaceName: workspace?.name || "",
+    }));
+  }, [commitTask, workspaces]);
 
   const importSuggestion = useCallback((s) => {
     commitTask(makeTask({
@@ -1049,6 +1108,8 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
 
   // ── Derived views ──────────────────────────────────────────────────────────
   const all = Object.values(tasks).filter((t) => t && t.title);
+  const openTasks = all.filter((task) => task.status !== "done");
+  const doneTasks = all.filter((task) => task.status === "done");
   const buckets = useMemo(() => {
     const b = { overdue: [], today: [], upcoming: [], nodate: [], waiting: [], done: [] };
     all.forEach((t) => b[bucketOf(t, today)]?.push(t));
@@ -1079,15 +1140,22 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
     pending: openAll.length,
     high: openAll.filter((t) => t.priority === "high").length,
   };
-  const [focusView, setFocusView] = useState("priorities"); // priorities | all
+  const [focusView, setFocusView] = useState("priorities"); // priorities | all | done
   const workspaceTaskGroups = useMemo(() => {
     const known = new Map((workspaces || []).filter((ws) => ws?.id).map((ws, index) => [ws.id, { name: ws.name || ws.id, index }]));
     const groups = new Map();
-    all.forEach((task) => {
-      const wsId = task.sourceType === "document" ? String(task.sourceId || "").split(":")[0] : "__focus";
+    const viewTasks = focusView === "done"
+      ? Object.values(tasks).filter((task) => task?.title && task.status === "done")
+      : Object.values(tasks).filter((task) => task?.title && task.status !== "done");
+    viewTasks.forEach((task) => {
+      const wsId = task.sourceType === "document"
+        ? String(task.sourceId || "").split(":")[0]
+        : (task.workspaceId || "__focus");
       const knownWs = known.get(wsId);
       const key = wsId || "__focus";
-      const fallbackName = task.sourceType === "document" ? (sourceWsLabel(task.sourceLabel) || "Other workspace") : "Personal / Focus";
+      const fallbackName = task.sourceType === "document"
+        ? (sourceWsLabel(task.sourceLabel) || "Other workspace")
+        : (task.workspaceName || "Personal / Focus");
       if (!groups.has(key)) {
         groups.set(key, {
           id: key,
@@ -1099,7 +1167,7 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
       groups.get(key).tasks.push(task);
     });
     return [...groups.values()].sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
-  }, [tasks, workspaces, activeWorkspaceId]);
+  }, [tasks, workspaces, activeWorkspaceId, focusView]);
 
   // ── Auto-fill Today's Priorities: top up EMPTY pin slots (up to 3) from
   // DUE-TODAY tasks only. Finishing a priority frees a slot → the next due-today
@@ -1151,14 +1219,17 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
 
         <WorkspaceCards workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} data={data} onOpen={openWorkspace} />
 
-        <QuickAdd onAdd={addTask} />
+        <QuickAdd onAdd={addTask} workspaces={workspaces} />
 
         <nav className="fx-viewnav" role="tablist" aria-label="WAULT Focus views">
           <button className={`fx-viewtab${focusView === "priorities" ? " fx-viewtab-on" : ""}`} role="tab" aria-selected={focusView === "priorities"} onClick={() => setFocusView("priorities")} type="button">
             Today's Priorities <span>{pinned.length}/3</span>
           </button>
           <button className={`fx-viewtab${focusView === "all" ? " fx-viewtab-on" : ""}`} role="tab" aria-selected={focusView === "all"} onClick={() => setFocusView("all")} type="button">
-            All Tasks <span>{all.length}</span>
+            All Tasks <span>{openTasks.length}</span>
+          </button>
+          <button className={`fx-viewtab${focusView === "done" ? " fx-viewtab-on" : ""}`} role="tab" aria-selected={focusView === "done"} onClick={() => setFocusView("done")} type="button">
+            Done <span>{doneTasks.length}</span>
           </button>
         </nav>
 
@@ -1186,14 +1257,14 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
           <section className="fx-alltasks" role="tabpanel">
             <div className="fx-alltasks-head">
               <div>
-                <h1>All Tasks</h1>
-                <p>Every task in WAULT, organized by workspace and then by due date.</p>
+                <h1>{focusView === "done" ? "Done" : "All Tasks"}</h1>
+                <p>{focusView === "done" ? "Completed tasks, organized by workspace." : "Every unfinished task in WAULT, organized by workspace and then by due date."}</p>
               </div>
-              <span className="fx-alltasks-total">{all.length} total</span>
+              <span className="fx-alltasks-total">{focusView === "done" ? doneTasks.length : openTasks.length} total</span>
             </div>
             {workspaceTaskGroups.length ? workspaceTaskGroups.map((group) => (
-              <WorkspaceTaskGroup key={group.id} group={group} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} />
-            )) : <div className="fx-empty fx-alltasks-empty">No tasks yet. Add your first task above.</div>}
+              <WorkspaceTaskGroup key={group.id} group={group} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} doneOnly={focusView === "done"} />
+            )) : <div className="fx-empty fx-alltasks-empty">{focusView === "done" ? "No completed tasks yet." : "No unfinished tasks. Add your next task above."}</div>}
           </section>
         )}
       </div>

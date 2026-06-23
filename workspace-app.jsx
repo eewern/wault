@@ -2461,15 +2461,8 @@ function App() {
 
   // ── Firebase Google Auth gates ─────────────────────────────────────────────
   const firebaseConfigured = !!(window.SUPABASE_CONFIG?.firebaseApiKey);
-  const DEV_PEEK = (() => {
-    try {
-      const host = window.location.hostname;
-      return (host === "localhost" || host === "127.0.0.1" || host === "[::1]")
-        && new URLSearchParams(window.location.search).has("devpeek");
-    } catch { return false; }
-  })();
 
-  if (!DEV_PEEK && firebaseConfigured && authLoading) {
+  if (firebaseConfigured && authLoading) {
     return (
       <main className="auth-gate">
         <section className="auth-card">
@@ -2481,7 +2474,7 @@ function App() {
     );
   }
 
-  if (!DEV_PEEK && firebaseConfigured && !authUser) {
+  if (firebaseConfigured && !authUser) {
     return (
       <GoogleSignInScreen
         busy={googleSignInBusy}
@@ -2491,7 +2484,7 @@ function App() {
     );
   }
 
-  if (!DEV_PEEK && firebaseConfigured && authUser && firebaseAccessDenied) {
+  if (firebaseConfigured && authUser && firebaseAccessDenied) {
     return (
       <FirebaseAccessDeniedScreen
         email={authUser.email}
