@@ -1392,7 +1392,18 @@ function App() {
       setData(current => {
         // Only update if the synced data is actually different
         if (JSON.stringify(syncedData) !== JSON.stringify(current)) {
-          return normalizeWorkspaceData(syncedData);
+          const normalized = normalizeWorkspaceData(syncedData);
+          // Protect the page the user is actively editing from cross-tab overwrites.
+          // Without this, Tab 2 saving stale content would clobber Tab 1's typing.
+          const active = document.activeElement;
+          if (active?.closest?.('[data-block-id]') || active?.isContentEditable) {
+            const pid = current.currentPageId;
+            if (pid && current.pages?.[pid]) {
+              normalized.pages = { ...normalized.pages, [pid]: current.pages[pid] };
+              normalized.currentPageId = pid;
+            }
+          }
+          return normalized;
         }
         return current;
       });
@@ -1496,7 +1507,12 @@ function App() {
   // Firebase update. The save effect compares by reference and SKIPS the cloud push for
   // that object — breaking the A→B→A→B infinite re-save ping-pong. Any subsequent LOCAL
   // edit creates a new object (≠ this ref) and pushes normally, so no edits are lost.
+  // Also used to detect unsaved local edits: if current data ≠ this ref, the user has
+  // typed since the last confirmed Firebase save (guard against listener overwriting content).
   const lastRemoteDataRef = useRef(null);
+  // True from when a Firebase save is in-flight until it resolves. The listener
+  // skips remote applies while this is set so a slow save can't be raced by old data.
+  const pendingLocalSaveRef = useRef(false);
   // Stable per-tab session ID — survives re-renders, used for echo suppression AND presence key.
   // sessionStorage ensures the same tab reuses the same key after soft reloads.
   const localSaveIdRef = useRef(
@@ -1550,8 +1566,29 @@ function App() {
           return;
         }
 
-        console.log('📱 Firebase update from another user — applying', remoteRecord.saveId);
+        // Guard 1: skip if a local save is currently in-flight.
+        // The async saveWorkspace call (even with the cached access check) takes
+        // ~100–300 ms. A remote-looking update that arrives during this window is
+        // almost always an old snapshot from a previous session — applying it would
+        // overwrite the content that is literally being saved right now.
+        if (pendingLocalSaveRef.current) {
+          console.log('⏳ Skipping Firebase update — local save in flight');
+          return;
+        }
+
+        console.log('📱 Firebase update received', remoteRecord.saveId);
         setData((current) => {
+          // Guard 2: skip if the user has local edits that haven't been confirmed
+          // by Firebase yet. `lastRemoteDataRef.current` is the last state that
+          // came FROM Firebase (or the initial loaded state). Any local keystroke
+          // creates a new state object (≠ this ref), signalling unsaved edits.
+          // We skip the remote apply so the user's typing isn't clobbered; the
+          // save debounce (200 ms) will push the local version to Firebase shortly.
+          if (current !== lastRemoteDataRef.current) {
+            console.log('⏳ Skipping Firebase update — local edits pending save');
+            return current;
+          }
+
           const merged = normalizeWorkspaceData(remoteRecord.workspace);
           // ── BLOCK-level merge ────────────────────────────────────────────────
           // Apply the remote version of EVERYTHING — every page AND every block —
@@ -1586,7 +1623,8 @@ function App() {
           }
           // Never let a remote update hijack which page you're looking at.
           const next = { ...merged, currentPageId: pid };
-          // Mark this exact object as remote-applied so the save effect won't re-push it.
+          // Mark this exact object as remote-applied so the save effect won't re-push it,
+          // and so future listener fires can compare against it to detect local edits.
           lastRemoteDataRef.current = next;
           return next;
         });
@@ -1596,6 +1634,12 @@ function App() {
     };
 
     const run = async () => {
+      // Reset sync-state refs so a workspace switch starts with a clean slate.
+      // Without this, lastRemoteDataRef from the previous workspace would make the
+      // local-edit guard think there are always pending edits in the new workspace.
+      lastRemoteDataRef.current = null;
+      pendingLocalSaveRef.current = false;
+
       // ── Step 1: get or initialise the Firebase sync object ─────────────────
       let firebaseSync = window.WorkspaceFirebaseSync;
       if (!firebaseSync) {
@@ -1685,7 +1729,12 @@ function App() {
           const firebaseTime = new Date(firebaseRecord.updated_at || 0).getTime();
           if (firebaseTime > localTime) {
             console.log('📡 Firebase data is newer — loading cloud version');
-            setData(restoreRememberedPage(activeLocalWorkspaceId, normalizeWorkspaceData(firebaseRecord.workspace)));
+            const loaded = restoreRememberedPage(activeLocalWorkspaceId, normalizeWorkspaceData(firebaseRecord.workspace));
+            setData(loaded);
+            // Establish the remote base BEFORE the listener starts so the
+            // local-edit guard (current !== lastRemoteDataRef.current) works
+            // correctly from the first listener fire.
+            lastRemoteDataRef.current = loaded;
           } else {
             console.log('✅ localStorage is up to date — no Firebase override needed');
           }
@@ -1697,6 +1746,11 @@ function App() {
       if (cancelled) return;
 
       // ── Step 3: set up real-time listener for updates from other devices ───
+      // If no Firebase load happened (localStorage was current), initialize the
+      // remote base to the current local state so the listener can detect local edits.
+      if (!lastRemoteDataRef.current) {
+        lastRemoteDataRef.current = latestSaveRef.current?.data ?? data;
+      }
       setupListener(firebaseSync, activeLocalWorkspaceId);
     };
 
@@ -1785,12 +1839,22 @@ function App() {
 
       // Save to Firebase (non-blocking, async) — include session saveId so listener can skip echo
       if (window.WorkspaceFirebaseSync?.saveWorkspace) {
+        // Mark save in-flight so the listener skips any incoming remote updates
+        // that race against this save (old data from another session/tab).
+        pendingLocalSaveRef.current = true;
         window.WorkspaceFirebaseSync.saveWorkspace(activeLocalWorkspaceId, data, localSaveIdRef.current)
           .then(() => {
+            // Save confirmed: update the remote base to the current state so
+            // the listener's local-edit guard works correctly for future updates.
+            // latestSaveRef.current.data tracks the latest render's data (may be
+            // ahead of `data` if the user kept typing during the async save).
+            lastRemoteDataRef.current = latestSaveRef.current?.data ?? data;
+            pendingLocalSaveRef.current = false;
             console.log('✅ Saved to Firebase');
             setSyncState((s) => ({ ...s, firebaseStatus: 'Synced to cloud ✓' }));
           })
           .catch((err) => {
+            pendingLocalSaveRef.current = false;
             console.warn('⚠️ Firebase save failed (non-blocking):', err.message);
             setSyncState((s) => ({ ...s, firebaseStatus: 'Cloud sync failed' }));
           });

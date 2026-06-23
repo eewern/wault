@@ -3868,19 +3868,19 @@
 <script src="xalt-bible-data.js?v=20260515-workspaces1"></script>
 <script src="workspace-data.js?v=20260612-cmdcentre1"></script>
 <script src="workspace-persistence.js?v=20260522-workspace-tools1"></script>
-<script src="workspace-api-client.js?v=20260623-focusfix1"></script>
+<script src="workspace-api-client.js?v=20260623-syncfix1"></script>
 <script type="module">
   // Native ESM Firebase init — runs after workspace-config.js (classic) has set SUPABASE_CONFIG.
   // Exposes window.__firebaseInitPromise which workspace-app.jsx awaits (avoids Babel transforming import()).
-  import init from './firebase-sync.mjs?v=20260607-presence2';
+  import init from './firebase-sync.mjs?v=20260623-syncfix1';
   window.__firebaseInitPromise = init(window.SUPABASE_CONFIG || {}).catch((e) => {
     console.warn('Firebase init failed:', e && e.message);
     return null;
   });
 </script>
-<script type="text/babel" src="workspace-blocks.jsx?v=20260623-focusfix1"></script>
-<script type="text/babel" src="focus-home.jsx?v=20260623-focusfix1"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260623-focusfix1"></script>
+<script type="text/babel" src="workspace-blocks.jsx?v=20260623-syncfix1"></script>
+<script type="text/babel" src="focus-home.jsx?v=20260623-syncfix1"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260623-syncfix1"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

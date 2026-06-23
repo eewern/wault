@@ -236,6 +236,13 @@ export async function initializeFirebaseSync(config) {
 
       // ── Workspace data ──────────────────────────────────────────────────────
 
+      // Cache the per-session access check so saveWorkspace doesn't do a Firebase
+      // read on every call. The DB security rules are the real enforcement; this
+      // client-side gate is belt-and-suspenders. Without caching, the async
+      // get(access/uid) round-trip (100–300 ms) created a window where the Firebase
+      // listener could fire with stale data and overwrite locally-typed content.
+      let accessOkCache = null;
+
       async saveWorkspace(workspaceId, workspaceData, saveId = null) {
         try {
           // Security: verify user is authenticated and in the access list before writing
@@ -245,8 +252,12 @@ export async function initializeFirebaseSync(config) {
             return false;
           }
           // Lightweight gate (the DB rules are the real enforcement).
-          const accessSnap = await get(ref(database, `access/${currentUser.uid}`));
-          if (!accessSnap.exists() && currentUser.email?.toLowerCase() !== OWNER_EMAIL) {
+          // Result is cached for the session — avoids a network round-trip on every save.
+          if (accessOkCache === null) {
+            const accessSnap = await get(ref(database, `access/${currentUser.uid}`));
+            accessOkCache = accessSnap.exists() || currentUser.email?.toLowerCase() === OWNER_EMAIL;
+          }
+          if (!accessOkCache) {
             console.warn('⚠️ Save blocked — user not in access list');
             return false;
           }
