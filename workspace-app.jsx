@@ -509,18 +509,30 @@ function saveLocalWorkspaceData(workspaceId, data) {
 
 // Merge workspaces DISCOVERED from the server (Firebase, via the API) into the
 // per-browser local list, so workspaces created on another device / by Claude
-// show up in the switcher here. Only ADDS missing ids (never removes/renames
-// existing local entries). Returns the merged array, or null if nothing changed.
+// show up in the switcher here.
+// - ADDS workspaces that exist in Firebase but not locally.
+// - REMOVES workspaces that no longer exist in Firebase (deleted on another device).
+//   Only removes if Firebase returned a non-empty list (guards against network errors
+//   wiping the local list). Never removes locally-tombstoned workspaces (already gone).
+// Returns the merged array, or null if nothing changed.
 function mergeDiscoveredWorkspaces(discovered) {
   if (!Array.isArray(discovered) || !discovered.length) return null;
   const workspaces = readJson(LOCAL_WORKSPACES_KEY, []);
-  const have = new Set((workspaces || []).map((w) => w.id));
-  const deleted = getDeletedWorkspaceIds(); // don't resurrect locally-deleted workspaces
+  const remoteIds = new Set(discovered.map((w) => w.id).filter(Boolean));
+  const deleted = getDeletedWorkspaceIds();
+
+  // Keep workspace if: it exists in Firebase OR it was tombstoned locally (user deleted it here)
+  const kept = (workspaces || []).filter((w) => remoteIds.has(w.id) || deleted.has(w.id));
+
+  // Add workspaces that Firebase knows about but this browser doesn't have yet
+  const keptIds = new Set(kept.map((w) => w.id));
   const additions = discovered
-    .filter((w) => w && w.id && !have.has(w.id) && !deleted.has(w.id))
+    .filter((w) => w && w.id && !keptIds.has(w.id) && !deleted.has(w.id))
     .map((w) => ({ id: w.id, name: w.name || w.id, updatedAt: new Date().toISOString() }));
-  if (!additions.length) return null;
-  const next = [...(workspaces || []), ...additions];
+
+  const next = [...kept, ...additions];
+  const changed = next.length !== (workspaces || []).length || additions.length > 0;
+  if (!changed) return null;
   localStorage.setItem(LOCAL_WORKSPACES_KEY, JSON.stringify(next));
   return next;
 }
