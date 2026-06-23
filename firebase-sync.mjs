@@ -79,6 +79,12 @@ export async function initializeFirebaseSync(config) {
       }
     }
 
+    // Cache the access check per signed-in UID so workspace autosaves do not
+    // perform a Firebase read on every call. Reset automatically if a different
+    // account signs in within the same browser session.
+    let accessOkCacheUid = null;
+    let accessOkCache = null;
+
     // ── Public API ─────────────────────────────────────────────────────────────
     return {
       database,
@@ -236,13 +242,6 @@ export async function initializeFirebaseSync(config) {
 
       // ── Workspace data ──────────────────────────────────────────────────────
 
-      // Cache the per-session access check so saveWorkspace doesn't do a Firebase
-      // read on every call. The DB security rules are the real enforcement; this
-      // client-side gate is belt-and-suspenders. Without caching, the async
-      // get(access/uid) round-trip (100–300 ms) created a window where the Firebase
-      // listener could fire with stale data and overwrite locally-typed content.
-      let accessOkCache = null;
-
       async saveWorkspace(workspaceId, workspaceData, saveId = null) {
         try {
           // Security: verify user is authenticated and in the access list before writing
@@ -253,6 +252,10 @@ export async function initializeFirebaseSync(config) {
           }
           // Lightweight gate (the DB rules are the real enforcement).
           // Result is cached for the session — avoids a network round-trip on every save.
+          if (accessOkCacheUid !== currentUser.uid) {
+            accessOkCacheUid = currentUser.uid;
+            accessOkCache = null;
+          }
           if (accessOkCache === null) {
             const accessSnap = await get(ref(database, `access/${currentUser.uid}`));
             accessOkCache = accessSnap.exists() || currentUser.email?.toLowerCase() === OWNER_EMAIL;
@@ -317,6 +320,18 @@ export async function initializeFirebaseSync(config) {
         } catch (error) {
           console.error(`❌ Failed to set up real-time listener: ${error.message}`);
           return null;
+        }
+      },
+
+      // Forcibly remove a workspace node from Firebase. Called during deletion to
+      // guarantee the node is gone even if an in-flight save just wrote it back.
+      async removeWorkspace(workspaceId) {
+        if (!auth.currentUser) return;
+        try {
+          await remove(ref(database, `workspaces/${workspaceId}`));
+          console.log(`🗑️ Removed workspace from Firebase: ${workspaceId}`);
+        } catch (err) {
+          console.warn('⚠️ Firebase workspace remove failed:', err.message);
         }
       },
 

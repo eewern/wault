@@ -2345,9 +2345,19 @@ function App() {
         alert(message);
         return;
       }
+      // Cancel any pending save debounce for this workspace before contacting the server.
+      // Without this, an in-flight browser→Firebase write can complete after the server
+      // has already removed the workspace, resurrecting it for every other device.
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
       setSyncState((s) => ({ ...s, busy: true, error: "", status: "Deleting workspace" }));
       try {
         await bridge.deleteWorkspace(id);
+        // Belt-and-suspenders: also nuke the individual Firebase node. An in-flight
+        // browser save that started before the deletion could have just written it back.
+        await window.WorkspaceFirebaseSync?.removeWorkspace?.(id);
       } catch (error) {
         setSyncState((s) => ({ ...s, busy: false, error: error.message, status: "Delete failed" }));
         alert(error.message || "Workspace deletion failed. Please try again.");
@@ -4707,12 +4717,14 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
               onDeleteEmpty={() => deleteEmptyBlock(block.id)}
               onDeleteBlock={() => deleteBlock(block.id)}
               onConvertToText={(text) => convertBlockToText(block.id, text)}
-              onMarkdownShortcut={(type) => {
+              onMarkdownShortcut={(shortcut) => {
+                const type = typeof shortcut === "string" ? shortcut : shortcut?.type;
+                const remainingHtml = typeof shortcut === "object" ? (shortcut.remainingHtml || "") : "";
                 if (type === "bullets") {
-                  replaceBlock(block.id, { id: block.id, type:"bullets", items:[{ id: window.nid(), text:"" }] });
+                  replaceBlock(block.id, { id: block.id, type:"bullets", items:[{ id: window.nid(), text:remainingHtml }] });
                 }
                 if (type === "numbers") {
-                  replaceBlock(block.id, { id: block.id, type:"numbers", items:[{ id: window.nid(), text:"" }] });
+                  replaceBlock(block.id, { id: block.id, type:"numbers", items:[{ id: window.nid(), text:remainingHtml }] });
                 }
                 if (type === "checklist") {
                   replaceBlock(block.id, { id: block.id, type:"checklist", items:[{ id: window.nid(), text:"", done:false, dueDate:"" }] });
@@ -4721,7 +4733,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
                   const level = parseInt(type.slice(-1), 10);
                   replaceBlock(block.id, { id: block.id, type:"heading", level, text:"" });
                 }
-                focusBlock(block.id);
+                focusBlock(block.id, type === "bullets" || type === "numbers");
               }}
               onReplaceBlock={(replacementBlocks, focusId) => replaceBlockWithBlocks(block.id, replacementBlocks, focusId)}
               onDragBlockStart={(id) => setDragBlockId(id)}

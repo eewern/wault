@@ -1134,6 +1134,36 @@ function EditableText({
     sel.addRange(range);
   }, [autoFocus, focusKey, focusAtStart]);
 
+  const applyListPrefixShortcut = (spaceAlreadyInserted = false) => {
+    if (!onMarkdownShortcut || !ref.current) return false;
+    const sel = window.getSelection();
+    if (!sel || !sel.isCollapsed || sel.rangeCount === 0 || !ref.current.contains(sel.anchorNode)) return false;
+
+    const plainText = (ref.current.innerText || "").replace(/\u200B/g, "");
+    const caretOffset = getCaretOffset(ref.current);
+    const prefix = spaceAlreadyInserted
+      ? (plainText.startsWith("1. ") && caretOffset === 3
+          ? { type:"numbers" }
+          : plainText.startsWith("- ") && caretOffset === 2
+            ? { type:"bullets" }
+            : null)
+      : (plainText.startsWith("1.") && caretOffset === 2
+          ? { type:"numbers" }
+          : plainText.startsWith("-") && caretOffset === 1
+            ? { type:"bullets" }
+            : null);
+    if (!prefix) return false;
+
+    // The caret is immediately after the command (and its Space for the input
+    // fallback), so `after` is the existing sentence with its rich HTML intact.
+    const split = splitHtmlAtCaret(ref.current);
+    onMarkdownShortcut({
+      type: prefix.type,
+      remainingHtml: sanitizeHtml(split?.after || ""),
+    });
+    return true;
+  };
+
   const handleInput = () => {
     // Don't touch the DOM / React state mid-composition — wait for compositionend.
     if (composingRef.current) return;
@@ -1148,6 +1178,9 @@ function EditableText({
       ref.current.innerHTML = html;
       setCaretOffset(ref.current, caret);
     }
+    // Fallback for browsers/input methods that deliver the Space through `input`
+    // without a usable keydown. This recognizes only "1. " / "- " at offset zero.
+    if (applyListPrefixShortcut(true)) return;
     if (html !== lastValue.current) {
       lastValue.current = html;
       onChange(html);
@@ -1197,30 +1230,24 @@ function EditableText({
       // Commit a history snapshot at word boundaries (space) so undo works per-word
       if (window.__onWordBoundary) window.__onWordBoundary();
       if (onMarkdownShortcut) {
-        const txt = (ref.current.innerText || "").replace(/\u200B/g, "").trim();
-        if (txt === "-") {
+        const plainText = (ref.current.innerText || "").replace(/\u200B/g, "");
+        if (applyListPrefixShortcut(false)) {
           e.preventDefault();
           e.stopPropagation();
-          onMarkdownShortcut("bullets");
           return;
         }
-        if (txt === "1.") {
-          e.preventDefault();
-          e.stopPropagation();
-          onMarkdownShortcut("numbers");
-          return;
-        }
+        const txt = plainText.trim();
         if (txt === "[]" || txt === "[ ]") {
           e.preventDefault();
           e.stopPropagation();
-          onMarkdownShortcut("checklist");
+          onMarkdownShortcut({ type:"checklist", remainingHtml:"" });
           return;
         }
         // # / ## / ### → Heading 1/2/3
         if (/^#{1,3}$/.test(txt)) {
           e.preventDefault();
           e.stopPropagation();
-          onMarkdownShortcut("heading" + txt.length);
+          onMarkdownShortcut({ type:"heading" + txt.length, remainingHtml:"" });
           return;
         }
       }
@@ -2221,7 +2248,7 @@ function CalloutBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
 }
 
 // ====== BULLETS ======
-function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, patchBlock, onDeleteEmpty, onConvertToText, onReplaceBlock, onAddBlockAfter, onExitBlock, autoFocus, onMoveToPreviousBlock, onMoveToNextBlock, onMergeNextBlock }) {
+function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, patchBlock, onDeleteEmpty, onConvertToText, onReplaceBlock, onAddBlockAfter, onExitBlock, autoFocus, focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock, onMergeNextBlock }) {
   const [focusItemId, setFocusItemId] = useState(null);
   const [focusKey, setFocusKey] = useState(0);
   // Pre-focus an item BEFORE the DOM mutation so focus is never lost when
@@ -2338,6 +2365,7 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
               placeholder="List item"
               multiline
               autoFocus={focusItemId === item.id || (autoFocus && index === 0)}
+              focusAtStart={autoFocus && index === 0 && focusAtStart}
               focusKey={focusItemId === item.id ? focusKey : 0}
               onEnter={(_, caretPos, split) => {
                 if (isBlankText(item.text)) {
@@ -2440,7 +2468,7 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
 }
 
 // ====== NUMBERED LIST ======
-function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, patchBlock, onDeleteEmpty, onConvertToText, onReplaceBlock, onAddBlockAfter, onExitBlock, autoFocus, onMoveToPreviousBlock, onMoveToNextBlock, onMergeNextBlock }) {
+function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, patchBlock, onDeleteEmpty, onConvertToText, onReplaceBlock, onAddBlockAfter, onExitBlock, autoFocus, focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock, onMergeNextBlock }) {
   const [focusItemId, setFocusItemId] = useState(null);
   const [focusKey, setFocusKey] = useState(0);
   const preFocusEl = (itemId, atStart = false) => {
@@ -2591,6 +2619,7 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
               placeholder={level ? "Sub-item" : "Numbered item"}
               multiline
               autoFocus={focusItemId === item.id || (autoFocus && idx === 0)}
+              focusAtStart={autoFocus && idx === 0 && focusAtStart}
               focusKey={focusItemId === item.id ? focusKey : 0}
               onEnter={(_, caretPos, split) => {
                 if (isBlankText(item.text)) {
