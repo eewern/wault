@@ -1478,6 +1478,24 @@ function App() {
     role: null,
     accessDenied: false,
   }));
+
+  // Safety net for the signed-in workspace gate. The app should never strand the
+  // user on "Opening workspace" forever; if the cloud load stalls, show the app
+  // with the current Firebase/error state so the user can retry or switch.
+  useEffect(() => {
+    if (!cloudWorkspaceLoading) return;
+    const t = setTimeout(() => {
+      console.warn('⏱️ Workspace load exceeded 15s — unblocking workspace gate');
+      setCloudWorkspaceLoading(false);
+      setSyncState((s) => ({
+        ...s,
+        status: s.error ? s.status : "Workspace load is taking longer than expected",
+        firebaseStatus: s.error ? s.firebaseStatus : "Workspace load delayed",
+      }));
+    }, 15000);
+    return () => clearTimeout(t);
+  }, [cloudWorkspaceLoading, activeLocalWorkspaceId]);
+
   const remoteReady = useRef(false);
   const currentPageIdRef = useRef(data.currentPageId);
   const undoStackRef = useRef([]);
@@ -1713,6 +1731,10 @@ function App() {
       if (nextActiveId && nextActiveId !== activeLocalWorkspaceId) {
         localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, nextActiveId);
         setActiveLocalWorkspaceId(nextActiveId);
+        // The actual workspace content load happens in the next effect run for
+        // the new active id. Clear this effect's loading flag so the gate cannot
+        // stay stuck while React schedules that rerun.
+        setCloudWorkspaceLoading(false);
       }
 
       firebaseCatalogueLoadedRef.current = true;
@@ -1753,14 +1775,22 @@ function App() {
 
     const connectWorkspaceBridge = async (firebaseSync) => {
       const bridge = window.WorkspaceApiBridge;
-      if (!bridge?.setApiToken) return;
+      if (!bridge?.setApiToken) {
+        setWorkspaceApiReady(false);
+        setCloudWorkspaceLoading(false);
+        return;
+      }
       setWorkspaceApiReady(false);
       try {
         // Use the signed-in user's revocable Firebase-backed key. Create one on
         // first use, keep it in memory only, and clear it again on sign-out.
         let key = await firebaseSync.getApiKey?.();
         if (!key) key = await firebaseSync.generateApiKey?.();
-        if (cancelled || !key) return;
+        if (cancelled) return;
+        if (!key) {
+          setCloudWorkspaceLoading(false);
+          return;
+        }
         bridge.setApiToken(key);
         const list = await bridge.listWorkspaces?.();
         if (cancelled) return;
@@ -1869,9 +1899,15 @@ function App() {
     };
 
     const loadFirebaseWorkspaceAndListen = async (firebaseSync, workspaceId) => {
-      if (!workspaceId || cancelled) return false;
+      if (!workspaceId || cancelled) {
+        if (!cancelled) setCloudWorkspaceLoading(false);
+        return false;
+      }
       const currentUser = firebaseSync.getCurrentUser?.();
-      if (!currentUser?.uid) return false;
+      if (!currentUser?.uid) {
+        setCloudWorkspaceLoading(false);
+        return false;
+      }
       setCloudWorkspaceLoading(true);
 
       try {
@@ -1985,6 +2021,8 @@ function App() {
                 const catalogue = await connectWorkspaceBridge(firebaseSync);
                 if (!catalogue?.changedActive) {
                   await loadFirebaseWorkspaceAndListen(firebaseSync, catalogue?.activeId || activeLocalWorkspaceId);
+                } else {
+                  setCloudWorkspaceLoading(false);
                 }
               } else {
                 window.WorkspaceApiBridge?.setApiToken?.("");
@@ -1999,6 +2037,7 @@ function App() {
               window.WorkspaceApiBridge?.setApiToken?.("");
               console.warn('⚠️ Access check failed:', err.message);
               setUserAccess(null); setFirebaseAccessDenied(false);
+              setCloudWorkspaceLoading(false);
               setAuthLoading(false);
             }
           });
@@ -2026,6 +2065,8 @@ function App() {
               const catalogue = await connectWorkspaceBridge(firebaseSync);
               if (!catalogue?.changedActive) {
                 await loadFirebaseWorkspaceAndListen(firebaseSync, catalogue?.activeId || activeLocalWorkspaceId);
+              } else {
+                setCloudWorkspaceLoading(false);
               }
             }
             else {
@@ -2035,7 +2076,12 @@ function App() {
               setWorkspaceApiReady(false);
             }
             if (!ok) setAuthLoading(false);
-          }).catch(() => { if (!cancelled) setAuthLoading(false); });
+          }).catch(() => {
+            if (!cancelled) {
+              setCloudWorkspaceLoading(false);
+              setAuthLoading(false);
+            }
+          });
         } else {
           window.WorkspaceApiBridge?.setApiToken?.("");
           setCloudCatalogueReady(false);
@@ -2991,6 +3037,7 @@ function App() {
     // onAuthStateChanged fires → resets authUser / userAccess
   };
 
+  const firebaseConfigured = !!(window.SUPABASE_CONFIG?.firebaseApiKey);
   const configured = window.WorkspaceStore?.isConfigured();
   const activeWorkspaceMeta = (localWorkspaces || []).find((workspace) => workspace.id === activeLocalWorkspaceId) || {};
   const cloudWorkspaceAllowed = !!(authUser?.uid && userAccess && !firebaseAccessDenied);
@@ -3001,7 +3048,7 @@ function App() {
   // Temporarily disabled for local testing
   // if (configured && !syncState.user) { ... }
 
-  if (configured && syncState.user && syncState.accessDenied) {
+  if (!firebaseConfigured && configured && syncState.user && syncState.accessDenied) {
     return (
       <AccessDeniedScreen
         syncState={syncState}
@@ -3010,7 +3057,7 @@ function App() {
     );
   }
 
-  if (configured && syncState.user && !syncState.workspaceId) {
+  if (!firebaseConfigured && configured && syncState.user && !syncState.workspaceId) {
     return (
       <LoadingWorkspaceScreen
         syncState={syncState}
@@ -3020,8 +3067,6 @@ function App() {
   }
 
   // ── Firebase Google Auth gates ─────────────────────────────────────────────
-  const firebaseConfigured = !!(window.SUPABASE_CONFIG?.firebaseApiKey);
-
   if (firebaseConfigured && authLoading) {
     return (
       <main className="auth-gate">
