@@ -1318,6 +1318,19 @@ function App() {
   const [firebaseAccessDenied, setFirebaseAccessDenied] = useState(false);
   const authUnsubRef = useRef(null);
 
+  // Safety net: the "Connecting…" gate must never be permanent. If Firebase init
+  // or the access check stalls (offline RTDB read, listener race, blocked rules),
+  // force the gate open after a hard deadline so the user always reaches the
+  // sign-in screen (or their workspace) instead of an infinite spinner.
+  useEffect(() => {
+    if (!authLoading) return;
+    const t = setTimeout(() => {
+      console.warn('⏱️ Auth check exceeded 12s — unblocking sign-in gate');
+      setAuthLoading(false);
+    }, 12000);
+    return () => clearTimeout(t);
+  }, [authLoading]);
+
   // (Firebase load + listener are handled inside the Firebase init effect below)
   const [localWorkspaces, setLocalWorkspaces] = useState(initialLocal.workspaces);
   const [activeLocalWorkspaceId, setActiveLocalWorkspaceId] = useState(initialLocal.activeId);
@@ -1671,8 +1684,11 @@ function App() {
           // Clean up any previous listener
           if (authUnsubRef.current) { authUnsubRef.current(); authUnsubRef.current = null; }
 
+          // Auth state is app-global (not per-workspace), so this callback must NOT
+          // early-return on `cancelled`. The listener outlives a workspace switch;
+          // a stale `cancelled=true` closure swallowing setAuthLoading(false) is what
+          // left the user stuck on "Connecting…". Always resolve the gate.
           authUnsubRef.current = firebaseSync.onAuthStateChange(async (fbUser) => {
-            if (cancelled) return;
             if (!fbUser) {
               // Signed out
               window.WorkspaceApiBridge?.setApiToken?.("");
@@ -1686,22 +1702,23 @@ function App() {
             setAuthUser(fbUser);
             try {
               const access = await firebaseSync.checkUserAccess(fbUser);
-              if (cancelled) return;
               if (access && !access.blocked) {
                 setUserAccess(access);
                 setFirebaseAccessDenied(false);
-                await connectWorkspaceBridge(firebaseSync);
+                setAuthLoading(false);
+                connectWorkspaceBridge(firebaseSync);
               } else {
                 window.WorkspaceApiBridge?.setApiToken?.("");
                 setUserAccess(null);
                 setFirebaseAccessDenied(true);
+                setAuthLoading(false);
               }
             } catch (err) {
               window.WorkspaceApiBridge?.setApiToken?.("");
               console.warn('⚠️ Access check failed:', err.message);
-              if (!cancelled) { setUserAccess(null); setFirebaseAccessDenied(false); }
+              setUserAccess(null); setFirebaseAccessDenied(false);
+              setAuthLoading(false);
             }
-            setAuthLoading(false);
           });
         } catch (err) {
           console.warn('⚠️ Firebase init failed:', err.message);
@@ -1720,9 +1737,12 @@ function App() {
             const ok = access && !access.blocked;
             setUserAccess(ok ? access : null);
             setFirebaseAccessDenied(!ok);
-            if (ok) await connectWorkspaceBridge(firebaseSync);
+            if (ok) {
+              setAuthLoading(false);
+              connectWorkspaceBridge(firebaseSync);
+            }
             else window.WorkspaceApiBridge?.setApiToken?.("");
-            setAuthLoading(false);
+            if (!ok) setAuthLoading(false);
           }).catch(() => { if (!cancelled) setAuthLoading(false); });
         } else {
           window.WorkspaceApiBridge?.setApiToken?.("");
@@ -4278,6 +4298,25 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     if (!page || page.system || !window.parseMarkdownishBlocks) return;
     const text = e.clipboardData?.getData("text/plain") || "";
     const clipHtml = e.clipboardData?.getData("text/html") || "";
+
+    // A highlighted range inside ONE editable always means replacement. Handle it
+    // here so keyboard and context-menu paste behave identically even when the
+    // browser reports `.page-body` (not the editable) as the event target.
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && selection.rangeCount > 0) {
+      const range = selection.getRangeAt(0);
+      const nodeEl = (node) => node && (node.nodeType === 1 ? node : node.parentElement);
+      const startEditable = nodeEl(range.startContainer)?.closest?.(".editable");
+      const endEditable = nodeEl(range.endContainer)?.closest?.(".editable");
+      // The selection is the authority. Context-menu paste and some browser paths
+      // target `.page-body` even though the live range is inside the editor.
+      if (startEditable && startEditable === endEditable && window.replaceEditableSelection?.(startEditable, selection, text, clipHtml)) {
+        e.preventDefault();
+        e.stopPropagation();
+        startEditable.dispatchEvent(new Event("input", { bubbles:true }));
+        return;
+      }
+    }
 
     // (-1) Exact payload from WAULT's own copy handler (custom clipboard type).
     let parsedBlocks = window.readWaultClipboardPayload ? window.readWaultClipboardPayload(e) : null;

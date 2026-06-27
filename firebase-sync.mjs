@@ -121,25 +121,40 @@ export async function initializeFirebaseSync(config) {
         const email = (typeof user === 'string' ? user : user?.email || '').toLowerCase();
         if (!uid) return null; // can't gate without a uid
 
+        // A DB read that can't reach the server must never hang the sign-in gate.
+        // Race every access read against a timeout so the UI always resolves.
+        const withTimeout = (promise, ms, label) =>
+          Promise.race([
+            promise,
+            new Promise((_, rej) => setTimeout(() => rej(new Error(label + '-timeout')), ms)),
+          ]);
+
         // Owner self-bootstrap (rules allow only the hardcoded owner email to do this).
+        // The seed is bookkeeping only — fire-and-forget so a stalled RTDB write can
+        // never block the owner from entering their own workspace.
         if (email === OWNER_EMAIL) {
-          await seedOwnerAccess(uid, email);
+          seedOwnerAccess(uid, email).catch((e) => console.warn('⚠️ Owner seed failed (non-fatal):', e.message));
           return { uid, email, role: 'owner' };
         }
 
         // Blocked users are denied — and we don't register their sign-in (no spam in pending).
         try {
-          const blockedSnap = await get(ref(database, `blocked/${uid}`));
+          const blockedSnap = await withTimeout(get(ref(database, `blocked/${uid}`)), 3000, 'blocked');
           if (blockedSnap.exists()) {
             console.warn('⛔ Sign-in denied — user is blocked');
             return { uid, email, role: 'blocked', blocked: true };
           }
         } catch {}
 
-        await registerSignin(user);
+        registerSignin(user).catch(() => {});
 
-        const snap = await get(ref(database, `access/${uid}`));
-        return snap.exists() ? { uid, ...snap.val() } : null;
+        try {
+          const snap = await withTimeout(get(ref(database, `access/${uid}`)), 3000, 'access');
+          return snap.exists() ? { uid, ...snap.val() } : null;
+        } catch (err) {
+          console.warn('⚠️ Access read failed:', err.message);
+          return null; // treat as "not approved yet" rather than hang
+        }
       },
 
       // Owner-only: full member list (keyed by uid, value has email/role).

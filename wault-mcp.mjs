@@ -62,19 +62,21 @@ function blockToText(block) {
   switch (block.type) {
     case "heading":   return `${"#".repeat(block.level || 1)} ${plain(block.text)}`;
     case "text":      return plain(block.text);
-    case "callout":   return `💡 ${plain(block.text)}`;
+    case "callout":   return `> ${plain(block.text)}`;
     case "divider":   return "---";
-    case "bullets":   return (block.items||[]).map(i => `• ${plain(i.text)}`).join("\n");
+    case "bullets":   return (block.items||[]).map(i => `- ${plain(i.text)}`).join("\n");
     case "numbers":   return (block.items||[]).map((i,n) => `${n+1}. ${plain(i.text)}`).join("\n");
     case "checklist": return (block.items||[]).map(i => `- [${i.done?"x":" "}] ${plain(i.text)}`).join("\n");
-    case "milestones":return (block.items||[]).map(i => `- [${i.status==="done"?"x":" "}] ${plain(i.name)} (${i.status})`).join("\n");
+    case "milestones":return (block.items||[]).map(i => `milestone: ${plain(i.name)} | ${i.status||"pending"}`).join("\n");
     case "table": {
-      const rows = [(block.headers||[]).join("\t"), ...(block.rows||[]).map(r=>(r.cells||[]).join("\t"))];
-      return rows.join("\n");
+      const headers  = block.headers || [];
+      const sep      = headers.map(() => "---");
+      const dataRows = (block.rows||[]).map(r => `| ${(r.cells||[]).join(" | ")} |`);
+      return [`| ${headers.join(" | ")} |`, `| ${sep.join(" | ")} |`, ...dataRows].join("\n");
     }
-    case "kpis":      return (block.items||[]).map(i=>`${plain(i.label)}: ${plain(i.value)}${i.unit||""}`).join(" | ");
-    case "progress":  return `${plain(block.label)}: ${block.value}/${block.total}`;
-    default:          return plain(block.text || "");
+    case "kpis":    return (block.items||[]).map(i => `kpi: ${plain(i.label)} | ${plain(i.value)}${i.unit ? ` | ${i.unit}` : ""}`).join("\n");
+    case "progress":return `progress: ${plain(block.label)} | ${block.value}/${block.total}`;
+    default:        return plain(block.text || "");
   }
 }
 
@@ -177,21 +179,63 @@ function parseMarkdownToBlocks(md) {
   const lines = String(md || "").split("\n");
   const blocks = [];
   let i = 0;
-
-  const flush = (type, items) => {
-    if (!items.length) return;
-    blocks.push({ id: nid(), type, items });
-  };
+  const flush = (type, items) => { if (items.length) blocks.push({ id: nid(), type, items }); };
 
   while (i < lines.length) {
     const line = lines[i];
+
+    // Heading
     const h = line.match(/^(#{1,3})\s+(.*)/);
     if (h) { blocks.push({ id: nid(), type: "heading", level: h[1].length, text: h[2].trim() }); i++; continue; }
 
-    const hr = line.match(/^---+$|^\*\*\*+$/);
-    if (hr) { blocks.push({ id: nid(), type: "divider" }); i++; continue; }
+    // Divider
+    if (line.match(/^---+$|^\*\*\*+$/)) { blocks.push({ id: nid(), type: "divider" }); i++; continue; }
 
-    // Collect checklist run
+    // Callout: > text
+    if (line.match(/^>\s+/)) { blocks.push({ id: nid(), type: "callout", text: line.replace(/^>\s+/, "").trim() }); i++; continue; }
+
+    // KPI: kpi: Label | Value  or  kpi: Label | Value | Unit
+    if (line.match(/^kpi:\s*/i)) {
+      const items = [];
+      while (i < lines.length && lines[i].match(/^kpi:\s*/i)) {
+        const parts = lines[i].replace(/^kpi:\s*/i, "").split("|").map(s => s.trim());
+        items.push({ id: nid(), label: parts[0] || "", value: parts[1] || "", unit: parts[2] || "" });
+        i++;
+      }
+      flush("kpis", items); continue;
+    }
+
+    // Milestone: milestone: Name | status
+    if (line.match(/^milestone:\s*/i)) {
+      const items = [];
+      while (i < lines.length && lines[i].match(/^milestone:\s*/i)) {
+        const parts = lines[i].replace(/^milestone:\s*/i, "").split("|").map(s => s.trim());
+        items.push({ id: nid(), name: parts[0] || "", status: parts[1] || "pending" });
+        i++;
+      }
+      flush("milestones", items); continue;
+    }
+
+    // Progress: progress: Label | current/total
+    if (line.match(/^progress:\s*/i)) {
+      const rest = line.replace(/^progress:\s*/i, "");
+      const [lbl, frac] = rest.split("|").map(s => s.trim());
+      const [val, tot]  = (frac || "0/0").split("/").map(s => parseInt(s.trim()) || 0);
+      blocks.push({ id: nid(), type: "progress", label: lbl || "", value: val, total: tot });
+      i++; continue;
+    }
+
+    // Markdown pipe table: | col | col |
+    if (line.match(/^\|/)) {
+      const tableLines = [];
+      while (i < lines.length && lines[i].match(/^\|/)) tableLines.push(lines[i++]);
+      const parseRow = l => l.split("|").slice(1, -1).map(c => c.trim());
+      const headers  = parseRow(tableLines[0] || "");
+      const dataRows = tableLines.slice(2).map(l => ({ id: nid(), cells: parseRow(l) }));
+      blocks.push({ id: nid(), type: "table", headers, rows: dataRows }); continue;
+    }
+
+    // Checklist: - [ ] or - [x]  (must come before general bullet check)
     if (line.match(/^- \[[ x]\] /)) {
       const items = [];
       while (i < lines.length && lines[i].match(/^- \[[ x]\] /)) {
@@ -202,27 +246,23 @@ function parseMarkdownToBlocks(md) {
       flush("checklist", items); continue;
     }
 
-    // Collect bullet run
+    // Bullets: - * •
     if (line.match(/^[-*•]\s+/)) {
       const items = [];
-      while (i < lines.length && lines[i].match(/^[-*•]\s+/)) {
-        items.push({ id: nid(), text: lines[i].replace(/^[-*•]\s+/, "").trim() });
-        i++;
-      }
+      while (i < lines.length && lines[i].match(/^[-*•]\s+/) && !lines[i].match(/^- \[[ x]\] /))
+        items.push({ id: nid(), text: lines[i++].replace(/^[-*•]\s+/, "").trim() });
       flush("bullets", items); continue;
     }
 
-    // Collect numbered run
+    // Numbered list
     if (line.match(/^\d+[.)]\s+/)) {
       const items = [];
-      while (i < lines.length && lines[i].match(/^\d+[.)]\s+/)) {
-        items.push({ id: nid(), text: lines[i].replace(/^\d+[.)]\s+/, "").trim() });
-        i++;
-      }
+      while (i < lines.length && lines[i].match(/^\d+[.)]\s+/))
+        items.push({ id: nid(), text: lines[i++].replace(/^\d+[.)]\s+/, "").trim() });
       flush("numbers", items); continue;
     }
 
-    if (line.trim()) { blocks.push({ id: nid(), type: "text", text: line.trim() }); }
+    if (line.trim()) blocks.push({ id: nid(), type: "text", text: line.trim() });
     i++;
   }
   return blocks;

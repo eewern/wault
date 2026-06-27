@@ -190,6 +190,38 @@ function htmlEscape(text = "") {
     .replace(/>/g, "&gt;");
 }
 
+// Replace the live selection inside one contentEditable with clipboard content.
+// Shared by EditableText and the page-level paste capture handler because browsers
+// may target either node for context-menu paste. Returns false unless the entire
+// highlighted range belongs to `editor`.
+function replaceEditableSelection(editor, selection, text = "", clipHtml = "") {
+  if (!editor || !selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+  if (!editor.contains(selection.anchorNode) || !editor.contains(selection.focusNode)) return false;
+  let replacementHtml = "";
+  if (clipHtml) {
+    const match = clipHtml.match(/<!--StartFragment-->([\s\S]*?)<!--EndFragment-->/);
+    const fragment = match ? match[1] : clipHtml;
+    replacementHtml = sanitizeHtml(fragment).replace(/(?:<br>\s*)+$/i, "");
+  }
+  if (!replacementHtml && text) {
+    replacementHtml = htmlEscape(text).replace(/\r\n?/g, "\n").replace(/\n/g, "<br>");
+  }
+
+  const range = selection.getRangeAt(0);
+  range.deleteContents();
+  const template = document.createElement("template");
+  template.innerHTML = replacementHtml;
+  const fragment = template.content.cloneNode(true);
+  const lastInserted = fragment.lastChild;
+  range.insertNode(fragment);
+  if (lastInserted) range.setStartAfter(lastInserted);
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return true;
+}
+window.replaceEditableSelection = replaceEditableSelection;
+
 // Convert inline markdown (**bold**, *italic*, ~~strike~~, _italic_) to HTML.
 // HTML-escapes plain text first so raw < > & don't leak through.
 function parseInlineMd(raw = "") {
@@ -1390,6 +1422,20 @@ function EditableText({
     const text = e.clipboardData?.getData("text/plain") || "";
     const clipHtml = e.clipboardData?.getData("text/html") || "";
 
+    // A highlighted range inside this editor always has replacement semantics:
+    // paste over exactly what is selected, never route the clipboard through the
+    // multi-block path (which inserts after/replaces the surrounding block).
+    const selection = window.getSelection();
+    const replacingSelection = Boolean(
+      selection && !selection.isCollapsed && selection.rangeCount > 0 &&
+      ref.current.contains(selection.anchorNode) && ref.current.contains(selection.focusNode)
+    );
+    if (replacingSelection) {
+      replaceEditableSelection(ref.current, selection, text, clipHtml);
+      handleInput();
+      return;
+    }
+
     // ── Multi-block paste ──────────────────────────────────────────────────
     if (onPasteBlocks) {
       // (-1) Exact payload from WAULT's own copy handler (custom clipboard type) —
@@ -1542,6 +1588,19 @@ function EditableText({
 window.EditableText = EditableText;
 
 // ====== SLASH MENU ======
+const CONTENT_SHOOT_HEADERS = ["", "Actor", "Scene Location", "Script", "Shot Idea", "Equipment Required", "Reel Time", "Others"];
+const CONTENT_SHOOT_WIDTHS = [56, 90, 140, 220, 120, 130, 90, 120];
+const makeContentShootingTable = () => ({
+  id: nid(),
+  type: "table",
+  headers: [...CONTENT_SHOOT_HEADERS],
+  headerRow: true,
+  colTypes: ["checkbox", ...CONTENT_SHOOT_HEADERS.slice(1).map(() => "text")],
+  columnWidths: [...CONTENT_SHOOT_WIDTHS],
+  rows: Array.from({ length: 3 }, () => ({ id: nid(), cells: CONTENT_SHOOT_HEADERS.map(() => "") })),
+  scriptGenerator: true,
+});
+
 function makeContentShootingBlocks() {
   const h = (text) => ({ id: nid(), type:"heading", level:1, text });
   const txt = () => ({ id: nid(), type:"text", text:"" });
@@ -1552,17 +1611,7 @@ function makeContentShootingBlocks() {
     h("Raw Script"),
     txt(),
     h("Script Details and Checklist"),
-    {
-      id: nid(),
-      type: "content-shooting-table",
-      columns: ["Actor","Scene Location","Script","Shot Idea","Equipment Required","Reel Time","Others"],
-      columnWidths: [90, 140, 200, 120, 130, 90, 100],
-      rows: [
-        { id: nid(), checked: false, cells: ["","","","","","",""] },
-        { id: nid(), checked: false, cells: ["","","","","","",""] },
-        { id: nid(), checked: false, cells: ["","","","","","",""] },
-      ],
-    },
+    makeContentShootingTable(),
     h("Equipment Checklist"),
     todo(),
     h("Places to Visit"),
@@ -1607,16 +1656,8 @@ const SLASH_COMMANDS = [
     icon:"🎬",
     // makeMany returns an array of blocks — this is a multi-block template
     makeMany: makeContentShootingBlocks,
-    // Fallback make() in case old code calls it (creates placeholder block)
-    make: () => ({ id: nid(), type:"content-shooting-table",
-      columns: ["Actor","Scene Location","Script","Shot Idea","Equipment Required","Reel Time","Others"],
-      columnWidths: [90, 140, 200, 120, 130, 90, 100],
-      rows: [
-        { id: nid(), checked: false, cells: ["","","","","","",""] },
-        { id: nid(), checked: false, cells: ["","","","","","",""] },
-        { id: nid(), checked: false, cells: ["","","","","","",""] },
-      ],
-    }),
+    // Fallback for old callers: still use the current standard table model.
+    make: makeContentShootingTable,
   },
 ];
 
@@ -2116,6 +2157,22 @@ function TextBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlo
         onSlashCommand={handleSlash}
         onEnter={(plainText, caretPos, split) => {
           const txt = (plainText || "").trim();
+          // kpi: Label | Value | Unit  →  kpis block
+          if (/^kpi:\s*/i.test(txt) && onReplaceBlock) {
+            const parts = txt.replace(/^kpi:\s*/i, "").split("|").map(s => s.trim());
+            const item = { id: nid(), label: parts[0] || "", value: parts[1] || "", unit: parts[2] || "", target: "", change: "" };
+            const textBlock = { id: nid(), type: "text", text: "" };
+            onReplaceBlock([{ id: block.id, type: "kpis", items: [item] }, textBlock], textBlock.id);
+            return;
+          }
+          // milestone: Name | status  →  milestones block
+          if (/^milestone:\s*/i.test(txt) && onReplaceBlock) {
+            const parts = txt.replace(/^milestone:\s*/i, "").split("|").map(s => s.trim());
+            const item = { id: nid(), name: parts[0] || "", status: parts[1] || "pending" };
+            const textBlock = { id: nid(), type: "text", text: "" };
+            onReplaceBlock([{ id: block.id, type: "milestones", items: [item] }, textBlock], textBlock.id);
+            return;
+          }
           if (txt.startsWith("/")) {
             const cmd = window.matchSlashCommand(txt);
           if (cmd) {
@@ -3233,6 +3290,8 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
   const columnWidths = block.columnWidths || block.headers.map(() => 180);
   // Per-column type: "text" (default) or "checkbox". Checkbox cells store "1"/"".
   const colTypes = block.headers.map((_, i) => (block.colTypes || [])[i] || "text");
+  const [scriptPaste, setScriptPaste] = useState("");
+  const [showScriptInput, setShowScriptInput] = useState(false);
   const updateTable = (patch) => updateBlock({ ...block, ...patch });
   const updCell = (rid, ci, v) => updateBlock({ ...block, rows: block.rows.map(r => r.id === rid ? { ...r, cells: r.cells.map((c,i) => i === ci ? v : c) } : r) });
   const updHead = (i, v) => updateBlock({ ...block, headers: block.headers.map((h, idx) => idx === i ? v : h) });
@@ -3242,6 +3301,32 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     updateBlock({ ...block, colTypes: next });
   };
   const blankCells = () => block.headers.map(() => "");
+  const applyScriptPaste = () => {
+    if (!block.scriptGenerator) return;
+    const chunks = scriptPaste
+      .replace(/\r\n?/g, "\n")
+      .split(/\n\s*\n+/)
+      .map((chunk) => chunk.trim())
+      .filter(Boolean);
+    if (!chunks.length) return;
+    const namedScriptIndex = block.headers.findIndex((header) => {
+      const label = window.stripHtml ? window.stripHtml(header || "") : String(header || "").replace(/<[^>]*>/g, "");
+      return label.trim().toLowerCase() === "script";
+    });
+    const scriptIndex = namedScriptIndex >= 0 ? namedScriptIndex : Math.min(3, block.headers.length - 1);
+    const generated = chunks.map((chunk) => ({
+      id: nid(),
+      cells: block.headers.map((_, index) => index === scriptIndex ? sanitizeHtml(chunk).replace(/\n/g, "<br>") : ""),
+    }));
+    // Keep real work; discard only untouched placeholder rows from the template.
+    const existing = block.rows.filter((row) => (row.cells || []).some((cell) => {
+      const value = window.stripHtml ? window.stripHtml(cell || "") : String(cell || "").replace(/<[^>]*>/g, "");
+      return value.trim();
+    }));
+    updateBlock({ ...block, columnWidths, rows: [...existing, ...generated] });
+    setScriptPaste("");
+    setShowScriptInput(false);
+  };
   // ── Row ops ────────────────────────────────────────────────────────────────
   const addRow = () => updateBlock({ ...block, columnWidths, rows: [...block.rows, { id: nid(), cells: blankCells() }] });
   // In headerless mode the visually-first row lives in `headers` for backwards
@@ -3497,6 +3582,37 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     <div className="block-wrap">
       <BlockHandle blockId={blockId} onDragBlockStart={onDragBlockStart} onDragBlockEnd={onDragBlockEnd} />
       <BlockDeleteButton onDeleteBlock={onDeleteBlock} />
+      {block.scriptGenerator && (
+        <div style={{ marginBottom:8 }}>
+          {!showScriptInput ? (
+            <button onClick={() => setShowScriptInput(true)} className="shoot-paste-btn" type="button">
+              📋 Paste script to auto-generate rows…
+            </button>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+              <textarea
+                autoFocus
+                data-native-paste="true"
+                value={scriptPaste}
+                onChange={(e) => setScriptPaste(e.target.value)}
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); applyScriptPaste(); }
+                  if (e.key === "Escape") { e.preventDefault(); setShowScriptInput(false); setScriptPaste(""); }
+                }}
+                placeholder={"Paste your script here. Normal new lines stay in one Script row; blank lines create new rows.\n\nExample:\nScene 1 line one\nScene 1 line two\n\nScene 2 line one"}
+                className="shoot-paste-area"
+              />
+              <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+                <button onClick={applyScriptPaste} className="shoot-paste-apply" type="button">Generate rows</button>
+                <button onClick={() => { setShowScriptInput(false); setScriptPaste(""); }} className="shoot-paste-cancel" type="button">Cancel</button>
+                <span style={{ fontSize:11, color:"var(--text-muted, #888)", marginLeft:"auto" }}>
+                  {scriptPaste.replace(/\r\n?/g, "\n").split(/\n\s*\n+/).filter((line) => line.trim()).length} rows · ⌘↵ to generate
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       <div className="tbl-wrap tbl-notion">
         <div className="tbl-scroll">
           <div className="tbl-grid-shell">

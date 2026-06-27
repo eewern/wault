@@ -27,7 +27,7 @@
 
 import http  from "node:http";
 import https from "node:https";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 
 const PORT      = parseInt(process.env.PORT      || "3335");
 const MCP_TOKEN = (process.env.MCP_TOKEN         || "").trim();
@@ -36,14 +36,32 @@ const API_TOKEN = (process.env.WAULT_API_TOKEN   || process.env.WERNOTION_API_TO
 const VERSION   = "2.0.0";
 
 // ── Active SSE sessions ───────────────────────────────────────────────────────
-// Map<sessionId, ServerResponse>
 const sessions = new Map();
+
+// ── OAuth 2.0 state (in-memory; restarts invalidate tokens, which is fine) ───
+const authCodes   = new Map(); // code → { clientId, redirectUri, codeChallenge, codeChallengeMethod, expiresAt }
+const oauthTokens = new Set(); // issued access tokens
+
+function genCode()  { return randomUUID().replace(/-/g, ""); }
+function genToken() { return `wat_${randomUUID().replace(/-/g, "")}`; }
+
+function verifyPKCE(verifier, challenge, method) {
+  if (method === "S256") return createHash("sha256").update(verifier).digest("base64url") === challenge;
+  return verifier === challenge; // plain
+}
+
+function escHtml(s) {
+  return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 function authorized(req) {
-  if (!MCP_TOKEN) return true; // no token configured = open (dev only)
-  const h = req.headers["authorization"] || "";
-  return h === `Bearer ${MCP_TOKEN}`;
+  const h = (req.headers["authorization"] || "").trim();
+  if (!h.startsWith("Bearer ")) return !MCP_TOKEN;
+  const token = h.slice(7).trim();
+  if (MCP_TOKEN && token === MCP_TOKEN) return true;
+  if (oauthTokens.has(token)) return true;
+  return false;
 }
 
 // ── WAULT API helper ─────────────────────────────────────────────────────────
@@ -85,18 +103,20 @@ function blockToText(block) {
   switch (block.type) {
     case "heading":    return `${"#".repeat(block.level || 1)} ${plain(block.text)}`;
     case "text":       return plain(block.text);
-    case "callout":    return `💡 ${plain(block.text)}`;
+    case "callout":    return `> ${plain(block.text)}`;
     case "divider":    return "---";
-    case "bullets":    return (block.items || []).map(i => `• ${plain(i.text)}`).join("\n");
+    case "bullets":    return (block.items || []).map(i => `- ${plain(i.text)}`).join("\n");
     case "numbers":    return (block.items || []).map((i, n) => `${n + 1}. ${plain(i.text)}`).join("\n");
     case "checklist":  return (block.items || []).map(i => `- [${i.done ? "x" : " "}] ${plain(i.text)}`).join("\n");
-    case "milestones": return (block.items || []).map(i => `- [${i.status === "done" ? "x" : " "}] ${plain(i.name)} (${i.status})`).join("\n");
+    case "milestones": return (block.items || []).map(i => `milestone: ${plain(i.name)} | ${i.status || "pending"}`).join("\n");
     case "table": {
-      const rows = [(block.headers || []).join("\t"), ...(block.rows || []).map(r => (r.cells || []).join("\t"))];
-      return rows.join("\n");
+      const headers = block.headers || [];
+      const sep     = headers.map(() => "---");
+      const dataRows = (block.rows || []).map(r => `| ${(r.cells || []).join(" | ")} |`);
+      return [`| ${headers.join(" | ")} |`, `| ${sep.join(" | ")} |`, ...dataRows].join("\n");
     }
-    case "kpis":    return (block.items || []).map(i => `${plain(i.label)}: ${plain(i.value)}${i.unit || ""}`).join(" | ");
-    case "progress":return `${plain(block.label)}: ${block.value}/${block.total}`;
+    case "kpis":    return (block.items || []).map(i => `kpi: ${plain(i.label)} | ${plain(i.value)}${i.unit ? ` | ${i.unit}` : ""}`).join("\n");
+    case "progress":return `progress: ${plain(block.label)} | ${block.value}/${block.total}`;
     default:        return plain(block.text || "");
   }
 }
@@ -118,9 +138,59 @@ function parseMarkdownToBlocks(md) {
 
   while (i < lines.length) {
     const line = lines[i];
+
+    // Heading
     const h = line.match(/^(#{1,3})\s+(.*)/);
-    if (h)                        { blocks.push({ id: nid(), type: "heading", level: h[1].length, text: h[2].trim() }); i++; continue; }
-    if (line.match(/^---+$/))     { blocks.push({ id: nid(), type: "divider" }); i++; continue; }
+    if (h) { blocks.push({ id: nid(), type: "heading", level: h[1].length, text: h[2].trim() }); i++; continue; }
+
+    // Divider
+    if (line.match(/^---+$/)) { blocks.push({ id: nid(), type: "divider" }); i++; continue; }
+
+    // Callout: > text
+    if (line.match(/^>\s+/)) { blocks.push({ id: nid(), type: "callout", text: line.replace(/^>\s+/, "").trim() }); i++; continue; }
+
+    // KPI: kpi: Label | Value  or  kpi: Label | Value | Unit
+    if (line.match(/^kpi:\s*/i)) {
+      const items = [];
+      while (i < lines.length && lines[i].match(/^kpi:\s*/i)) {
+        const parts = lines[i].replace(/^kpi:\s*/i, "").split("|").map(s => s.trim());
+        items.push({ id: nid(), label: parts[0] || "", value: parts[1] || "", unit: parts[2] || "" });
+        i++;
+      }
+      flush("kpis", items); continue;
+    }
+
+    // Milestone: milestone: Name | status  (status: pending | in-progress | done)
+    if (line.match(/^milestone:\s*/i)) {
+      const items = [];
+      while (i < lines.length && lines[i].match(/^milestone:\s*/i)) {
+        const parts = lines[i].replace(/^milestone:\s*/i, "").split("|").map(s => s.trim());
+        items.push({ id: nid(), name: parts[0] || "", status: parts[1] || "pending" });
+        i++;
+      }
+      flush("milestones", items); continue;
+    }
+
+    // Progress: progress: Label | current/total
+    if (line.match(/^progress:\s*/i)) {
+      const rest  = line.replace(/^progress:\s*/i, "");
+      const [lbl, frac] = rest.split("|").map(s => s.trim());
+      const [val, tot]  = (frac || "0/0").split("/").map(s => parseInt(s.trim()) || 0);
+      blocks.push({ id: nid(), type: "progress", label: lbl || "", value: val, total: tot });
+      i++; continue;
+    }
+
+    // Markdown pipe table: | col | col |
+    if (line.match(/^\|/)) {
+      const tableLines = [];
+      while (i < lines.length && lines[i].match(/^\|/)) tableLines.push(lines[i++]);
+      const parseRow = l => l.split("|").slice(1, -1).map(c => c.trim());
+      const headers  = parseRow(tableLines[0] || "");
+      const dataRows = tableLines.slice(2).map(l => ({ id: nid(), cells: parseRow(l) }));
+      blocks.push({ id: nid(), type: "table", headers, rows: dataRows }); continue;
+    }
+
+    // Checklist: - [ ] or - [x]
     if (line.match(/^- \[[ x]\] /)) {
       const items = [];
       while (i < lines.length && lines[i].match(/^- \[[ x]\] /)) {
@@ -130,18 +200,23 @@ function parseMarkdownToBlocks(md) {
       }
       flush("checklist", items); continue;
     }
+
+    // Bullets: - or * or •  (must come after checklist check)
     if (line.match(/^[-*•]\s+/)) {
       const items = [];
-      while (i < lines.length && lines[i].match(/^[-*•]\s+/))
+      while (i < lines.length && lines[i].match(/^[-*•]\s+/) && !lines[i].match(/^- \[[ x]\] /))
         items.push({ id: nid(), text: lines[i++].replace(/^[-*•]\s+/, "").trim() });
       flush("bullets", items); continue;
     }
+
+    // Numbered list
     if (line.match(/^\d+[.)]\s+/)) {
       const items = [];
       while (i < lines.length && lines[i].match(/^\d+[.)]\s+/))
         items.push({ id: nid(), text: lines[i++].replace(/^\d+[.)]\s+/, "").trim() });
       flush("numbers", items); continue;
     }
+
     if (line.trim()) blocks.push({ id: nid(), type: "text", text: line.trim() });
     i++;
   }
@@ -366,6 +441,152 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
+
+  // ── OAuth discovery ───────────────────────────────────────────────────────
+  if (url.pathname === "/.well-known/oauth-authorization-server" || url.pathname === "/.well-known/openid-configuration") {
+    const base = `https://${req.headers.host}`;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      issuer: base,
+      authorization_endpoint: `${base}/authorize`,
+      token_endpoint:         `${base}/token`,
+      registration_endpoint:  `${base}/register`,
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code"],
+      code_challenge_methods_supported: ["S256", "plain"],
+      token_endpoint_auth_methods_supported: ["none"],
+    }));
+    return;
+  }
+
+  // ── OAuth dynamic client registration (RFC 7591) ──────────────────────────
+  if (req.method === "POST" && url.pathname === "/register") {
+    let body = "";
+    req.on("data", c => { body += c; });
+    req.on("end", () => {
+      let meta = {};
+      try { meta = JSON.parse(body); } catch {}
+      const clientId = genCode();
+      res.writeHead(201, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        client_id: clientId,
+        client_id_issued_at: Math.floor(Date.now() / 1000),
+        redirect_uris: meta.redirect_uris || [],
+        grant_types: ["authorization_code"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+      }));
+    });
+    return;
+  }
+
+  // ── OAuth authorize (GET = show form) ────────────────────────────────────
+  if (req.method === "GET" && url.pathname === "/authorize") {
+    const clientId            = url.searchParams.get("client_id")             || "";
+    const redirectUri         = url.searchParams.get("redirect_uri")          || "";
+    const state               = url.searchParams.get("state")                 || "";
+    const codeChallenge       = url.searchParams.get("code_challenge")        || "";
+    const codeChallengeMethod = url.searchParams.get("code_challenge_method") || "plain";
+
+    const html = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Connect to WAULT</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f0f;color:#e5e5e5;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:12px;padding:2rem;width:100%;max-width:360px}
+h1{font-size:1.2rem;font-weight:600;margin-bottom:.4rem}
+p{color:#888;font-size:.85rem;margin-bottom:1.5rem;line-height:1.5}
+label{display:block;font-size:.8rem;color:#aaa;margin-bottom:.35rem}
+input[type=password]{width:100%;background:#0f0f0f;border:1px solid #333;border-radius:8px;color:#e5e5e5;font-size:.9rem;padding:.6rem .8rem;outline:none}
+input[type=password]:focus{border-color:#6366f1}
+button{width:100%;margin-top:1rem;background:#6366f1;border:none;border-radius:8px;color:#fff;cursor:pointer;font-size:.95rem;font-weight:600;padding:.65rem}
+button:hover{background:#4f52e0}
+.err{color:#f87171;font-size:.8rem;margin-top:.75rem}
+</style></head>
+<body><div class="card">
+<h1>Connect WAULT to Claude</h1>
+<p>Enter your WAULT team token to grant Claude access to your workspaces.</p>
+<form method="POST" action="/authorize">
+<input type="hidden" name="client_id" value="${escHtml(clientId)}">
+<input type="hidden" name="redirect_uri" value="${escHtml(redirectUri)}">
+<input type="hidden" name="state" value="${escHtml(state)}">
+<input type="hidden" name="code_challenge" value="${escHtml(codeChallenge)}">
+<input type="hidden" name="code_challenge_method" value="${escHtml(codeChallengeMethod)}">
+<label for="tok">Team Token</label>
+<input type="password" id="tok" name="token" placeholder="wault_team_…" autocomplete="current-password" autofocus>
+<button type="submit">Authorize</button>
+</form></div></body></html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
+  // ── OAuth authorize (POST = validate token, issue code) ──────────────────
+  if (req.method === "POST" && url.pathname === "/authorize") {
+    let body = "";
+    req.on("data", c => { body += c; });
+    req.on("end", () => {
+      const p                   = new URLSearchParams(body);
+      const token               = p.get("token")                || "";
+      const clientId            = p.get("client_id")            || "";
+      const redirectUri         = p.get("redirect_uri")         || "";
+      const state               = p.get("state")                || "";
+      const codeChallenge       = p.get("code_challenge")       || "";
+      const codeChallengeMethod = p.get("code_challenge_method")|| "plain";
+
+      if (!MCP_TOKEN || token !== MCP_TOKEN) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("Invalid token. Please go back and try again.");
+        return;
+      }
+
+      const code = genCode();
+      authCodes.set(code, { clientId, redirectUri, codeChallenge, codeChallengeMethod, expiresAt: Date.now() + 600_000 });
+
+      const dest = new URL(redirectUri);
+      dest.searchParams.set("code", code);
+      if (state) dest.searchParams.set("state", state);
+      res.writeHead(302, { "Location": dest.toString() });
+      res.end();
+    });
+    return;
+  }
+
+  // ── OAuth token exchange ──────────────────────────────────────────────────
+  if (req.method === "POST" && url.pathname === "/token") {
+    let body = "";
+    req.on("data", c => { body += c; });
+    req.on("end", () => {
+      const p            = new URLSearchParams(body);
+      const grantType    = p.get("grant_type")    || "";
+      const code         = p.get("code")           || "";
+      const codeVerifier = p.get("code_verifier")  || "";
+      const redirectUri  = p.get("redirect_uri")   || "";
+
+      const fail = (err, desc) => {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err, error_description: desc }));
+      };
+
+      if (grantType !== "authorization_code") return fail("unsupported_grant_type");
+
+      const stored = authCodes.get(code);
+      if (!stored || Date.now() > stored.expiresAt) { authCodes.delete(code); return fail("invalid_grant", "code expired or unknown"); }
+      if (stored.redirectUri !== redirectUri)        { return fail("invalid_grant", "redirect_uri mismatch"); }
+      if (stored.codeChallenge && !verifyPKCE(codeVerifier, stored.codeChallenge, stored.codeChallengeMethod)) {
+        return fail("invalid_grant", "PKCE verification failed");
+      }
+
+      authCodes.delete(code);
+      const accessToken = genToken();
+      oauthTokens.add(accessToken);
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ access_token: accessToken, token_type: "Bearer", expires_in: 31536000 }));
+    });
+    return;
+  }
 
   // ── Health check (no auth) ────────────────────────────────────────────────
   if (url.pathname === "/health") {
