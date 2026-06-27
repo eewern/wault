@@ -174,6 +174,11 @@ const jsonHeaders = {
 const now = () => new Date().toISOString();
 const clone = (value) => JSON.parse(JSON.stringify(value ?? null));
 const createId = () => `ws_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+const normalizeVisibility = (visibility) => visibility === "private" ? "private" : "shared";
+const cleanWorkspaceName = (name, fallback = "Untitled Workspace") => {
+  const text = String(name || "").trim();
+  return text || fallback;
+};
 
 function send(res, status, body = {}) {
   res.writeHead(status, jsonHeaders);
@@ -230,16 +235,41 @@ const EMPTY_STATE = () => ({ pages: {}, rootOrder: [], childOrder: {}, currentPa
 // NOTE: Firebase RTDB drops empty objects/arrays/nulls, so a freshly-created (empty)
 // workspace comes back with no `workspace`/`data` key at all — default it rather than
 // dropping the whole workspace.
-function recordToWorkspace(id, rec, nameFromRegistry) {
-  if (!rec || typeof rec !== "object") return null;
-  const data = rec.workspace ?? rec.data ?? EMPTY_STATE(); // both shapes carry the same state
+function normalizeCatalogEntry(id, entry = {}, fallback = {}) {
+  const meta = entry && typeof entry === "object" && !entry.error ? entry : {};
   return {
     id,
-    name: nameFromRegistry || rec.name || "Untitled Workspace",
+    name: cleanWorkspaceName(meta.name ?? fallback.name, id),
+    visibility: normalizeVisibility(meta.visibility ?? fallback.visibility),
+    ownerUid: meta.ownerUid || fallback.ownerUid || "",
+    ownerEmail: String(meta.ownerEmail || fallback.ownerEmail || "").toLowerCase(),
+    updatedAt: meta.updatedAt || fallback.updatedAt || null,
+    deleted: meta.deleted === true,
+  };
+}
+
+function recordToWorkspace(id, rec, nameFromRegistry, catalogEntry) {
+  if (!rec || typeof rec !== "object") return null;
+  const data = rec.workspace ?? rec.data ?? EMPTY_STATE(); // both shapes carry the same state
+  const catalog = normalizeCatalogEntry(id, catalogEntry, {
+    name: nameFromRegistry || rec.name,
+    visibility: "shared",
+    ownerUid: rec.ownerUid,
+    ownerEmail: rec.ownerEmail,
+    updatedAt: rec.updatedAt || rec.updated_at || null,
+  });
+  if (catalog.deleted) return null;
+  return {
+    id,
+    name: catalog.name,
+    visibility: catalog.visibility,
+    ownerUid: catalog.ownerUid,
+    ownerEmail: catalog.ownerEmail,
+    deleted: false,
     data,
     source: rec.source || "firebase",
     createdAt: rec.createdAt || rec.created_at || null,
-    updatedAt: rec.updatedAt || rec.updated_at || null,
+    updatedAt: catalog.updatedAt || rec.updatedAt || rec.updated_at || null,
   };
 }
 
@@ -258,19 +288,51 @@ function workspaceToRecord(ws) {
 async function readStore() {
   if (firebaseEnabled()) {
     try {
-      const [data, names] = await Promise.all([
+      const [data, names, catalog] = await Promise.all([
         firebaseGet("workspaces"),
         firebaseGet("workspaceNames"),
+        firebaseGet("workspaceCatalog"),
       ]);
       const nameMap = names && typeof names === "object" && !names.error ? names : {};
-      if (data && typeof data === "object" && !data.error) {
-        const workspaces = {};
-        for (const [id, rec] of Object.entries(data)) {
-          const ws = recordToWorkspace(id, rec, nameMap[id]);
-          if (ws) workspaces[id] = ws;
-        }
-        return { version: 1, workspaces, updatedAt: null };
+      const catalogMap = catalog && typeof catalog === "object" && !catalog.error ? catalog : {};
+      const normalizedCatalog = {};
+      for (const [id, meta] of Object.entries(catalogMap)) {
+        normalizedCatalog[id] = normalizeCatalogEntry(id, meta, { name: nameMap[id] });
       }
+      const workspaces = {};
+      let catalogChanged = false;
+      if (data && typeof data === "object" && !data.error) {
+        for (const [id, rec] of Object.entries(data)) {
+          const hadCatalogEntry = Boolean(normalizedCatalog[id]);
+          const ws = recordToWorkspace(id, rec, nameMap[id], normalizedCatalog[id]);
+          if (ws) {
+            workspaces[id] = ws;
+            normalizedCatalog[id] = normalizeCatalogEntry(id, normalizedCatalog[id], {
+              name: ws.name,
+              visibility: ws.visibility,
+              ownerUid: ws.ownerUid,
+              ownerEmail: ws.ownerEmail,
+              updatedAt: ws.updatedAt,
+            });
+            if (!hadCatalogEntry) catalogChanged = true;
+          } else if (!normalizedCatalog[id]) {
+            normalizedCatalog[id] = normalizeCatalogEntry(id, null, {
+              name: nameMap[id] || rec?.name,
+              visibility: "shared",
+              updatedAt: rec?.updatedAt || rec?.updated_at || null,
+            });
+            catalogChanged = true;
+          }
+        }
+      }
+      if (catalogChanged) {
+        try {
+          await firebasePut("workspaceCatalog", normalizedCatalog);
+        } catch (e) {
+          console.error("Firebase catalogue backfill failed:", e.message);
+        }
+      }
+      return { version: 1, workspaces, catalog: normalizedCatalog, updatedAt: null };
     } catch (e) {
       console.error("Firebase read failed, falling back to local store:", e.message);
     }
@@ -282,11 +344,12 @@ async function readStore() {
     return {
       version: 1,
       workspaces: parsed.workspaces || {},
+      catalog: parsed.catalog || {},
       updatedAt: parsed.updatedAt || null,
     };
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
-    return { version: 1, workspaces: {}, updatedAt: null };
+    return { version: 1, workspaces: {}, catalog: {}, updatedAt: null };
   }
 }
 
@@ -295,6 +358,7 @@ async function writeStore(store) {
   if (firebaseEnabled()) {
     try {
       const workspaces = nextStore.workspaces ?? {};
+      const catalog = { ...(nextStore.catalog || {}) };
       // Write the full /workspaces node in canonical (firebase-sync) shape — one atomic PUT
       // also handles deletions (keys removed from the store disappear from Firebase).
       const records = {};
@@ -302,9 +366,24 @@ async function writeStore(store) {
       for (const [id, ws] of Object.entries(workspaces)) {
         records[id] = workspaceToRecord(ws);
         names[id] = ws.name ?? null;
+        catalog[id] = normalizeCatalogEntry(id, catalog[id], {
+          name: ws.name,
+          visibility: ws.visibility || "shared",
+          ownerUid: ws.ownerUid,
+          ownerEmail: ws.ownerEmail,
+          updatedAt: ws.updatedAt || now(),
+        });
+        catalog[id].name = cleanWorkspaceName(ws.name, id);
+        catalog[id].visibility = normalizeVisibility(ws.visibility || catalog[id].visibility);
+        catalog[id].ownerUid = ws.ownerUid || catalog[id].ownerUid || "";
+        catalog[id].ownerEmail = String(ws.ownerEmail || catalog[id].ownerEmail || "").toLowerCase();
+        catalog[id].updatedAt = ws.updatedAt || catalog[id].updatedAt || now();
+        catalog[id].deleted = false;
       }
       await firebasePut("workspaces", records);
       await firebasePut("workspaceNames", names);
+      await firebasePut("workspaceCatalog", catalog);
+      nextStore.catalog = catalog;
     } catch (e) {
       console.error("Firebase write failed:", e.message);
     }
@@ -320,6 +399,9 @@ function workspaceSummary(workspace) {
   return {
     id: workspace.id,
     name: workspace.name,
+    visibility: normalizeVisibility(workspace.visibility),
+    ownerUid: workspace.ownerUid || "",
+    ownerEmail: workspace.ownerEmail || "",
     source: workspace.source || "api",
     pageCount: Object.keys(workspace.data?.pages || {}).length,
     currentPageId: workspace.data?.currentPageId || null,
@@ -355,9 +437,32 @@ function splitPath(req) {
   return { url, parts };
 }
 
-function ensureWorkspace(store, id) {
+function canAccessWorkspace(workspace, actor = {}) {
+  if (!workspace || workspace.deleted) return false;
+  if (!actor?.uid) return true; // local/static-token API access
+  if (normalizeVisibility(workspace.visibility) === "private") return workspace.ownerUid === actor.uid;
+  return true;
+}
+
+function canManageWorkspace(workspace, actor = {}) {
+  if (!workspace || workspace.deleted) return false;
+  if (!actor?.uid) return true;
+  if (normalizeVisibility(workspace.visibility) === "private") return workspace.ownerUid === actor.uid;
+  return true; // approved team members can write shared workspaces
+}
+
+function visibleWorkspaces(store, actor = {}) {
+  return Object.values(store.workspaces || {}).filter((workspace) => canAccessWorkspace(workspace, actor));
+}
+
+function ensureWorkspace(store, id, actor = {}) {
   const workspace = store.workspaces[id];
   if (!workspace) {
+    const error = new Error(`Workspace not found: ${id}`);
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!canAccessWorkspace(workspace, actor)) {
     const error = new Error(`Workspace not found: ${id}`);
     error.statusCode = 404;
     throw error;
@@ -392,7 +497,7 @@ function touchWorkspace(workspace) {
 
 async function handleWorkspaces(req, res, store, parts, actor = {}) {
   if (parts.length === 2 && req.method === "GET") {
-    const workspaces = Object.values(store.workspaces)
+    const workspaces = visibleWorkspaces(store, actor)
       .map(workspaceSummary)
       .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
     send(res, 200, { workspaces });
@@ -410,12 +515,18 @@ async function handleWorkspaces(req, res, store, parts, actor = {}) {
     const workspace = {
       id,
       name: body.name || "Untitled Workspace",
+      visibility: normalizeVisibility(body.visibility),
+      ownerUid: actor.uid || body.ownerUid || "",
+      ownerEmail: String(actor.email || body.ownerEmail || "").toLowerCase(),
       source: body.source || "api",
       data: body.data || { pages: {}, rootOrder: [], childOrder: {}, currentPageId: null },
       createdAt: now(),
       updatedAt: now(),
     };
     store.workspaces[id] = workspace;
+    store.catalog = store.catalog || {};
+    store.catalog[id] = normalizeCatalogEntry(id, store.catalog[id], workspace);
+    store.catalog[id] = { ...store.catalog[id], deleted: false };
     await writeStore(store);
     send(res, 201, { workspace });
     return true;
@@ -430,21 +541,52 @@ async function handleWorkspaces(req, res, store, parts, actor = {}) {
       const workspace = store.workspaces[id] || {
         id,
         name: body.name || "Untitled Workspace",
+        visibility: normalizeVisibility(body.visibility),
+        ownerUid: actor.uid || body.ownerUid || "",
+        ownerEmail: String(actor.email || body.ownerEmail || "").toLowerCase(),
         source: body.source || "api",
         data: body.data || { pages: {}, rootOrder: [], childOrder: {}, currentPageId: null },
         createdAt: now(),
         updatedAt: now(),
       };
+      if (!isCreate && !canManageWorkspace(workspace, actor)) {
+        const error = new Error("You do not have access to this workspace.");
+        error.statusCode = 403;
+        throw error;
+      }
       if (body.name !== undefined) workspace.name = body.name;
+      if (body.visibility !== undefined) {
+        const nextVisibility = normalizeVisibility(body.visibility);
+        if (nextVisibility === "private" && actor.uid && workspace.ownerUid && workspace.ownerUid !== actor.uid) {
+          const error = new Error("Only the workspace owner can make this workspace private.");
+          error.statusCode = 403;
+          throw error;
+        }
+        workspace.visibility = nextVisibility;
+        if (nextVisibility === "private" && actor.uid && !workspace.ownerUid) workspace.ownerUid = actor.uid;
+      }
       if (body.source !== undefined) workspace.source = body.source;
       if (body.data !== undefined) workspace.data = body.data;
+      if (!workspace.ownerUid && actor.uid) workspace.ownerUid = actor.uid;
+      if (!workspace.ownerEmail && actor.email) workspace.ownerEmail = String(actor.email).toLowerCase();
       store.workspaces[id] = touchWorkspace(workspace);
+      store.catalog = store.catalog || {};
+      store.catalog[id] = normalizeCatalogEntry(id, store.catalog[id], store.workspaces[id]);
+      store.catalog[id] = {
+        ...store.catalog[id],
+        name: store.workspaces[id].name,
+        visibility: normalizeVisibility(store.workspaces[id].visibility),
+        ownerUid: store.workspaces[id].ownerUid || "",
+        ownerEmail: String(store.workspaces[id].ownerEmail || "").toLowerCase(),
+        updatedAt: store.workspaces[id].updatedAt,
+        deleted: false,
+      };
       await writeStore(store);
       send(res, isCreate ? 201 : 200, { workspace: store.workspaces[id] });
       return true;
     }
 
-    const workspace = ensureWorkspace(store, id);
+    const workspace = ensureWorkspace(store, id, actor);
 
     if (parts.length === 3 && req.method === "GET") {
       send(res, 200, { workspace });
@@ -453,21 +595,58 @@ async function handleWorkspaces(req, res, store, parts, actor = {}) {
 
     if (parts.length === 3 && req.method === "PATCH") {
       const body = await readBody(req);
+      if (!canManageWorkspace(workspace, actor)) {
+        const error = new Error("You do not have access to this workspace.");
+        error.statusCode = 403;
+        throw error;
+      }
       if (body.name !== undefined) workspace.name = body.name;
+      if (body.visibility !== undefined) {
+        const nextVisibility = normalizeVisibility(body.visibility);
+        if (nextVisibility === "private" && actor.uid && workspace.ownerUid && workspace.ownerUid !== actor.uid) {
+          const error = new Error("Only the workspace owner can make this workspace private.");
+          error.statusCode = 403;
+          throw error;
+        }
+        workspace.visibility = nextVisibility;
+        if (nextVisibility === "private" && actor.uid && !workspace.ownerUid) workspace.ownerUid = actor.uid;
+      }
       if (body.source !== undefined) workspace.source = body.source;
       if (body.data !== undefined) workspace.data = body.data;
       touchWorkspace(workspace);
+      store.catalog = store.catalog || {};
+      store.catalog[id] = normalizeCatalogEntry(id, store.catalog[id], workspace);
+      store.catalog[id] = {
+        ...store.catalog[id],
+        name: workspace.name,
+        visibility: normalizeVisibility(workspace.visibility),
+        ownerUid: workspace.ownerUid || "",
+        ownerEmail: String(workspace.ownerEmail || "").toLowerCase(),
+        updatedAt: workspace.updatedAt,
+        deleted: false,
+      };
       await writeStore(store);
       send(res, 200, { workspace });
       return true;
     }
 
     if (parts.length === 3 && req.method === "DELETE") {
-      if (actor.uid && actor.role !== "owner") {
-        const error = new Error("Only the workspace owner can delete workspaces.");
+      if (!canManageWorkspace(workspace, actor)) {
+        const error = new Error("You do not have access to delete this workspace.");
         error.statusCode = 403;
         throw error;
       }
+      store.catalog = store.catalog || {};
+      store.catalog[id] = normalizeCatalogEntry(id, store.catalog[id], workspace);
+      store.catalog[id] = {
+        ...store.catalog[id],
+        name: workspace.name,
+        visibility: normalizeVisibility(workspace.visibility),
+        ownerUid: workspace.ownerUid || "",
+        ownerEmail: String(workspace.ownerEmail || "").toLowerCase(),
+        updatedAt: now(),
+        deleted: true,
+      };
       delete store.workspaces[id];
       await writeStore(store);
       sendNoContent(res);
@@ -641,7 +820,7 @@ async function router(req, res) {
 
   // Convenience: /api/workspace/active → most-recently-updated workspace
   if (parts[0] === "api" && parts[1] === "workspace" && parts[2] === "active" && req.method === "GET") {
-    const workspaces = Object.values(store.workspaces)
+    const workspaces = visibleWorkspaces(store, actor)
       .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
     if (!workspaces.length) { send(res, 404, { error: "No workspaces found." }); return; }
     send(res, 200, { workspace: workspaces[0] });

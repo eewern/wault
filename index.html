@@ -363,6 +363,24 @@
     gap: 6px;
     margin-top: 8px;
   }
+  .workspace-visibility-option {
+    grid-column: span 2;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 22px;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.25;
+    cursor: pointer;
+  }
+  .workspace-visibility-option input {
+    width: 13px;
+    height: 13px;
+    accent-color: var(--accent);
+    margin: 0;
+  }
+  .workspace-visibility-option span { color: var(--text); }
   .workspace-create-input {
     min-width: 0;
     background: rgba(0,0,0,0.2);
@@ -3863,16 +3881,16 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <!-- Data: load XALT Bible content first, then workspace defaults -->
-<script src="workspace-config.js?v=20260627-firebasefirst1"></script>
+<script src="workspace-config.js?v=20260627-teamcatalog1"></script>
 <script src="workspace-localStorage-sync.js?v=20260525-fix-data-loss"></script>
 <script src="xalt-bible-data.js?v=20260515-workspaces1"></script>
 <script src="workspace-data.js?v=20260612-cmdcentre1"></script>
 <script src="workspace-persistence.js?v=20260522-workspace-tools1"></script>
-<script src="workspace-api-client.js?v=20260623-syncfix1"></script>
+<script src="workspace-api-client.js?v=20260627-teamcatalog1"></script>
 <script type="module">
   // Native ESM Firebase init — runs after workspace-config.js (classic) has set SUPABASE_CONFIG.
   // Exposes window.__firebaseInitPromise which workspace-app.jsx awaits (avoids Babel transforming import()).
-  import init from './firebase-sync.mjs?v=20260627-firebasefirst1';
+  import init from './firebase-sync.mjs?v=20260627-teamcatalog1';
   let _fbInitDone = false;
   const _fbInit = init(window.SUPABASE_CONFIG || {}).catch((e) => {
     console.warn('Firebase init failed:', e && e.message);
@@ -3887,9 +3905,9 @@
   }, 10000));
   window.__firebaseInitPromise = Promise.race([_fbInit, _fbTimeout]);
 </script>
-<script type="text/babel" src="workspace-blocks.jsx?v=20260627-firebasefirst1"></script>
-<script type="text/babel" src="focus-home.jsx?v=20260627-firebasefirst1"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260627-firebasefirst1"></script>
+<script type="text/babel" src="workspace-blocks.jsx?v=20260627-teamcatalog1"></script>
+<script type="text/babel" src="focus-home.jsx?v=20260627-teamcatalog1"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260627-teamcatalog1"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

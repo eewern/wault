@@ -5,16 +5,24 @@
 
     "workspaces": {
       "$workspaceId": {
-        ".read": "auth != null && root.child('access').child(auth.uid).exists()",
-        ".write": "auth != null && root.child('access').child(auth.uid).exists()"
+        ".read": "auth != null && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('deleted').val() !== true && (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid)))",
+        ".write": "auth != null && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('deleted').val() !== true && (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid)))"
+      }
+    },
+
+    "workspaceCatalog": {
+      "$workspaceId": {
+        ".read": "auth != null && root.child('access').child(auth.uid).exists() && data.exists() && data.child('deleted').val() !== true && (data.child('visibility').val() !== 'private' || data.child('ownerUid').val() === auth.uid)",
+        ".write": "auth != null && root.child('access').child(auth.uid).exists() && newData.exists() && newData.child('id').val() === $workspaceId && (newData.child('visibility').val() === 'shared' || newData.child('visibility').val() === 'private') && (!newData.child('deleted').exists() || newData.child('deleted').isBoolean()) && ((newData.child('visibility').val() === 'shared' && (!data.exists() || data.child('visibility').val() !== 'private' || data.child('ownerUid').val() === auth.uid)) || (newData.child('visibility').val() === 'private' && newData.child('ownerUid').val() === auth.uid && (!data.exists() || data.child('ownerUid').val() === auth.uid)))",
+        ".validate": "newData.hasChildren(['id', 'name', 'visibility', 'updatedAt']) && newData.child('id').isString() && newData.child('name').isString() && (newData.child('visibility').val() === 'shared' || newData.child('visibility').val() === 'private') && newData.child('updatedAt').isString() && (!newData.child('ownerUid').exists() || newData.child('ownerUid').isString()) && (!newData.child('ownerEmail').exists() || newData.child('ownerEmail').isString()) && (!newData.child('deleted').exists() || newData.child('deleted').isBoolean())"
       }
     },
 
     "presence": {
       "$workspaceId": {
-        ".read": "auth != null && root.child('access').child(auth.uid).exists()",
+        ".read": "auth != null && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('deleted').val() !== true && (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid)))",
         "$sessionId": {
-          ".write": "auth != null && root.child('access').child(auth.uid).exists() && (!newData.exists() || newData.child('uid').val() === auth.uid)",
+          ".write": "auth != null && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('deleted').val() !== true && (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid))) && (!newData.exists() || newData.child('uid').val() === auth.uid)",
           ".validate": "!newData.exists() || (newData.hasChildren(['uid', 'blockId', 'lastActivity']) && newData.child('uid').val() === auth.uid)"
         }
       }

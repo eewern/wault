@@ -86,6 +86,55 @@ export async function initializeFirebaseSync(config) {
     let accessOkCacheUid = null;
     let accessOkCache = null;
 
+    const workspaceCatalogPath = (workspaceId) => `workspaceCatalog/${workspaceId}`;
+    const normalizeVisibility = (visibility) => visibility === 'private' ? 'private' : 'shared';
+    const cleanWorkspaceName = (name, fallback = 'Untitled Workspace') => {
+      const text = String(name || '').trim();
+      return text || fallback;
+    };
+
+    async function loadWorkspaceCatalogEntry(workspaceId) {
+      if (!workspaceId) return null;
+      const snap = await get(ref(database, workspaceCatalogPath(workspaceId)));
+      if (!snap.exists()) return null;
+      const meta = snap.val() || {};
+      return {
+        id: meta.id || workspaceId,
+        name: cleanWorkspaceName(meta.name, workspaceId),
+        visibility: normalizeVisibility(meta.visibility),
+        ownerUid: meta.ownerUid || '',
+        ownerEmail: meta.ownerEmail || '',
+        updatedAt: meta.updatedAt || '',
+        deleted: meta.deleted === true,
+      };
+    }
+
+    async function upsertWorkspaceCatalogEntry(workspaceId, patch = {}) {
+      const currentUser = auth.currentUser;
+      if (!currentUser?.uid || !workspaceId) {
+        throw new Error('Not signed in');
+      }
+      const existing = await loadWorkspaceCatalogEntry(workspaceId);
+      const visibility = normalizeVisibility(patch.visibility ?? existing?.visibility ?? 'shared');
+      const ownerUid = existing?.ownerUid || patch.ownerUid || currentUser.uid;
+      const ownerEmail = existing?.ownerEmail || patch.ownerEmail || currentUser.email || '';
+      if (visibility === 'private' && ownerUid !== currentUser.uid) {
+        throw new Error('Private workspaces can only be managed by their owner.');
+      }
+      const next = {
+        ...(existing || {}),
+        id: workspaceId,
+        name: cleanWorkspaceName(patch.name ?? existing?.name, workspaceId),
+        visibility,
+        ownerUid,
+        ownerEmail: String(ownerEmail || '').toLowerCase(),
+        updatedAt: new Date().toISOString(),
+        deleted: patch.deleted === undefined ? !!existing?.deleted : patch.deleted === true,
+      };
+      await set(ref(database, workspaceCatalogPath(workspaceId)), next);
+      return next;
+    }
+
     // ── Public API ─────────────────────────────────────────────────────────────
     return {
       database,
@@ -258,7 +307,7 @@ export async function initializeFirebaseSync(config) {
 
       // ── Workspace data ──────────────────────────────────────────────────────
 
-      async saveWorkspace(workspaceId, workspaceData, saveId = null) {
+      async saveWorkspace(workspaceId, workspaceData, saveId = null, metadata = {}) {
         try {
           // Security: verify user is authenticated and in the access list before writing
           const currentUser = auth.currentUser;
@@ -280,6 +329,14 @@ export async function initializeFirebaseSync(config) {
             console.warn('⚠️ Save blocked — user not in access list');
             return false;
           }
+
+          await upsertWorkspaceCatalogEntry(workspaceId, {
+            name: metadata.name || workspaceData?.settings?.workspaceName || workspaceId,
+            visibility: metadata.visibility,
+            ownerUid: metadata.ownerUid,
+            ownerEmail: metadata.ownerEmail,
+            deleted: false,
+          });
 
           const dbRef = ref(database, `workspaces/${workspaceId}`);
           await set(dbRef, {
@@ -326,6 +383,24 @@ export async function initializeFirebaseSync(config) {
         }
       },
 
+      async loadWorkspaceCatalogEntry(workspaceId) {
+        try {
+          return await loadWorkspaceCatalogEntry(workspaceId);
+        } catch (error) {
+          console.warn(`⚠️ Failed to load workspace catalogue entry: ${error.message}`);
+          return null;
+        }
+      },
+
+      async updateWorkspaceCatalog(workspaceId, patch = {}) {
+        try {
+          return await upsertWorkspaceCatalogEntry(workspaceId, patch);
+        } catch (error) {
+          console.error(`❌ Failed to update workspace catalogue: ${error.message}`);
+          throw error;
+        }
+      },
+
       onWorkspaceUpdate(workspaceId, callback) {
         try {
           const dbRef = ref(database, `workspaces/${workspaceId}`);
@@ -344,7 +419,9 @@ export async function initializeFirebaseSync(config) {
       async removeWorkspace(workspaceId) {
         if (!auth.currentUser) return;
         try {
+          await upsertWorkspaceCatalogEntry(workspaceId, { deleted: true });
           await remove(ref(database, `workspaces/${workspaceId}`));
+          try { await remove(ref(database, `presence/${workspaceId}`)); } catch {}
           console.log(`🗑️ Removed workspace from Firebase: ${workspaceId}`);
         } catch (err) {
           console.warn('⚠️ Firebase workspace remove failed:', err.message);
@@ -422,24 +499,22 @@ export async function initializeFirebaseSync(config) {
       async saveWorkspaceList(list, activeWorkspaceId = "", deletedWorkspaceIds = []) {
         const user = auth.currentUser;
         if (!user) return;
-        const clean = (list || []).map(({ id, name, updatedAt }) => ({ id, name, updatedAt: updatedAt || new Date().toISOString() }));
-        await set(ref(database, `users/${user.uid}/workspace_list`), clean);
+        // Legacy compatibility only. The signed-in workspace catalogue now lives
+        // at /workspaceCatalog and is filtered by the Railway API; per-user
+        // workspace lists must not be the source of truth anymore.
         await set(ref(database, `users/${user.uid}/active_workspace`), activeWorkspaceId || "");
-        await set(ref(database, `users/${user.uid}/deleted_workspace_ids`), (deletedWorkspaceIds || []).filter(Boolean));
       },
 
       async loadWorkspaceList() {
         const user = auth.currentUser;
         if (!user) return null;
-        const [listSnap, activeSnap, deletedSnap] = await Promise.all([
-          get(ref(database, `users/${user.uid}/workspace_list`)),
+        const [activeSnap] = await Promise.all([
           get(ref(database, `users/${user.uid}/active_workspace`)).catch(() => null),
-          get(ref(database, `users/${user.uid}/deleted_workspace_ids`)).catch(() => null),
         ]);
         return {
-          workspaces: listSnap.exists() ? listSnap.val() : [],
+          workspaces: [],
           activeWorkspaceId: activeSnap && activeSnap.exists() ? activeSnap.val() : "",
-          deletedWorkspaceIds: deletedSnap && deletedSnap.exists() ? (deletedSnap.val() || []) : [],
+          deletedWorkspaceIds: [],
         };
       },
 
