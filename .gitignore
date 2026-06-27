@@ -6,6 +6,8 @@
 
 # Dependencies
 node_modules/
+__pycache__/
+*.py[cod]
 
 # Secrets — never commit
 .env
