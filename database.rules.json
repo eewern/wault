@@ -41,7 +41,7 @@
       ".read": "auth != null && root.child('access').child(auth.uid).child('role').val() === 'owner'",
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && (root.child('access').child(auth.uid).child('role').val() === 'owner' || (auth.uid === $uid && auth.token.email === 'eewern21@gmail.com' && !data.exists()))",
+        ".write": "auth != null && (root.child('access').child(auth.uid).child('role').val() === 'owner' || (auth.uid === $uid && (auth.token.email === 'wernahhh@gmail.com' || auth.token.email === 'eewern21@gmail.com') && !data.exists()))",
         ".validate": "newData.hasChildren(['email', 'role']) && (newData.child('role').val() === 'owner' || newData.child('role').val() === 'member')"
       }
     },

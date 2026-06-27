@@ -515,14 +515,19 @@ function saveLocalWorkspaceData(workspaceId, data) {
 //   Only removes if Firebase returned a non-empty list (guards against network errors
 //   wiping the local list). Never removes locally-tombstoned workspaces (already gone).
 // Returns the merged array, or null if nothing changed.
-function mergeDiscoveredWorkspaces(discovered) {
-  if (!Array.isArray(discovered) || !discovered.length) return null;
+function mergeDiscoveredWorkspaces(discovered, { pruneMissing = false, deletedIds = [] } = {}) {
+  discovered = Array.isArray(discovered) ? discovered : [];
+  if (!discovered.length && !(deletedIds || []).length) return null;
   const workspaces = readJson(LOCAL_WORKSPACES_KEY, []);
   const remoteIds = new Set(discovered.map((w) => w.id).filter(Boolean));
-  const deleted = getDeletedWorkspaceIds();
+  const deleted = new Set([...getDeletedWorkspaceIds(), ...(deletedIds || [])]);
+  deleted.forEach((id) => tombstoneWorkspace(id));
 
-  // Keep workspace if: it exists in Firebase OR it was tombstoned locally (user deleted it here)
-  const kept = (workspaces || []).filter((w) => remoteIds.has(w.id) || deleted.has(w.id));
+  // Firebase user catalogue is authoritative for this Google account; API
+  // discovery is additive only because newly-created browser workspaces may not
+  // have reached the server catalogue yet.
+  const current = (workspaces || []).filter((w) => w?.id && !deleted.has(w.id));
+  const kept = pruneMissing ? current.filter((w) => remoteIds.has(w.id)) : current;
 
   // Add workspaces that Firebase knows about but this browser doesn't have yet
   const keptIds = new Set(kept.map((w) => w.id));
@@ -1317,6 +1322,7 @@ function App() {
   const [userAccess, setUserAccess] = useState(null);      // { email, role } or null
   const [firebaseAccessDenied, setFirebaseAccessDenied] = useState(false);
   const authUnsubRef = useRef(null);
+  const firebaseCatalogueLoadedRef = useRef(false);
 
   // Safety net: the "Connecting…" gate must never be permanent. If Firebase init
   // or the access check stalls (offline RTDB read, listener race, blocked rules),
@@ -1554,6 +1560,47 @@ function App() {
   useEffect(() => {
     let cancelled = false;
 
+    const saveFirebaseWorkspaceCatalogue = (firebaseSync, list = readJson(LOCAL_WORKSPACES_KEY, []), activeId = localStorage.getItem(LOCAL_ACTIVE_WORKSPACE_KEY) || activeLocalWorkspaceId) => {
+      if (!firebaseSync?.saveWorkspaceList) return;
+      const clean = (list || [])
+        .filter((w) => w?.id && !isWorkspaceTombstoned(w.id))
+        .map((w) => ({ id: w.id, name: w.name || w.id, updatedAt: w.updatedAt || new Date().toISOString() }));
+      if (!clean.length) return;
+      firebaseSync.saveWorkspaceList(clean, activeId || clean[0]?.id || "", [...getDeletedWorkspaceIds()]).catch((err) => {
+        console.warn("⚠️ Firebase workspace list save failed:", err.message);
+      });
+    };
+
+    const loadFirebaseWorkspaceCatalogue = async (firebaseSync) => {
+      if (!firebaseSync?.loadWorkspaceList) return null;
+      try {
+        const result = await firebaseSync.loadWorkspaceList();
+        const remoteList = Array.isArray(result) ? result : (result?.workspaces || []);
+        const remoteActiveId = Array.isArray(result) ? "" : (result?.activeWorkspaceId || "");
+        const remoteDeletedIds = Array.isArray(result) ? [] : (result?.deletedWorkspaceIds || []);
+        const merged = mergeDiscoveredWorkspaces(remoteList, { deletedIds: remoteDeletedIds });
+        const nextList = merged || readJson(LOCAL_WORKSPACES_KEY, []);
+        if (merged) setLocalWorkspaces(merged);
+        const localActive = localStorage.getItem(LOCAL_ACTIVE_WORKSPACE_KEY) || activeLocalWorkspaceId;
+        const localActiveStillExists = nextList.some((w) => w.id === localActive);
+        const canRestoreRemoteActive = !firebaseCatalogueLoadedRef.current || !localActiveStillExists;
+        const nextActiveId = (canRestoreRemoteActive && remoteActiveId && nextList.some((w) => w.id === remoteActiveId))
+          ? remoteActiveId
+          : (localActiveStillExists ? localActive : nextList[0]?.id);
+        if (nextActiveId && nextActiveId !== activeLocalWorkspaceId) {
+          localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, nextActiveId);
+          setActiveLocalWorkspaceId(nextActiveId);
+          setData(loadLocalWorkspaceData(nextActiveId));
+        }
+        firebaseCatalogueLoadedRef.current = true;
+        saveFirebaseWorkspaceCatalogue(firebaseSync, nextList, nextActiveId || activeLocalWorkspaceId);
+        return nextList;
+      } catch (err) {
+        console.warn("⚠️ Firebase workspace list load failed:", err.message);
+        return null;
+      }
+    };
+
     const connectWorkspaceBridge = async (firebaseSync) => {
       const bridge = window.WorkspaceApiBridge;
       if (!bridge?.setApiToken) return;
@@ -1567,7 +1614,10 @@ function App() {
         const list = await bridge.listWorkspaces?.();
         if (cancelled) return;
         const merged = mergeDiscoveredWorkspaces(list);
-        if (merged) setLocalWorkspaces(merged);
+        if (merged) {
+          setLocalWorkspaces(merged);
+          saveFirebaseWorkspaceCatalogue(firebaseSync, merged, localStorage.getItem(LOCAL_ACTIVE_WORKSPACE_KEY) || activeLocalWorkspaceId);
+        }
       } catch (err) {
         bridge.setApiToken("");
         console.warn("⚠️ Workspace discovery unavailable:", err.message);
@@ -1691,6 +1741,7 @@ function App() {
           authUnsubRef.current = firebaseSync.onAuthStateChange(async (fbUser) => {
             if (!fbUser) {
               // Signed out
+              firebaseCatalogueLoadedRef.current = false;
               window.WorkspaceApiBridge?.setApiToken?.("");
               setAuthUser(null);
               setUserAccess(null);
@@ -1706,6 +1757,7 @@ function App() {
                 setUserAccess(access);
                 setFirebaseAccessDenied(false);
                 setAuthLoading(false);
+                loadFirebaseWorkspaceCatalogue(firebaseSync);
                 connectWorkspaceBridge(firebaseSync);
               } else {
                 window.WorkspaceApiBridge?.setApiToken?.("");
@@ -1739,6 +1791,7 @@ function App() {
             setFirebaseAccessDenied(!ok);
             if (ok) {
               setAuthLoading(false);
+              loadFirebaseWorkspaceCatalogue(firebaseSync);
               connectWorkspaceBridge(firebaseSync);
             }
             else window.WorkspaceApiBridge?.setApiToken?.("");
@@ -1752,24 +1805,24 @@ function App() {
 
       if (cancelled) return;
 
-      // ── Step 2: check whether Firebase has newer data than localStorage ────
+      // ── Step 2: signed-in workspaces are Firebase-first ────────────────────
+      // localStorage is kept as a fast cache / offline fallback only. If Firebase
+      // has this workspace, that cloud copy is what the UI shows, even when this
+      // browser has an older/newer local cache from previous sessions.
       try {
         const firebaseRecord = await firebaseSync.loadWorkspace(activeLocalWorkspaceId);
         if (!cancelled && firebaseRecord?.workspace) {
-          const localStoredAt = readJson(`${activeLocalWorkspaceId}_local_saved_at`, null);
-          const localTime = localStoredAt ? new Date(localStoredAt).getTime() : 0;
-          const firebaseTime = new Date(firebaseRecord.updated_at || 0).getTime();
-          if (firebaseTime > localTime) {
-            console.log('📡 Firebase data is newer — loading cloud version');
-            const loaded = restoreRememberedPage(activeLocalWorkspaceId, normalizeWorkspaceData(firebaseRecord.workspace));
-            setData(loaded);
-            // Establish the remote base BEFORE the listener starts so the
-            // local-edit guard (current !== lastRemoteDataRef.current) works
-            // correctly from the first listener fire.
-            lastRemoteDataRef.current = loaded;
-          } else {
-            console.log('✅ localStorage is up to date — no Firebase override needed');
-          }
+          console.log('📡 Loading workspace from Firebase source of truth');
+          const loaded = restoreRememberedPage(activeLocalWorkspaceId, normalizeWorkspaceData(firebaseRecord.workspace));
+          setData(loaded);
+          try {
+            localStorage.setItem(localWorkspaceDataKey(activeLocalWorkspaceId), JSON.stringify(loaded));
+            localStorage.setItem(`${activeLocalWorkspaceId}_local_saved_at`, firebaseRecord.updated_at || new Date().toISOString());
+          } catch {}
+          // Establish the remote base BEFORE the listener starts so the
+          // local-edit guard (current !== lastRemoteDataRef.current) works
+          // correctly from the first listener fire.
+          lastRemoteDataRef.current = loaded;
         }
       } catch (err) {
         console.warn('⚠️ Firebase initial load failed:', err.message);
@@ -1805,6 +1858,23 @@ function App() {
       if (authUnsubRef.current) { authUnsubRef.current(); authUnsubRef.current = null; }
     };
   }, []);
+
+  // Keep the workspace switcher catalogue in Firebase per Google account. The
+  // workspace content itself is saved under /workspaces/{id}; this list is what
+  // lets a fresh browser know which workspace ids (like a user-created XALT
+  // workspace) it should load from Firebase.
+  useEffect(() => {
+    if (!authUser?.uid || !userAccess || firebaseAccessDenied) return;
+    const firebaseSync = window.WorkspaceFirebaseSync;
+    if (!firebaseSync?.saveWorkspaceList) return;
+    const clean = (localWorkspaces || [])
+      .filter((w) => w?.id && !isWorkspaceTombstoned(w.id))
+      .map((w) => ({ id: w.id, name: w.name || w.id, updatedAt: w.updatedAt || new Date().toISOString() }));
+    if (!clean.length) return;
+    firebaseSync.saveWorkspaceList(clean, activeLocalWorkspaceId, [...getDeletedWorkspaceIds()]).catch((err) => {
+      console.warn("⚠️ Firebase workspace list save failed:", err.message);
+    });
+  }, [authUser?.uid, userAccess?.role, firebaseAccessDenied, localWorkspaces, activeLocalWorkspaceId]);
 
   // ── Firebase presence listener (who is editing which block) ─────────────────
   useEffect(() => {
@@ -2488,8 +2558,27 @@ function App() {
     if (!workspace) return;
     setActiveLocalWorkspaceId(id);
     localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, id);
+    setSyncState((s) => ({ ...s, workspaceId: id, workspaceName: workspace.name, workspaces: localWorkspaces, status: authUser ? "Loading from Firebase" : "Local draft" }));
+    if (authUser && window.WorkspaceFirebaseSync?.loadWorkspace) {
+      try {
+        const firebaseRecord = await window.WorkspaceFirebaseSync.loadWorkspace(id);
+        if (firebaseRecord?.workspace) {
+          const loaded = restoreRememberedPage(id, normalizeWorkspaceData(firebaseRecord.workspace));
+          setData(loaded);
+          try {
+            localStorage.setItem(localWorkspaceDataKey(id), JSON.stringify(loaded));
+            localStorage.setItem(`${id}_local_saved_at`, firebaseRecord.updated_at || new Date().toISOString());
+          } catch {}
+          lastRemoteDataRef.current = loaded;
+          setSyncState((s) => ({ ...s, status: "Loaded from Firebase" }));
+          return;
+        }
+      } catch (err) {
+        console.warn("⚠️ Firebase workspace switch load failed:", err.message);
+      }
+    }
     setData(loadLocalWorkspaceData(id));
-    setSyncState((s) => ({ ...s, workspaceId: id, workspaceName: workspace.name, workspaces: localWorkspaces, status: "Local draft" }));
+    setSyncState((s) => ({ ...s, status: authUser ? "Firebase empty — using local cache" : "Local draft" }));
   };
 
   const signIn = async (email) => {
@@ -4447,7 +4536,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     const pageBody = pageBodyRef.current;
     if (!pageBody || e.button !== 0 || e.defaultPrevented) return;
     if (!pageBody.contains(e.target)) return;
-    const blocked = e.target.closest?.("button, input, textarea, select, .tbl-resize-handle, .task-category-select, .calendar-month-input");
+    const blocked = e.target.closest?.("button, input, textarea, select, .block-handle, .block-delete-btn, .tbl-rowhandle, .tbl-colhandle, .tbl-resize-handle, .tbl-add-edge, .tbl-menu, .task-category-select, .calendar-month-input");
     if (blocked) return;
     const startRange = rangeFromPoint(e.clientX, e.clientY);
     if (!startRange || !pageBody.contains(startRange.startContainer)) return;
@@ -4574,7 +4663,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
   }, [marquee, blocks]);
 
   const deleteSelectedBlocks = (ids) => {
-    if (!page || page.system || ids.length < 2) return;
+    if (!page || page.system || ids.length < 1) return;
     const selected = new Set(ids);
     // Protect live sub-page links — never bulk-delete a link whose sub-page still exists.
     const protectedLink = (b) => b.type === 'subpage' && data?.pages?.[b.pageId];

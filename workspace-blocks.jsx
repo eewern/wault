@@ -190,6 +190,30 @@ function htmlEscape(text = "") {
     .replace(/>/g, "&gt;");
 }
 
+function editablePasteHtml(text = "", clipHtml = "") {
+  if (clipHtml) {
+    const match = clipHtml.match(/<!--StartFragment-->([\s\S]*?)<!--EndFragment-->/);
+    const fragment = match ? match[1] : clipHtml;
+    const template = document.createElement("template");
+    template.innerHTML = sanitizeHtml(fragment).replace(/(?:<br>\s*)+$/i, "");
+    const blockSelector = "p,div,h1,h2,h3,h4,h5,h6,li,blockquote,pre,tr";
+    const blocks = [...template.content.querySelectorAll(blockSelector)]
+      .filter((el) => {
+        const parentBlock = el.parentElement?.closest?.(blockSelector);
+        return !parentBlock;
+      });
+    if (blocks.length) {
+      return blocks
+        .map((el) => sanitizeHtml(el.innerHTML || el.textContent || "").trim())
+        .filter(Boolean)
+        .join("<br>");
+    }
+    const clean = sanitizeHtml(template.innerHTML);
+    if (clean.trim()) return clean;
+  }
+  return htmlEscape(text).replace(/\r\n?/g, "\n").replace(/\n/g, "<br>");
+}
+
 // Replace the live selection inside one contentEditable with clipboard content.
 // Shared by EditableText and the page-level paste capture handler because browsers
 // may target either node for context-menu paste. Returns false unless the entire
@@ -197,15 +221,7 @@ function htmlEscape(text = "") {
 function replaceEditableSelection(editor, selection, text = "", clipHtml = "") {
   if (!editor || !selection || selection.isCollapsed || selection.rangeCount === 0) return false;
   if (!editor.contains(selection.anchorNode) || !editor.contains(selection.focusNode)) return false;
-  let replacementHtml = "";
-  if (clipHtml) {
-    const match = clipHtml.match(/<!--StartFragment-->([\s\S]*?)<!--EndFragment-->/);
-    const fragment = match ? match[1] : clipHtml;
-    replacementHtml = sanitizeHtml(fragment).replace(/(?:<br>\s*)+$/i, "");
-  }
-  if (!replacementHtml && text) {
-    replacementHtml = htmlEscape(text).replace(/\r\n?/g, "\n").replace(/\n/g, "<br>");
-  }
+  const replacementHtml = editablePasteHtml(text, clipHtml);
 
   const range = selection.getRangeAt(0);
   range.deleteContents();
@@ -1910,6 +1926,10 @@ function startSmoothDrag({ pointerEvent, axis = "y", sourceEl, getTargets, getSo
   let finished = false;
   let pending = null;            // { key, side }
   let ghost = null, dropBox = null, sourceRect = null;
+  let watchdog = null;
+
+  pointerEvent.preventDefault();
+  pointerEvent.stopPropagation();
 
   // A previous interrupted drag must never poison the page. This is also a
   // safety net for browser/OS pointer-capture quirks and hot reloads.
@@ -2032,7 +2052,7 @@ function startSmoothDrag({ pointerEvent, axis = "y", sourceEl, getTargets, getSo
     window.removeEventListener("blur", cancel, true);
     document.removeEventListener("visibilitychange", onVisibilityChange, true);
     document.removeEventListener("keydown", onKeyDown, true);
-    handle.removeEventListener("lostpointercapture", cancel, true);
+    if (watchdog) { clearTimeout(watchdog); watchdog = null; }
   };
   const finish = (e, cancelled = false) => {
     if (finished || (e?.pointerId != null && e.pointerId !== pointerId)) return;
@@ -2057,8 +2077,8 @@ function startSmoothDrag({ pointerEvent, axis = "y", sourceEl, getTargets, getSo
   window.addEventListener("blur", cancel, true);
   document.addEventListener("visibilitychange", onVisibilityChange, true);
   document.addEventListener("keydown", onKeyDown, true);
-  handle.addEventListener("lostpointercapture", cancel, true);
   try { handle.setPointerCapture(pointerId); } catch (_) {}
+  watchdog = setTimeout(() => cancel({ type:"smooth-drag-watchdog" }), 30000);
 }
 window.startSmoothDrag = startSmoothDrag;
 

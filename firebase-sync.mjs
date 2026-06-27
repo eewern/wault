@@ -1,7 +1,8 @@
 // Firebase Realtime Database + Auth Integration for Notion Workspace
 // Handles cloud backup, multi-device sync, Google Sign-In, and invite-based access control.
 
-const OWNER_EMAIL = 'eewern21@gmail.com';
+const OWNER_EMAILS = ['wernahhh@gmail.com', 'eewern21@gmail.com'];
+const isOwnerEmail = (email = '') => OWNER_EMAILS.includes(String(email || '').toLowerCase());
 
 export async function initializeFirebaseSync(config) {
   try {
@@ -132,7 +133,7 @@ export async function initializeFirebaseSync(config) {
         // Owner self-bootstrap (rules allow only the hardcoded owner email to do this).
         // The seed is bookkeeping only — fire-and-forget so a stalled RTDB write can
         // never block the owner from entering their own workspace.
-        if (email === OWNER_EMAIL) {
+        if (isOwnerEmail(email)) {
           seedOwnerAccess(uid, email).catch((e) => console.warn('⚠️ Owner seed failed (non-fatal):', e.message));
           return { uid, email, role: 'owner' };
         }
@@ -273,7 +274,7 @@ export async function initializeFirebaseSync(config) {
           }
           if (accessOkCache === null) {
             const accessSnap = await get(ref(database, `access/${currentUser.uid}`));
-            accessOkCache = accessSnap.exists() || currentUser.email?.toLowerCase() === OWNER_EMAIL;
+            accessOkCache = accessSnap.exists() || isOwnerEmail(currentUser.email);
           }
           if (!accessOkCache) {
             console.warn('⚠️ Save blocked — user not in access list');
@@ -305,7 +306,7 @@ export async function initializeFirebaseSync(config) {
           }
           // Lightweight gate (the DB rules are the real enforcement).
           const accessSnap = await get(ref(database, `access/${currentUser.uid}`));
-          if (!accessSnap.exists() && currentUser.email?.toLowerCase() !== OWNER_EMAIL) {
+          if (!accessSnap.exists() && !isOwnerEmail(currentUser.email)) {
             console.warn('⚠️ Load blocked — user not in access list');
             return null;
           }
@@ -418,18 +419,28 @@ export async function initializeFirebaseSync(config) {
         await remove(ref(database, `apiKeys/${user.uid}`));
       },
 
-      async saveWorkspaceList(list) {
+      async saveWorkspaceList(list, activeWorkspaceId = "", deletedWorkspaceIds = []) {
         const user = auth.currentUser;
         if (!user) return;
         const clean = (list || []).map(({ id, name, updatedAt }) => ({ id, name, updatedAt: updatedAt || new Date().toISOString() }));
         await set(ref(database, `users/${user.uid}/workspace_list`), clean);
+        await set(ref(database, `users/${user.uid}/active_workspace`), activeWorkspaceId || "");
+        await set(ref(database, `users/${user.uid}/deleted_workspace_ids`), (deletedWorkspaceIds || []).filter(Boolean));
       },
 
       async loadWorkspaceList() {
         const user = auth.currentUser;
         if (!user) return null;
-        const snap = await get(ref(database, `users/${user.uid}/workspace_list`));
-        return snap.exists() ? snap.val() : null;
+        const [listSnap, activeSnap, deletedSnap] = await Promise.all([
+          get(ref(database, `users/${user.uid}/workspace_list`)),
+          get(ref(database, `users/${user.uid}/active_workspace`)).catch(() => null),
+          get(ref(database, `users/${user.uid}/deleted_workspace_ids`)).catch(() => null),
+        ]);
+        return {
+          workspaces: listSnap.exists() ? listSnap.val() : [],
+          activeWorkspaceId: activeSnap && activeSnap.exists() ? activeSnap.val() : "",
+          deletedWorkspaceIds: deletedSnap && deletedSnap.exists() ? (deletedSnap.val() || []) : [],
+        };
       },
 
       async submitFeedback(message, meta = {}) {
