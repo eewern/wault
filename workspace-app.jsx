@@ -6,6 +6,7 @@ const TEMPLATES_KEY = "workspace_v4_templates";
 const LOCAL_WORKSPACES_KEY = "workspace_v4_workspaces";
 const LOCAL_ACTIVE_WORKSPACE_KEY = "workspace_v4_active_workspace";
 const LOCAL_LAST_PAGE_PREFIX = "workspace_v4_last_page_";
+const LOCAL_WORKSPACE_DATA_PREFIX = "workspace_v4_data_";
 // Tombstone of deleted workspace ids. Workspaces come back otherwise: seeds are
 // re-added by initializeLocalWorkspaces, and the server discovery merge re-adds
 // from Firebase. Both must honour this set so a delete actually sticks.
@@ -62,7 +63,7 @@ const ensureTrailingTextBlock = (blocks = []) => {
   if (next.length === 0 || !isBlankTextBlock(next[next.length - 1])) next.push(createTextBlock());
   return next;
 };
-const localWorkspaceDataKey = (id) => `workspace_v4_data_${id}`;
+const localWorkspaceDataKey = (id) => `${LOCAL_WORKSPACE_DATA_PREFIX}${id}`;
 const localLastPageKey = (id) => `${LOCAL_LAST_PAGE_PREFIX}${id}`;
 const rememberLocalPage = (workspaceId, pageId) => {
   if (!workspaceId || !pageId) return;
@@ -556,6 +557,62 @@ function createWorkspaceUnavailableData(workspaceName = "Workspace unavailable",
     events: {},
     currentPageId: pageId,
   });
+}
+
+function isWorkspaceUnavailableData(data) {
+  return !!data?.pages?.cloud_workspace_unavailable;
+}
+
+function inferWorkspaceNameFromData(id, data, fallback = "") {
+  const clean = (value) => String(value || "").replace(/<[^>]*>/g, "").trim();
+  const pages = data?.pages || {};
+  const explicit = clean(fallback || data?.settings?.workspaceName);
+  if (explicit) return explicit;
+  const searchable = JSON.stringify({
+    id,
+    pageIds: Object.keys(pages).slice(0, 80),
+    titles: Object.values(pages).slice(0, 80).map((page) => clean(page?.title)),
+  }).toLowerCase();
+  if (searchable.includes("xalt")) return "XALT";
+  if (searchable.includes("churns")) return "Churns AI Bible";
+  const rootTitle = (data?.rootOrder || [])
+    .map((pageId) => clean(pages?.[pageId]?.title))
+    .find(Boolean);
+  return rootTitle || id || "Imported workspace";
+}
+
+function discoverLocalWorkspaceDrafts(remoteList = []) {
+  const remoteIds = new Set((remoteList || []).map((workspace) => workspace?.id).filter(Boolean));
+  const localList = readJson(LOCAL_WORKSPACES_KEY, []) || [];
+  const localMetaById = new Map(localList.filter((w) => w?.id).map((w) => [w.id, w]));
+  const drafts = [];
+  const seen = new Set();
+  try {
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith(LOCAL_WORKSPACE_DATA_PREFIX)) continue;
+      const id = key.slice(LOCAL_WORKSPACE_DATA_PREFIX.length);
+      if (!id || remoteIds.has(id) || seen.has(id) || isWorkspaceTombstoned(id)) continue;
+      seen.add(id);
+      const raw = readJson(key, null);
+      if (!raw?.pages || isWorkspaceUnavailableData(raw)) continue;
+      const pageCount = Object.keys(raw.pages || {}).filter((pageId) => pageId !== HOME_PAGE_ID && pageId !== TASK_INDEX_PAGE_ID).length;
+      if (pageCount <= 0) continue;
+      const meta = localMetaById.get(id) || {};
+      drafts.push({
+        id,
+        name: inferWorkspaceNameFromData(id, raw, meta.name),
+        visibility: meta.visibility === "private" ? "private" : "shared",
+        ownerUid: meta.ownerUid || "",
+        ownerEmail: meta.ownerEmail || "",
+        updatedAt: meta.updatedAt || new Date().toISOString(),
+        data: normalizeWorkspaceData(raw),
+      });
+    }
+  } catch (err) {
+    console.warn("⚠️ Local workspace draft scan failed:", err.message);
+  }
+  return drafts;
 }
 
 // Merge workspaces DISCOVERED from the server (Firebase, via the API) into the
@@ -1373,8 +1430,13 @@ function App() {
   const [authUser, setAuthUser] = useState(null);          // Firebase user object or null
   const [userAccess, setUserAccess] = useState(null);      // { email, role } or null
   const [firebaseAccessDenied, setFirebaseAccessDenied] = useState(false);
+  const [cloudCatalogueReady, setCloudCatalogueReady] = useState(false);
+  const [cloudWorkspaceLoading, setCloudWorkspaceLoading] = useState(false);
+  const [workspaceApiReady, setWorkspaceApiReady] = useState(false);
   const authUnsubRef = useRef(null);
   const firebaseCatalogueLoadedRef = useRef(false);
+  const localWorkspaceRescueDoneRef = useRef(false);
+  const cataloguePollInFlightRef = useRef(false);
 
   // Safety net: the "Connecting…" gate must never be permanent. If Firebase init
   // or the access check stalls (offline RTDB read, listener race, blocked rules),
@@ -1618,6 +1680,7 @@ function App() {
     const applyTeamWorkspaceCatalogue = (list = []) => {
       const nextList = replaceSignedInWorkspaceCatalogue(list);
       setLocalWorkspaces(nextList);
+      setCloudCatalogueReady(true);
       setSyncState((s) => ({
         ...s,
         workspaces: nextList,
@@ -1636,7 +1699,8 @@ function App() {
       if (!nextList.length) {
         skipPersistenceWorkspaceRef.current = activeLocalWorkspaceId || "cloud_empty";
         setData(createWorkspaceUnavailableData("No team workspaces", "Firebase did not return any workspaces for this approved account. Create a shared or private workspace to begin."));
-        return nextList;
+        setCloudWorkspaceLoading(false);
+        return { list: nextList, activeId: "", changedActive: false };
       }
 
       setSyncState((s) => ({
@@ -1652,12 +1716,45 @@ function App() {
       }
 
       firebaseCatalogueLoadedRef.current = true;
-      return nextList;
+      return { list: nextList, activeId: nextActiveId, changedActive: !!(nextActiveId && nextActiveId !== activeLocalWorkspaceId) };
+    };
+
+    const rescueLocalDraftsToFirebase = async (firebaseSync, remoteList = []) => {
+      if (localWorkspaceRescueDoneRef.current) return remoteList;
+      localWorkspaceRescueDoneRef.current = true;
+      const user = firebaseSync.getCurrentUser?.();
+      if (!user?.uid || !firebaseSync?.saveWorkspace) return remoteList;
+      const remoteIds = new Set((remoteList || []).map((workspace) => workspace?.id).filter(Boolean));
+      const drafts = discoverLocalWorkspaceDrafts(remoteList).filter((draft) => !remoteIds.has(draft.id));
+      if (!drafts.length) return remoteList;
+
+      const rescued = [];
+      for (const draft of drafts) {
+        try {
+          const metadata = {
+            id: draft.id,
+            name: draft.name,
+            visibility: draft.visibility || "shared",
+            ownerUid: user.uid,
+            ownerEmail: (user.email || "").toLowerCase(),
+            updatedAt: new Date().toISOString(),
+          };
+          const saved = await firebaseSync.saveWorkspace(draft.id, draft.data, localSaveIdRef.current, metadata);
+          if (saved) {
+            rescued.push({ ...metadata, pageCount: Object.keys(draft.data?.pages || {}).length, currentPageId: draft.data?.currentPageId || null });
+            console.log(`☁️ Published local workspace draft to Firebase: ${draft.name} (${draft.id})`);
+          }
+        } catch (err) {
+          console.warn(`⚠️ Could not publish local workspace draft ${draft.id}:`, err.message);
+        }
+      }
+      return rescued.length ? [...remoteList, ...rescued] : remoteList;
     };
 
     const connectWorkspaceBridge = async (firebaseSync) => {
       const bridge = window.WorkspaceApiBridge;
       if (!bridge?.setApiToken) return;
+      setWorkspaceApiReady(false);
       try {
         // Use the signed-in user's revocable Firebase-backed key. Create one on
         // first use, keep it in memory only, and clear it again on sign-out.
@@ -1667,15 +1764,23 @@ function App() {
         bridge.setApiToken(key);
         const list = await bridge.listWorkspaces?.();
         if (cancelled) return;
-        applyTeamWorkspaceCatalogue(list || []);
+        const withRescuedDrafts = await rescueLocalDraftsToFirebase(firebaseSync, list || []);
+        if (cancelled) return;
+        setWorkspaceApiReady(true);
+        return applyTeamWorkspaceCatalogue(withRescuedDrafts || []);
       } catch (err) {
         bridge.setApiToken("");
+        setWorkspaceApiReady(false);
+        setCloudCatalogueReady(false);
+        setCloudWorkspaceLoading(false);
         console.warn("⚠️ Workspace discovery unavailable:", err.message);
         setSyncState((s) => ({
           ...s,
-          error: "Cloud workspace catalogue unavailable. Showing offline cache only.",
+          error: "Cloud workspace catalogue unavailable. Local cache is not being shown as team data.",
+          status: "Cloud catalogue unavailable",
           firebaseStatus: "Cloud catalogue unavailable",
         }));
+        setData(createWorkspaceUnavailableData("Cloud catalogue unavailable", "WAULT could not load the Firebase team workspace catalogue. Local cached workspaces are hidden so stale browser data cannot be mistaken for team data."));
       }
     };
 
@@ -1763,6 +1868,66 @@ function App() {
       firebaseListenerUnsubRef.current = unsubscribe;
     };
 
+    const loadFirebaseWorkspaceAndListen = async (firebaseSync, workspaceId) => {
+      if (!workspaceId || cancelled) return false;
+      const currentUser = firebaseSync.getCurrentUser?.();
+      if (!currentUser?.uid) return false;
+      setCloudWorkspaceLoading(true);
+
+      try {
+        const firebaseRecord = await firebaseSync.loadWorkspace(workspaceId);
+        if (cancelled) return false;
+        if (firebaseRecord?.workspace) {
+          console.log('📡 Loading workspace from Firebase source of truth');
+          const loaded = restoreRememberedPage(workspaceId, normalizeWorkspaceData(firebaseRecord.workspace));
+          if (skipPersistenceWorkspaceRef.current === workspaceId) skipPersistenceWorkspaceRef.current = null;
+          setData(loaded);
+          try {
+            localStorage.setItem(localWorkspaceDataKey(workspaceId), JSON.stringify(loaded));
+            localStorage.setItem(`${workspaceId}_local_saved_at`, firebaseRecord.updated_at || new Date().toISOString());
+          } catch {}
+          lastRemoteDataRef.current = loaded;
+          setupListener(firebaseSync, workspaceId);
+          setSyncState((s) => ({
+            ...s,
+            workspaceId,
+            status: "Loaded from Firebase",
+            firebaseStatus: "Synced to cloud ✓",
+            error: "",
+          }));
+          return true;
+        }
+
+        const workspace = (readJson(LOCAL_WORKSPACES_KEY, []) || []).find((w) => w.id === workspaceId);
+        skipPersistenceWorkspaceRef.current = workspaceId;
+        const unavailable = createWorkspaceUnavailableData(
+          workspace?.name || "Workspace unavailable",
+          "Firebase did not return a workspace record for this catalogue item. This usually means the workspace was deleted, private to another owner, or the cloud save has not completed."
+        );
+        lastRemoteDataRef.current = unavailable;
+        setData(unavailable);
+        setSyncState((s) => ({
+          ...s,
+          error: "Workspace missing from Firebase.",
+          status: "Workspace missing from Firebase",
+          firebaseStatus: "Workspace missing from Firebase",
+        }));
+        setupListener(firebaseSync, workspaceId);
+        return false;
+      } catch (err) {
+        console.warn('⚠️ Firebase workspace load failed:', err.message);
+        setSyncState((s) => ({
+          ...s,
+          error: err.message || "Workspace load failed",
+          status: "Workspace load failed",
+          firebaseStatus: "Workspace load failed",
+        }));
+        return false;
+      } finally {
+        if (!cancelled) setCloudWorkspaceLoading(false);
+      }
+    };
+
     const run = async () => {
       // Reset sync-state refs so a workspace switch starts with a clean slate.
       // Without this, lastRemoteDataRef from the previous workspace would make the
@@ -1801,6 +1966,9 @@ function App() {
               setAuthUser(null);
               setUserAccess(null);
               setFirebaseAccessDenied(false);
+              setCloudCatalogueReady(false);
+              setCloudWorkspaceLoading(false);
+              setWorkspaceApiReady(false);
               setAuthLoading(false);
               return;
             }
@@ -1809,12 +1977,20 @@ function App() {
             try {
               const access = await firebaseSync.checkUserAccess(fbUser);
               if (access && !access.blocked) {
+                setCloudCatalogueReady(false);
+                setCloudWorkspaceLoading(true);
                 setUserAccess(access);
                 setFirebaseAccessDenied(false);
                 setAuthLoading(false);
-                await connectWorkspaceBridge(firebaseSync);
+                const catalogue = await connectWorkspaceBridge(firebaseSync);
+                if (!catalogue?.changedActive) {
+                  await loadFirebaseWorkspaceAndListen(firebaseSync, catalogue?.activeId || activeLocalWorkspaceId);
+                }
               } else {
                 window.WorkspaceApiBridge?.setApiToken?.("");
+                setCloudCatalogueReady(false);
+                setCloudWorkspaceLoading(false);
+                setWorkspaceApiReady(false);
                 setUserAccess(null);
                 setFirebaseAccessDenied(true);
                 setAuthLoading(false);
@@ -1844,14 +2020,27 @@ function App() {
             setUserAccess(ok ? access : null);
             setFirebaseAccessDenied(!ok);
             if (ok) {
+              setCloudCatalogueReady(false);
+              setCloudWorkspaceLoading(true);
               setAuthLoading(false);
-              await connectWorkspaceBridge(firebaseSync);
+              const catalogue = await connectWorkspaceBridge(firebaseSync);
+              if (!catalogue?.changedActive) {
+                await loadFirebaseWorkspaceAndListen(firebaseSync, catalogue?.activeId || activeLocalWorkspaceId);
+              }
             }
-            else window.WorkspaceApiBridge?.setApiToken?.("");
+            else {
+              window.WorkspaceApiBridge?.setApiToken?.("");
+              setCloudCatalogueReady(false);
+              setCloudWorkspaceLoading(false);
+              setWorkspaceApiReady(false);
+            }
             if (!ok) setAuthLoading(false);
           }).catch(() => { if (!cancelled) setAuthLoading(false); });
         } else {
           window.WorkspaceApiBridge?.setApiToken?.("");
+          setCloudCatalogueReady(false);
+          setCloudWorkspaceLoading(false);
+          setWorkspaceApiReady(false);
           setAuthLoading(false);
         }
       }
@@ -1859,53 +2048,11 @@ function App() {
       if (cancelled) return;
 
       // ── Step 2: signed-in workspaces are Firebase-first ────────────────────
-      // localStorage is kept as a fast cache / offline fallback only. If Firebase
-      // has this workspace, that cloud copy is what the UI shows, even when this
-      // browser has an older/newer local cache from previous sessions.
-      try {
-        const firebaseRecord = await firebaseSync.loadWorkspace(activeLocalWorkspaceId);
-        if (!cancelled && firebaseRecord?.workspace) {
-          console.log('📡 Loading workspace from Firebase source of truth');
-          const loaded = restoreRememberedPage(activeLocalWorkspaceId, normalizeWorkspaceData(firebaseRecord.workspace));
-          if (skipPersistenceWorkspaceRef.current === activeLocalWorkspaceId) skipPersistenceWorkspaceRef.current = null;
-          setData(loaded);
-          try {
-            localStorage.setItem(localWorkspaceDataKey(activeLocalWorkspaceId), JSON.stringify(loaded));
-            localStorage.setItem(`${activeLocalWorkspaceId}_local_saved_at`, firebaseRecord.updated_at || new Date().toISOString());
-          } catch {}
-          // Establish the remote base BEFORE the listener starts so the
-          // local-edit guard (current !== lastRemoteDataRef.current) works
-          // correctly from the first listener fire.
-          lastRemoteDataRef.current = loaded;
-        } else if (!cancelled && firebaseSync.getCurrentUser?.()?.uid) {
-          const workspace = (readJson(LOCAL_WORKSPACES_KEY, []) || []).find((w) => w.id === activeLocalWorkspaceId);
-          skipPersistenceWorkspaceRef.current = activeLocalWorkspaceId;
-          const unavailable = createWorkspaceUnavailableData(
-            workspace?.name || "Workspace unavailable",
-            "Firebase did not return a workspace record for this catalogue item. This usually means the workspace was deleted, private to another owner, or the cloud save has not completed."
-          );
-          lastRemoteDataRef.current = unavailable;
-          setData(unavailable);
-          setSyncState((s) => ({
-            ...s,
-            error: "Workspace missing from Firebase.",
-            status: "Workspace missing from Firebase",
-            firebaseStatus: "Workspace missing from Firebase",
-          }));
-        }
-      } catch (err) {
-        console.warn('⚠️ Firebase initial load failed:', err.message);
+      // Only load content after the cloud catalogue is known. This prevents a
+      // stale local active workspace from flashing or persisting as "real" team data.
+      if (firebaseSync.getCurrentUser?.()?.uid && firebaseCatalogueLoadedRef.current) {
+        await loadFirebaseWorkspaceAndListen(firebaseSync, activeLocalWorkspaceId);
       }
-
-      if (cancelled) return;
-
-      // ── Step 3: set up real-time listener for updates from other devices ───
-      // If no Firebase load happened (localStorage was current), initialize the
-      // remote base to the current local state so the listener can detect local edits.
-      if (!lastRemoteDataRef.current) {
-        lastRemoteDataRef.current = latestSaveRef.current?.data ?? data;
-      }
-      setupListener(firebaseSync, activeLocalWorkspaceId);
     };
 
     run();
@@ -1932,6 +2079,48 @@ function App() {
   // through the Railway API. Do not mirror `localWorkspaces` back to
   // /users/{uid}/workspace_list`; that old per-user list made teammates see
   // different workspaces.
+  useEffect(() => {
+    if (!authUser?.uid || !userAccess || firebaseAccessDenied || !workspaceApiReady) return;
+    let cancelled = false;
+
+    const refreshTeamCatalogue = async () => {
+      if (cataloguePollInFlightRef.current) return;
+      const bridge = window.WorkspaceApiBridge;
+      if (!bridge?.listWorkspaces) return;
+      cataloguePollInFlightRef.current = true;
+      try {
+        const list = await bridge.listWorkspaces();
+        if (cancelled) return;
+        const nextList = replaceSignedInWorkspaceCatalogue(list || []);
+        setLocalWorkspaces(nextList);
+        setSyncState((s) => ({
+          ...s,
+          workspaces: nextList,
+          firebaseStatus: "Team catalogue loaded",
+        }));
+        setCloudCatalogueReady(true);
+
+        const activeStillExists = nextList.some((workspace) => workspace.id === activeLocalWorkspaceId);
+        if (!activeStillExists && nextList[0]?.id) {
+          localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, nextList[0].id);
+          setActiveLocalWorkspaceId(nextList[0].id);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.warn("⚠️ Team workspace catalogue refresh failed:", err.message);
+          setSyncState((s) => ({ ...s, error: err.message, firebaseStatus: "Team catalogue refresh failed" }));
+        }
+      } finally {
+        cataloguePollInFlightRef.current = false;
+      }
+    };
+
+    const timer = setInterval(refreshTeamCatalogue, 8000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [authUser?.uid, userAccess?.role, firebaseAccessDenied, workspaceApiReady, activeLocalWorkspaceId]);
 
   // ── Firebase presence listener (who is editing which block) ─────────────────
   useEffect(() => {
@@ -2012,7 +2201,12 @@ function App() {
           ownerUid: activeWorkspaceMeta.ownerUid || "",
           ownerEmail: activeWorkspaceMeta.ownerEmail || "",
         })
-          .then(() => {
+          .then((saved) => {
+            if (!saved) {
+              pendingLocalSaveRef.current = false;
+              setSyncState((s) => ({ ...s, firebaseStatus: authUser ? 'Cloud sync skipped' : 'Sign in to sync' }));
+              return;
+            }
             // Save confirmed: update the remote base to the current state so
             // the listener's local-edit guard works correctly for future updates.
             // latestSaveRef.current.data tracks the latest render's data (may be
@@ -2675,7 +2869,7 @@ function App() {
   };
 
   const switchWorkspace = async (id) => {
-    if (!id || id === syncState.workspaceId) return;
+    if (!id || id === activeLocalWorkspaceId) return;
     if (window.WorkspaceStore?.canSave()) {
       setSyncState((s) => ({ ...s, busy: true, error: "", status: "Switching workspace" }));
       try {
@@ -2704,6 +2898,7 @@ function App() {
     localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, id);
     setSyncState((s) => ({ ...s, workspaceId: id, workspaceName: workspace.name, workspaces: localWorkspaces, status: authUser ? "Loading from Firebase" : "Local draft" }));
     if (authUser && window.WorkspaceFirebaseSync?.loadWorkspace) {
+      setCloudWorkspaceLoading(true);
       try {
         const firebaseRecord = await window.WorkspaceFirebaseSync.loadWorkspace(id);
         if (firebaseRecord?.workspace) {
@@ -2720,6 +2915,8 @@ function App() {
         }
       } catch (err) {
         console.warn("⚠️ Firebase workspace switch load failed:", err.message);
+      } finally {
+        setCloudWorkspaceLoading(false);
       }
       skipPersistenceWorkspaceRef.current = id;
       const unavailable = createWorkspaceUnavailableData(
@@ -2788,6 +2985,9 @@ function App() {
   const signOutFirebase = async () => {
     if (!window.WorkspaceFirebaseSync?.signOut) return;
     await window.WorkspaceFirebaseSync.signOut();
+    setCloudCatalogueReady(false);
+    setCloudWorkspaceLoading(false);
+    setWorkspaceApiReady(false);
     // onAuthStateChanged fires → resets authUser / userAccess
   };
 
@@ -2848,6 +3048,18 @@ function App() {
     return (
       <FirebaseAccessDeniedScreen
         email={authUser.email}
+        onSignOut={signOutFirebase}
+      />
+    );
+  }
+
+  if (firebaseConfigured && authUser && userAccess && (cloudWorkspaceLoading || (!cloudCatalogueReady && !syncState.error))) {
+    return (
+      <LoadingWorkspaceScreen
+        syncState={{
+          ...syncState,
+          status: cloudCatalogueReady ? "Loading Firebase workspace" : "Loading team workspace catalogue",
+        }}
         onSignOut={signOutFirebase}
       />
     );

@@ -141,24 +141,25 @@
   // individual /workspaces/{id}, not the whole node, so we go through the API
   // (admin service account) for the catalogue.
   async function listWorkspaces() {
-    if (!apiUrl) return [];
-    try {
-      const res = await fetch(`${apiUrl}/api/workspaces`, { headers: headers() });
-      if (!res.ok) return [];
-      const json = await res.json();
-      const list = Array.isArray(json) ? json : (json.workspaces || []);
-      return list.map((w) => ({
-        id: w.id,
-        name: w.name || "",
-        visibility: w.visibility === "private" ? "private" : "shared",
-        ownerUid: w.ownerUid || "",
-        ownerEmail: w.ownerEmail || "",
-        pageCount: Number(w.pageCount || 0),
-        currentPageId: w.currentPageId || null,
-        updatedAt: w.updatedAt || "",
-        createdAt: w.createdAt || "",
-      })).filter((w) => w.id);
-    } catch { return []; }
+    if (!apiUrl) throw new Error("Workspace API is unavailable.");
+    const res = await fetch(`${apiUrl}/api/workspaces`, { headers: headers() });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `Workspace catalogue failed (${res.status}).`);
+    }
+    const json = await res.json();
+    const list = Array.isArray(json) ? json : (json.workspaces || []);
+    return list.map((w) => ({
+      id: w.id,
+      name: w.name || "",
+      visibility: w.visibility === "private" ? "private" : "shared",
+      ownerUid: w.ownerUid || "",
+      ownerEmail: w.ownerEmail || "",
+      pageCount: Number(w.pageCount || 0),
+      currentPageId: w.currentPageId || null,
+      updatedAt: w.updatedAt || "",
+      createdAt: w.createdAt || "",
+    })).filter((w) => w.id);
   }
 
   // Delete from the Firebase-backed server catalogue as well as the browser.
