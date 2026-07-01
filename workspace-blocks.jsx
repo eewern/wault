@@ -409,6 +409,21 @@ function parseHtmlBlocks(html = "") {
     }
     if (tag === "TABLE") {
       const cellText = (c) => (window.stripHtml ? window.stripHtml(c.innerHTML) : c.textContent || "").replace(/​/g, "").trim();
+      const cellHtml = (c) => sanitizeHtml((c.innerHTML || "").replace(/​/g, ""));
+      const rowEls = (tr) => Array.from(tr.querySelectorAll(":scope > th, :scope > td"));
+      if (node.getAttribute("data-wault-cell-selection") === "1") {
+        const selectedRows = Array.from(node.querySelectorAll("tr"))
+          .map((tr) => rowEls(tr).map(cellHtml));
+        if (selectedRows.length && selectedRows[0]?.length) {
+          blocks.push({
+            id: nid(),
+            type:"table",
+            headers: selectedRows[0],
+            rows: selectedRows.slice(1).map((cells) => ({ id: nid(), cells })),
+          });
+        }
+        return;
+      }
       // Checkbox-only cells (a lone <input type=checkbox>) become "1"/"" so WAULT
       // checkbox columns survive a copy→paste round-trip.
       const cellVal = (c) => {
@@ -417,7 +432,6 @@ function parseHtmlBlocks(html = "") {
         return cellText(c);
       };
       const isCheckCell = (c) => !!c.querySelector('input[type="checkbox"]') && !cellText(c);
-      const rowEls = (tr) => Array.from(tr.querySelectorAll(":scope > th, :scope > td"));
       const thead = node.querySelector("thead");
       let headerCells = [];
       let bodyTrs = [];
@@ -663,6 +677,57 @@ function readWaultClipboardPayload(e) {
   } catch (_) { return null; }
 }
 window.readWaultClipboardPayload = readWaultClipboardPayload;
+
+function readWaultCellMatrixFromClipboard(e) {
+  const cleanCell = (html) => sanitizeHtml(String(html == null ? "" : html).replace(/​/g, ""));
+  const matrixFromTable = (table) => {
+    const rows = Array.from(table?.querySelectorAll?.("tr") || [])
+      .map((tr) => Array.from(tr.querySelectorAll(":scope > th, :scope > td")).map((cell) => cleanCell(cell.innerHTML || "")))
+      .filter((row) => row.length);
+    return rows.length ? rows : null;
+  };
+  try {
+    const rawCells = e.clipboardData?.getData("application/x-wault-cells");
+    if (rawCells) {
+      const parsed = JSON.parse(rawCells);
+      if (Array.isArray(parsed) && parsed.length) {
+        return parsed
+          .map((row) => Array.isArray(row) ? row.map(cleanCell) : [])
+          .filter((row) => row.length);
+      }
+    }
+  } catch (_) {}
+  try {
+    const html = e.clipboardData?.getData("text/html") || "";
+    if (html) {
+      const match = html.match(/<!--StartFragment-->([\s\S]*?)<!--EndFragment-->/);
+      const container = document.createElement("div");
+      container.innerHTML = match ? match[1] : html;
+      const table = container.querySelector('table[data-wault-cell-selection="1"]');
+      const matrix = table ? matrixFromTable(table) : null;
+      if (matrix) return matrix;
+    }
+  } catch (_) {}
+  try {
+    const rawBlocks = e.clipboardData?.getData("application/x-wault-blocks");
+    if (rawBlocks) {
+      const parsed = JSON.parse(rawBlocks);
+      const block = Array.isArray(parsed) ? parsed[0] : null;
+      if (block?.type === "table" && block.cellSelection === true) {
+        return [
+          (block.headers || []).map(cleanCell),
+          ...(block.rows || []).map((row) => (row?.cells || []).map(cleanCell)),
+        ].filter((row) => row.length);
+      }
+    }
+  } catch (_) {}
+  const text = e.clipboardData?.getData("text/plain") || "";
+  if (text.includes("\t") || text.includes("\n")) {
+    return text.replace(/\r\n?/g, "\n").split("\n").map((row) => row.split("\t").map((cell) => htmlEscape(cell))).filter((row) => row.length);
+  }
+  return null;
+}
+window.readWaultCellMatrixFromClipboard = readWaultCellMatrixFromClipboard;
 
 // ── In-memory clipboard ─────────────────────────────────────────────────────
 // The OS pasteboard can (and on macOS does) rewrite text/html and drop data-*
@@ -1093,7 +1158,7 @@ function EditableText({
   value, onChange, placeholder, multiline = false, style, tag = "div", className = "",
   onSlashCommand, onEnter, onBackspaceEmpty, onBackspaceAtStart, onMarkdownShortcut, autoFocus = false,
   softBreakOnEnter = false, focusKey = 0, onPasteBlocks, onTab, onShiftTab, selectOnFocus = false,
-  focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock, onDeleteAtEnd,
+  focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock, onDeleteAtEnd, onPasteCells,
 }) {
   const ref = useRef(null);
   const lastValue = useRef(sanitizeHtml(value || ""));
@@ -1450,6 +1515,14 @@ function EditableText({
       replaceEditableSelection(ref.current, selection, text, clipHtml);
       handleInput();
       return;
+    }
+
+    if (onPasteCells && window.readWaultCellMatrixFromClipboard) {
+      const cellMatrix = window.readWaultCellMatrixFromClipboard(e);
+      if (cellMatrix?.length) {
+        onPasteCells(cellMatrix);
+        return;
+      }
     }
 
     // ── Multi-block paste ──────────────────────────────────────────────────
@@ -1988,7 +2061,19 @@ function startSmoothDrag({ pointerEvent, axis = "y", sourceEl, getTargets, getSo
       if (d < bestDist) { bestDist = d; best = { t, r, mid }; }
     }
     if (!best) { pending = null; return; }
-    const side = best.t.slot ? "slot" : (p < best.mid ? "before" : "after");
+    // Slot targets commit to the exact visual slot being hovered. Tables use this
+    // for rows/columns; page blocks use it so "drop on X" means "take X's original
+    // slot" instead of guessing before/after from cursor halves.
+    let side;
+    if (best.t.slot) {
+      side = "slot";
+    } else if (sourceRect) {
+      const srcStart = axis === "y" ? sourceRect.top : sourceRect.left;
+      const tgtStart = axis === "y" ? best.r.top : best.r.left;
+      side = srcStart < tgtStart ? "after" : "before";
+    } else {
+      side = p < best.mid ? "before" : "after";
+    }
     pending = { key: best.t.key, side };
     if (!dropBox || !sourceRect) return;
     dropBox.style.display = "block";
@@ -2100,7 +2185,7 @@ function BlockHandle({ blockId, onDragBlockStart, onDragBlockEnd }) {
       scrollEl: pageBody?.closest(".page-main") || null,
       getTargets: () => [...(pageBody ? pageBody.querySelectorAll(".block-shell[data-block-id]") : [])]
         .filter((el) => el.getAttribute("data-block-id") !== blockId)
-        .map((el) => ({ el, key: el.getAttribute("data-block-id") })),
+        .map((el) => ({ el, key: el.getAttribute("data-block-id"), slot:true })),
       onStart: () => { draggedRef.current = true; onDragBlockStart?.(blockId); },
       onCommit: (targetId, side) => {
         if (targetId && targetId !== blockId) {
@@ -3426,6 +3511,43 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
     if (block.headers.length <= 1) return;
     updateBlock({ ...block, headers: block.headers.filter((_, i) => i !== idx), colTypes: colTypes.filter((_, i) => i !== idx), columnWidths: columnWidths.filter((_, i) => i !== idx), rows: block.rows.map(r => ({ ...r, cells: r.cells.filter((_, i) => i !== idx) })) });
   };
+  const pasteCellsAt = (startRowSlot, startCol, matrix) => {
+    const cleanMatrix = (matrix || [])
+      .map((row) => (Array.isArray(row) ? row.map((cell) => sanitizeHtml(String(cell == null ? "" : cell))) : []))
+      .filter((row) => row.length);
+    if (!cleanMatrix.length) return;
+    const rowSlot = Math.max(0, Number(startRowSlot) || 0);
+    const colSlot = Math.max(0, Number(startCol) || 0);
+    const neededCols = Math.max(block.headers.length, colSlot + Math.max(...cleanMatrix.map((row) => row.length)));
+    const pad = (cells = []) => {
+      const next = [...cells];
+      while (next.length < neededCols) next.push("");
+      return next;
+    };
+    const nextColTypes = [...colTypes];
+    const nextWidths = [...columnWidths];
+    while (nextColTypes.length < neededCols) nextColTypes.push("text");
+    while (nextWidths.length < neededCols) nextWidths.push(180);
+    const visible = [
+      { id: "__table_first_row__", wasFirst: true, cells: pad(block.headers) },
+      ...block.rows.map((row) => ({ ...row, cells: pad(row.cells || []) })),
+    ];
+    while (visible.length < rowSlot + cleanMatrix.length) {
+      visible.push({ id: nid(), cells: Array(neededCols).fill("") });
+    }
+    cleanMatrix.forEach((row, r) => {
+      row.forEach((cell, c) => {
+        visible[rowSlot + r].cells[colSlot + c] = cell;
+      });
+    });
+    updateBlock({
+      ...block,
+      headers: visible[0].cells,
+      colTypes: nextColTypes,
+      columnWidths: nextWidths,
+      rows: visible.slice(1).map((row) => ({ id: row.wasFirst ? nid() : (row.id || nid()), cells: row.cells })),
+    });
+  };
   // ── Reorder (used by the smooth drag) ───────────────────────────────────────
   // Table drag targets are numbered destination SLOTS, not before/after gaps.
   // Dropping row 2 on row 4 must therefore leave it in visible position 4.
@@ -3570,6 +3692,7 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
           <EditableText
             value={value}
             onChange={onChange}
+            onPasteCells={chrome?.rowSlot != null && chrome?.colIndex != null ? (matrix) => pasteCellsAt(chrome.rowSlot, chrome.colIndex, matrix) : undefined}
             placeholder="…"
             multiline
             softBreakOnEnter
@@ -3643,6 +3766,8 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
               <tbody>
                 <tr className={`tbl-hrow${block.headerRow ? " tbl-header-on" : ""}`} data-row-slot={block.headerRow ? undefined : 0}>
                   {block.headers.map((h, i) => renderCell(h, colTypes[i], (v) => updHead(i, v), i, {
+                    rowSlot: 0,
+                    colIndex: i,
                     rowHandle: i === 0 ? (
                       <button
                         className="tbl-rowhandle"
@@ -3660,11 +3785,15 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
                 </tr>
                 {block.rows.map((row, rowIdx) => (
                   <tr key={row.id} data-row-id={row.id} data-row-slot={block.headerRow ? rowIdx : rowIdx + 1}>
-                    {row.cells.map((c, i) => renderCell(c, colTypes[i], (v) => updCell(row.id, i, v), i, i === 0 ? {
-                      rowHandle: (
-                        <button className="tbl-rowhandle" onPointerDown={(e) => startRowHandleDrag(e, block.headerRow ? rowIdx : rowIdx + 1)} onClick={(e) => openRowMenu(e, block.headerRow ? rowIdx : rowIdx + 1)} title="Drag to move · click for options" type="button">{handleGlyph}</button>
-                      ),
-                    } : null))}
+                    {row.cells.map((c, i) => renderCell(c, colTypes[i], (v) => updCell(row.id, i, v), i, {
+                      rowSlot: rowIdx + 1,
+                      colIndex: i,
+                      ...(i === 0 ? {
+                        rowHandle: (
+                          <button className="tbl-rowhandle" onPointerDown={(e) => startRowHandleDrag(e, block.headerRow ? rowIdx : rowIdx + 1)} onClick={(e) => openRowMenu(e, block.headerRow ? rowIdx : rowIdx + 1)} title="Drag to move · click for options" type="button">{handleGlyph}</button>
+                        ),
+                      } : {}),
+                    }))}
                   </tr>
                 ))}
               </tbody>
@@ -4481,15 +4610,14 @@ function Block(props) {
       onDragOver={(e) => {
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
-        const rect = e.currentTarget.getBoundingClientRect();
-        setDropSide(e.clientY < rect.top + rect.height / 2 ? "before" : "after");
+        setDropSide("slot");
       }}
       onDragLeave={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget)) setDropSide(null);
       }}
       onDrop={(e) => {
         e.preventDefault();
-        props.onDropBlock?.(block.id, dropSide || "before");
+        props.onDropBlock?.(block.id, dropSide || "slot");
         setDropSide(null);
       }}
     >

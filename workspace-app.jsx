@@ -532,6 +532,30 @@ function replaceSignedInWorkspaceCatalogue(discovered) {
   return list;
 }
 
+// Live-catalogue merge: the Firebase /workspaceCatalog snapshot is authoritative
+// for which workspaces exist (deleted ones are filtered out), but a just-created
+// workspace can briefly be absent from the snapshot. Preserve the currently-active
+// workspace so a switch/create race never kicks the user out of it.
+function mergeSignedInWorkspaceCatalogue(discovered, activeId) {
+  const list = (Array.isArray(discovered) ? discovered : [])
+    .map(normalizeWorkspaceSummary)
+    .filter(Boolean);
+  // An empty snapshot is almost always a transient/permission error (you can't
+  // delete your last workspace), so never let it wipe the dropdown — keep the
+  // cached list instead.
+  if (!list.length) {
+    const cached = (readJson(LOCAL_WORKSPACES_KEY, []) || []).map(normalizeWorkspaceSummary).filter(Boolean);
+    if (cached.length) return cached;
+  }
+  if (activeId && !list.some((w) => w.id === activeId)) {
+    const localActive = (readJson(LOCAL_WORKSPACES_KEY, []) || []).find((w) => w?.id === activeId);
+    const normalized = localActive ? normalizeWorkspaceSummary(localActive) : null;
+    if (normalized) list.push(normalized);
+  }
+  localStorage.setItem(LOCAL_WORKSPACES_KEY, JSON.stringify(list));
+  return list;
+}
+
 function createWorkspaceUnavailableData(workspaceName = "Workspace unavailable", reason = "This workspace could not be loaded from Firebase.") {
   const pageId = "cloud_workspace_unavailable";
   return normalizeWorkspaceData({
@@ -1436,7 +1460,6 @@ function App() {
   const authUnsubRef = useRef(null);
   const firebaseCatalogueLoadedRef = useRef(false);
   const localWorkspaceRescueDoneRef = useRef(false);
-  const cataloguePollInFlightRef = useRef(false);
 
   // Safety net: the "Connecting…" gate must never be permanent. If Firebase init
   // or the access check stalls (offline RTDB read, listener race, blocked rules),
@@ -1485,14 +1508,15 @@ function App() {
   useEffect(() => {
     if (!cloudWorkspaceLoading) return;
     const t = setTimeout(() => {
-      console.warn('⏱️ Workspace load exceeded 15s — unblocking workspace gate');
+      console.warn('⏱️ Workspace load exceeded 8s — unblocking workspace gate');
       setCloudWorkspaceLoading(false);
+      setCloudCatalogueReady(true);
       setSyncState((s) => ({
         ...s,
         status: s.error ? s.status : "Workspace load is taking longer than expected",
         firebaseStatus: s.error ? s.firebaseStatus : "Workspace load delayed",
       }));
-    }, 15000);
+    }, 8000);
     return () => clearTimeout(t);
   }, [cloudWorkspaceLoading, activeLocalWorkspaceId]);
 
@@ -1679,6 +1703,16 @@ function App() {
   // If a Firebase-listed workspace cannot be loaded, show an error page but never
   // persist that placeholder back over the real cloud record.
   const skipPersistenceWorkspaceRef = useRef(null);
+  // The workspace id whose CONTENT is currently loaded into `data`. The autosave
+  // effect must never write `data` under a different workspace id (the switch race
+  // that contaminated workspaces with each other's pages). Updated only when a
+  // workspace's content is actually rendered.
+  const loadedWorkspaceIdRef = useRef(null);
+  // Tracks whether the very first cold workspace load has completed, so the
+  // full-screen "Opening workspace" gate only ever shows once (never on switch).
+  const initialContentLoadDoneRef = useRef(false);
+  // Live /workspaceCatalog subscription unsubscribe (replaces the 8s Railway poll).
+  const catalogueUnsubRef = useRef(null);
   // Stable per-tab session ID — survives re-renders, used for echo suppression AND presence key.
   // sessionStorage ensures the same tab reuses the same key after soft reloads.
   const localSaveIdRef = useRef(
@@ -1774,43 +1808,47 @@ function App() {
     };
 
     const connectWorkspaceBridge = async (firebaseSync) => {
-      const bridge = window.WorkspaceApiBridge;
-      if (!bridge?.setApiToken) {
-        setWorkspaceApiReady(false);
-        setCloudWorkspaceLoading(false);
-        return;
-      }
       setWorkspaceApiReady(false);
-      try {
-        // Use the signed-in user's revocable Firebase-backed key. Create one on
-        // first use, keep it in memory only, and clear it again on sign-out.
-        let key = await firebaseSync.getApiKey?.();
-        if (!key) key = await firebaseSync.generateApiKey?.();
-        if (cancelled) return;
-        if (!key) {
-          setCloudWorkspaceLoading(false);
-          return;
+      // The team workspace catalogue is now read DIRECTLY from Firebase
+      // (/workspaceCatalog has a node-level .read for approved members). The
+      // Railway API is no longer required for the web app to discover workspaces;
+      // it stays only for the Claude/MCP integration. Mint a personal API key in
+      // the background so MCP delete keeps working, but never block on it.
+      (async () => {
+        try {
+          const bridge = window.WorkspaceApiBridge;
+          if (!bridge?.setApiToken) return;
+          let key = await firebaseSync.getApiKey?.();
+          if (!key) key = await firebaseSync.generateApiKey?.();
+          if (key) { bridge.setApiToken(key); setWorkspaceApiReady(true); }
+        } catch (err) {
+          console.warn("⚠️ Background API key mint failed (non-fatal):", err.message);
         }
-        bridge.setApiToken(key);
-        const list = await bridge.listWorkspaces?.();
+      })();
+
+      try {
+        const list = await firebaseSync.listAllWorkspaces();
         if (cancelled) return;
-        const withRescuedDrafts = await rescueLocalDraftsToFirebase(firebaseSync, list || []);
-        if (cancelled) return;
-        setWorkspaceApiReady(true);
-        return applyTeamWorkspaceCatalogue(withRescuedDrafts || []);
+        // NOTE: we intentionally do NOT auto-publish local browser drafts into the
+        // shared team catalogue. That behaviour (rescueLocalDraftsToFirebase) dumped
+        // each teammate's per-browser seed workspaces ("My Workspace", "Untitled
+        // Workspace", template copies) into Firebase, creating duplicate same-named
+        // workspaces with different ids — which looked like "the same workspace has
+        // different content". The catalogue now only contains workspaces created
+        // explicitly via the New-workspace flow.
+        return applyTeamWorkspaceCatalogue(list || []);
       } catch (err) {
-        bridge.setApiToken("");
-        setWorkspaceApiReady(false);
-        setCloudCatalogueReady(false);
-        setCloudWorkspaceLoading(false);
-        console.warn("⚠️ Workspace discovery unavailable:", err.message);
+        if (cancelled) return;
+        console.warn("⚠️ Firebase catalogue read failed — falling back to local cache:", err.message);
+        // Never blank the app: fall back to the last-known local workspace list so
+        // the user can keep working even if the catalogue read momentarily fails.
+        const cached = readJson(LOCAL_WORKSPACES_KEY, []) || [];
         setSyncState((s) => ({
           ...s,
-          error: "Cloud workspace catalogue unavailable. Local cache is not being shown as team data.",
-          status: "Cloud catalogue unavailable",
-          firebaseStatus: "Cloud catalogue unavailable",
+          status: cached.length ? "Using cached workspace list" : s.status,
+          firebaseStatus: "Catalogue read failed — using cache",
         }));
-        setData(createWorkspaceUnavailableData("Cloud catalogue unavailable", "WAULT could not load the Firebase team workspace catalogue. Local cached workspaces are hidden so stale browser data cannot be mistaken for team data."));
+        return applyTeamWorkspaceCatalogue(cached);
       }
     };
 
@@ -1908,7 +1946,23 @@ function App() {
         setCloudWorkspaceLoading(false);
         return false;
       }
-      setCloudWorkspaceLoading(true);
+
+      // ── Cache-first render (no full-screen gate on switch) ─────────────────
+      // If we have a local copy of this workspace, show it INSTANTLY and refresh
+      // from Firebase in the background. The "Opening workspace" gate only shows
+      // on a genuine cold load (a workspace this browser has never opened).
+      const cachedRaw = readJson(localWorkspaceDataKey(workspaceId), null);
+      const haveCache = !!(cachedRaw && cachedRaw.pages && !isWorkspaceUnavailableData(cachedRaw));
+      if (haveCache) {
+        const cached = restoreRememberedPage(workspaceId, normalizeWorkspaceData(cachedRaw));
+        if (skipPersistenceWorkspaceRef.current === workspaceId) skipPersistenceWorkspaceRef.current = null;
+        lastRemoteDataRef.current = null;     // local cache is not a confirmed remote base
+        loadedWorkspaceIdRef.current = workspaceId;
+        setData(cached);
+        setCloudWorkspaceLoading(false);
+      } else {
+        setCloudWorkspaceLoading(true);       // cold load → brief gate is acceptable
+      }
 
       try {
         const firebaseRecord = await firebaseSync.loadWorkspace(workspaceId);
@@ -1917,6 +1971,7 @@ function App() {
           console.log('📡 Loading workspace from Firebase source of truth');
           const loaded = restoreRememberedPage(workspaceId, normalizeWorkspaceData(firebaseRecord.workspace));
           if (skipPersistenceWorkspaceRef.current === workspaceId) skipPersistenceWorkspaceRef.current = null;
+          loadedWorkspaceIdRef.current = workspaceId;
           setData(loaded);
           try {
             localStorage.setItem(localWorkspaceDataKey(workspaceId), JSON.stringify(loaded));
@@ -1931,6 +1986,15 @@ function App() {
             firebaseStatus: "Synced to cloud ✓",
             error: "",
           }));
+          return true;
+        }
+
+        // Firebase has no record yet. If we already rendered a local copy, keep it
+        // (likely a brand-new workspace whose empty state Firebase stripped, or a
+        // sync lag) and just attach the listener so the cloud copy arrives live.
+        if (haveCache) {
+          loadedWorkspaceIdRef.current = workspaceId;
+          setupListener(firebaseSync, workspaceId);
           return true;
         }
 
@@ -1954,13 +2018,13 @@ function App() {
         console.warn('⚠️ Firebase workspace load failed:', err.message);
         setSyncState((s) => ({
           ...s,
-          error: err.message || "Workspace load failed",
-          status: "Workspace load failed",
+          error: haveCache ? "" : (err.message || "Workspace load failed"),
+          status: haveCache ? "Using local copy" : "Workspace load failed",
           firebaseStatus: "Workspace load failed",
         }));
-        return false;
+        return haveCache;
       } finally {
-        if (!cancelled) setCloudWorkspaceLoading(false);
+        if (!cancelled) { setCloudWorkspaceLoading(false); initialContentLoadDoneRef.current = true; }
       }
     };
 
@@ -2013,17 +2077,16 @@ function App() {
             try {
               const access = await firebaseSync.checkUserAccess(fbUser);
               if (access && !access.blocked) {
-                setCloudCatalogueReady(false);
-                setCloudWorkspaceLoading(true);
                 setUserAccess(access);
                 setFirebaseAccessDenied(false);
                 setAuthLoading(false);
-                const catalogue = await connectWorkspaceBridge(firebaseSync);
-                if (!catalogue?.changedActive) {
-                  await loadFirebaseWorkspaceAndListen(firebaseSync, catalogue?.activeId || activeLocalWorkspaceId);
-                } else {
-                  setCloudWorkspaceLoading(false);
-                }
+                // Open the remembered workspace IMMEDIATELY (cache-first). The gate
+                // only ever waits on this one workspace's content, never on the team
+                // catalogue. The catalogue loads in the BACKGROUND (not awaited) and
+                // just fills the workspace dropdown — so a slow/failed catalogue read
+                // can never strand the user on "Opening workspace".
+                loadFirebaseWorkspaceAndListen(firebaseSync, activeLocalWorkspaceId);
+                connectWorkspaceBridge(firebaseSync);
               } else {
                 window.WorkspaceApiBridge?.setApiToken?.("");
                 setCloudCatalogueReady(false);
@@ -2059,15 +2122,12 @@ function App() {
             setUserAccess(ok ? access : null);
             setFirebaseAccessDenied(!ok);
             if (ok) {
-              setCloudCatalogueReady(false);
-              setCloudWorkspaceLoading(true);
+              // Switch / hot-reload path: render the active workspace's content
+              // (cache-first, no gate) and refresh the catalogue in the background.
+              // Never block on the catalogue.
               setAuthLoading(false);
-              const catalogue = await connectWorkspaceBridge(firebaseSync);
-              if (!catalogue?.changedActive) {
-                await loadFirebaseWorkspaceAndListen(firebaseSync, catalogue?.activeId || activeLocalWorkspaceId);
-              } else {
-                setCloudWorkspaceLoading(false);
-              }
+              loadFirebaseWorkspaceAndListen(firebaseSync, activeLocalWorkspaceId);
+              connectWorkspaceBridge(firebaseSync);
             }
             else {
               window.WorkspaceApiBridge?.setApiToken?.("");
@@ -2091,14 +2151,8 @@ function App() {
         }
       }
 
-      if (cancelled) return;
-
-      // ── Step 2: signed-in workspaces are Firebase-first ────────────────────
-      // Only load content after the cloud catalogue is known. This prevents a
-      // stale local active workspace from flashing or persisting as "real" team data.
-      if (firebaseSync.getCurrentUser?.()?.uid && firebaseCatalogueLoadedRef.current) {
-        await loadFirebaseWorkspaceAndListen(firebaseSync, activeLocalWorkspaceId);
-      }
+      // Content loading is driven directly by the auth branches above
+      // (loadFirebaseWorkspaceAndListen) — never gated on the catalogue.
     };
 
     run();
@@ -2121,52 +2175,39 @@ function App() {
     };
   }, []);
 
-  // Signed-in workspace catalogue source of truth is /workspaceCatalog, surfaced
-  // through the Railway API. Do not mirror `localWorkspaces` back to
-  // /users/{uid}/workspace_list`; that old per-user list made teammates see
-  // different workspaces.
+  // Signed-in workspace catalogue source of truth is /workspaceCatalog, read
+  // LIVE from Firebase (node-level .read for approved members). This replaces the
+  // old 8s Railway poll that wholesale-replaced the local list every tick and
+  // could wipe a freshly-created workspace. Every workspace is shared, so all
+  // approved members see the same team catalogue. Do not mirror `localWorkspaces`
+  // back to /users/{uid}/workspace_list.
   useEffect(() => {
-    if (!authUser?.uid || !userAccess || firebaseAccessDenied || !workspaceApiReady) return;
-    let cancelled = false;
+    if (!authUser?.uid || !userAccess || firebaseAccessDenied) return;
+    const firebaseSync = window.WorkspaceFirebaseSync;
+    if (!firebaseSync?.onWorkspaceCatalogUpdate) return;
 
-    const refreshTeamCatalogue = async () => {
-      if (cataloguePollInFlightRef.current) return;
-      const bridge = window.WorkspaceApiBridge;
-      if (!bridge?.listWorkspaces) return;
-      cataloguePollInFlightRef.current = true;
-      try {
-        const list = await bridge.listWorkspaces();
-        if (cancelled) return;
-        const nextList = replaceSignedInWorkspaceCatalogue(list || []);
-        setLocalWorkspaces(nextList);
-        setSyncState((s) => ({
-          ...s,
-          workspaces: nextList,
-          firebaseStatus: "Team catalogue loaded",
-        }));
-        setCloudCatalogueReady(true);
+    const unsub = firebaseSync.onWorkspaceCatalogUpdate((list) => {
+      const nextList = mergeSignedInWorkspaceCatalogue(list || [], activeLocalWorkspaceId);
+      setLocalWorkspaces(nextList);
+      setSyncState((s) => ({
+        ...s,
+        workspaces: nextList,
+        firebaseStatus: "Team catalogue loaded",
+      }));
+      setCloudCatalogueReady(true);
 
-        const activeStillExists = nextList.some((workspace) => workspace.id === activeLocalWorkspaceId);
-        if (!activeStillExists && nextList[0]?.id) {
-          localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, nextList[0].id);
-          setActiveLocalWorkspaceId(nextList[0].id);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          console.warn("⚠️ Team workspace catalogue refresh failed:", err.message);
-          setSyncState((s) => ({ ...s, error: err.message, firebaseStatus: "Team catalogue refresh failed" }));
-        }
-      } finally {
-        cataloguePollInFlightRef.current = false;
+      const activeStillExists = nextList.some((workspace) => workspace.id === activeLocalWorkspaceId);
+      if (!activeStillExists && nextList[0]?.id) {
+        localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, nextList[0].id);
+        setActiveLocalWorkspaceId(nextList[0].id);
       }
-    };
+    });
+    catalogueUnsubRef.current = unsub;
 
-    const timer = setInterval(refreshTeamCatalogue, 8000);
     return () => {
-      cancelled = true;
-      clearInterval(timer);
+      if (catalogueUnsubRef.current) { catalogueUnsubRef.current(); catalogueUnsubRef.current = null; }
     };
-  }, [authUser?.uid, userAccess?.role, firebaseAccessDenied, workspaceApiReady, activeLocalWorkspaceId]);
+  }, [authUser?.uid, userAccess?.role, firebaseAccessDenied, activeLocalWorkspaceId]);
 
   // ── Firebase presence listener (who is editing which block) ─────────────────
   useEffect(() => {
@@ -2202,6 +2243,18 @@ function App() {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     if (skipPersistenceWorkspaceRef.current === activeLocalWorkspaceId) {
       console.warn('⚠️ Skipping persistence for cloud error placeholder:', activeLocalWorkspaceId);
+      return;
+    }
+    // ── Switch-race guard (prevents cross-workspace page contamination) ────────
+    // When signed in, `data` must belong to the active workspace before we persist
+    // it. During a switch, `activeLocalWorkspaceId` flips to the new workspace a
+    // beat before its content loads, so `data` is still the OLD workspace's pages.
+    // Writing here would save workspace A's pages under workspace B's id (the exact
+    // bug that mixed up workspaces). `loadedWorkspaceIdRef` is set only when a
+    // workspace's content is actually rendered, so this blocks the stale write
+    // until the new workspace has loaded. Local-only (signed-out) mode is unaffected.
+    if (authUser && loadedWorkspaceIdRef.current !== activeLocalWorkspaceId) {
+      console.warn('⏭️ Skipping save — data not yet loaded for active workspace:', activeLocalWorkspaceId);
       return;
     }
     saveTimer.current = setTimeout(() => {
@@ -2299,6 +2352,83 @@ function App() {
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
+
+  // ── Catch-up resync (reliability: you should NEVER need to reload) ──────────
+  // The realtime listener intentionally SKIPS incoming edits while you have unsaved
+  // local changes or a save is in flight. If a save fails or an update lands during
+  // that window, the live listener won't re-fetch it, so you can silently fall
+  // behind teammates' edits until a manual reload. This safety net re-checks
+  // Firebase when the tab regains focus and on a slow interval, and:
+  //   • if we have un-pushed local edits → re-push them (unsticks a failed save), or
+  //   • if we're in sync → adopt anything newer the listener missed.
+  // It only ever runs when idle (no save in flight) and never clobbers active typing
+  // (it bails the moment `data` differs from the last confirmed remote base).
+  useEffect(() => {
+    if (!authUser?.uid || !activeLocalWorkspaceId) return;
+    const fb = window.WorkspaceFirebaseSync;
+    if (!fb?.loadWorkspace || !fb?.saveWorkspace) return;
+    let cancelled = false;
+
+    const catchUp = async () => {
+      if (cancelled || document.visibilityState === "hidden") return;
+      if (pendingLocalSaveRef.current) return;
+      if (loadedWorkspaceIdRef.current !== activeLocalWorkspaceId) return;
+      if (skipPersistenceWorkspaceRef.current === activeLocalWorkspaceId) return;
+      const cur = latestSaveRef.current?.data;
+      if (!cur || isWorkspaceUnavailableData(cur)) return;
+
+      // (1) Un-pushed local edits (e.g. a prior save failed) → re-push so the cloud
+      //     and the listener's local-edit guard re-sync. We push OUR data, so no
+      //     local work is lost.
+      if (cur !== lastRemoteDataRef.current) {
+        try {
+          pendingLocalSaveRef.current = true;
+          const meta = (readJson(LOCAL_WORKSPACES_KEY, []) || []).find((w) => w.id === activeLocalWorkspaceId) || {};
+          const ok = await fb.saveWorkspace(activeLocalWorkspaceId, cur, localSaveIdRef.current, {
+            name: meta.name || activeLocalWorkspaceId,
+            visibility: meta.visibility || "shared",
+            ownerUid: meta.ownerUid || "",
+            ownerEmail: meta.ownerEmail || "",
+          });
+          pendingLocalSaveRef.current = false;
+          if (ok && !cancelled) {
+            lastRemoteDataRef.current = latestSaveRef.current?.data ?? cur;
+            setSyncState((s) => ({ ...s, firebaseStatus: "Synced to cloud ✓" }));
+          }
+        } catch { pendingLocalSaveRef.current = false; }
+        return;
+      }
+
+      // (2) We're in sync → re-read Firebase and adopt anything the live listener
+      //     may have missed (an update that landed during one of our saves).
+      try {
+        const rec = await fb.loadWorkspace(activeLocalWorkspaceId);
+        if (cancelled || !rec?.workspace) return;
+        if (rec.saveId && rec.saveId === localSaveIdRef.current) return; // our own latest write
+        const remote = normalizeWorkspaceData(rec.workspace);
+        setData((current) => {
+          if (current !== lastRemoteDataRef.current) return current; // a local edit started — abort
+          const next = { ...remote, currentPageId: current.currentPageId };
+          if (JSON.stringify(next) === JSON.stringify(current)) return current; // nothing new
+          lastRemoteDataRef.current = next;
+          try { localStorage.setItem(localWorkspaceDataKey(activeLocalWorkspaceId), JSON.stringify(next)); } catch {}
+          console.log("🔄 Catch-up resync applied a missed remote update");
+          return next;
+        });
+      } catch {}
+    };
+
+    const onFocus = () => { if (document.visibilityState === "visible") catchUp(); };
+    const timer = setInterval(catchUp, 15000);
+    document.addEventListener("visibilitychange", onFocus);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onFocus);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [authUser?.uid, activeLocalWorkspaceId]);
 
   const currentPage = data.pages[data.currentPageId];
 
@@ -2629,9 +2759,17 @@ function App() {
     const to = blocks.findIndex(b => b.id === targetId);
     if (from === -1 || to === -1) return;
     const [moved] = blocks.splice(from, 1);
-    let insertAt = position === "after" ? to + 1 : to;
-    if (from < insertAt) insertAt -= 1;
-    blocks.splice(Math.max(0, insertAt), 0, moved);
+    // "slot" means the dragged block takes the target block's original visual
+    // slot. This matches the drop-box behaviour: V dropped on X => A/B/X/V,
+    // and A dropped on C => B/C/A/D. Keep before/after for any legacy callers.
+    let insertAt;
+    if (position === "slot") {
+      insertAt = to;
+    } else {
+      insertAt = position === "after" ? to + 1 : to;
+      if (from < insertAt) insertAt -= 1;
+    }
+    blocks.splice(Math.max(0, Math.min(insertAt, blocks.length)), 0, moved);
     updatePage(currentPage.id, { blocks });
   };
 
@@ -2705,6 +2843,7 @@ function App() {
         localStorage.setItem(localWorkspaceDataKey(id), JSON.stringify(defaultData));
         skipPersistenceWorkspaceRef.current = null;
         lastRemoteDataRef.current = defaultData;
+        loadedWorkspaceIdRef.current = id;   // this workspace's content is now what's loaded
         setLocalWorkspaces(nextWorkspaces);
         setActiveLocalWorkspaceId(id);
         setData(defaultData);
@@ -2753,6 +2892,7 @@ function App() {
     localStorage.setItem(LOCAL_WORKSPACES_KEY, JSON.stringify(nextWorkspaces));
     localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, id);
     localStorage.setItem(localWorkspaceDataKey(id), JSON.stringify(defaultData));
+    loadedWorkspaceIdRef.current = id;
     setLocalWorkspaces(nextWorkspaces);
     setActiveLocalWorkspaceId(id);
     setData(defaultData);
@@ -2942,45 +3082,26 @@ function App() {
     if (!workspace) return;
     setActiveLocalWorkspaceId(id);
     localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, id);
-    setSyncState((s) => ({ ...s, workspaceId: id, workspaceName: workspace.name, workspaces: localWorkspaces, status: authUser ? "Loading from Firebase" : "Local draft" }));
-    if (authUser && window.WorkspaceFirebaseSync?.loadWorkspace) {
-      setCloudWorkspaceLoading(true);
-      try {
-        const firebaseRecord = await window.WorkspaceFirebaseSync.loadWorkspace(id);
-        if (firebaseRecord?.workspace) {
-          const loaded = restoreRememberedPage(id, normalizeWorkspaceData(firebaseRecord.workspace));
-          if (skipPersistenceWorkspaceRef.current === id) skipPersistenceWorkspaceRef.current = null;
-          setData(loaded);
-          try {
-            localStorage.setItem(localWorkspaceDataKey(id), JSON.stringify(loaded));
-            localStorage.setItem(`${id}_local_saved_at`, firebaseRecord.updated_at || new Date().toISOString());
-          } catch {}
-          lastRemoteDataRef.current = loaded;
-          setSyncState((s) => ({ ...s, status: "Loaded from Firebase" }));
-          return;
-        }
-      } catch (err) {
-        console.warn("⚠️ Firebase workspace switch load failed:", err.message);
-      } finally {
-        setCloudWorkspaceLoading(false);
+    setSyncState((s) => ({ ...s, workspaceId: id, workspaceName: workspace.name, workspaces: localWorkspaces, status: authUser ? "Loading…" : "Local draft" }));
+
+    if (authUser) {
+      // Instant switch: render the cached copy right away (NO full-screen gate).
+      // Changing activeLocalWorkspaceId re-runs the Firebase init effect, which
+      // refreshes this workspace from the cloud and attaches the live listener.
+      const cachedRaw = readJson(localWorkspaceDataKey(id), null);
+      if (cachedRaw && cachedRaw.pages && !isWorkspaceUnavailableData(cachedRaw)) {
+        if (skipPersistenceWorkspaceRef.current === id) skipPersistenceWorkspaceRef.current = null;
+        lastRemoteDataRef.current = null;       // cache is not a confirmed remote base
+        loadedWorkspaceIdRef.current = id;       // unblock autosave for the new workspace
+        setData(restoreRememberedPage(id, normalizeWorkspaceData(cachedRaw)));
       }
-      skipPersistenceWorkspaceRef.current = id;
-      const unavailable = createWorkspaceUnavailableData(
-        workspace.name,
-        "Firebase did not return this workspace. It may have been deleted, be private to another owner, or the cloud save has not completed."
-      );
-      lastRemoteDataRef.current = unavailable;
-      setData(unavailable);
-      setSyncState((s) => ({
-        ...s,
-        error: "Workspace missing from Firebase.",
-        status: "Workspace missing from Firebase",
-        firebaseStatus: "Workspace missing from Firebase",
-      }));
       return;
     }
+
+    // Signed-out / local-only mode.
+    loadedWorkspaceIdRef.current = id;
     setData(loadLocalWorkspaceData(id));
-    setSyncState((s) => ({ ...s, status: authUser ? "Firebase empty — using local cache" : "Local draft" }));
+    setSyncState((s) => ({ ...s, status: "Local draft" }));
   };
 
   const signIn = async (email) => {
@@ -3038,6 +3159,15 @@ function App() {
   };
 
   const firebaseConfigured = !!(window.SUPABASE_CONFIG?.firebaseApiKey);
+  // TEMP DEV PEEK — localhost-only auth bypass (inert on the live site). REMOVE
+  // before the next production deploy. [[wault-dev-peek-localhost-bypass]]
+  const DEV_PEEK = (() => {
+    try {
+      const h = window.location.hostname;
+      const isLocal = h === "localhost" || h === "127.0.0.1" || h === "[::1]";
+      return isLocal && new URLSearchParams(window.location.search).has("devpeek");
+    } catch { return false; }
+  })();
   const configured = window.WorkspaceStore?.isConfigured();
   const activeWorkspaceMeta = (localWorkspaces || []).find((workspace) => workspace.id === activeLocalWorkspaceId) || {};
   const cloudWorkspaceAllowed = !!(authUser?.uid && userAccess && !firebaseAccessDenied);
@@ -3067,7 +3197,7 @@ function App() {
   }
 
   // ── Firebase Google Auth gates ─────────────────────────────────────────────
-  if (firebaseConfigured && authLoading) {
+  if (!DEV_PEEK && firebaseConfigured && authLoading) {
     return (
       <main className="auth-gate">
         <section className="auth-card">
@@ -3079,7 +3209,7 @@ function App() {
     );
   }
 
-  if (firebaseConfigured && !authUser) {
+  if (!DEV_PEEK && firebaseConfigured && !authUser) {
     return (
       <GoogleSignInScreen
         busy={googleSignInBusy}
@@ -3089,7 +3219,7 @@ function App() {
     );
   }
 
-  if (firebaseConfigured && authUser && firebaseAccessDenied) {
+  if (!DEV_PEEK && firebaseConfigured && authUser && firebaseAccessDenied) {
     return (
       <FirebaseAccessDeniedScreen
         email={authUser.email}
@@ -3098,13 +3228,13 @@ function App() {
     );
   }
 
-  if (firebaseConfigured && authUser && userAccess && (cloudWorkspaceLoading || (!cloudCatalogueReady && !syncState.error))) {
+  // The gate waits ONLY on the active workspace's content load (cold sign-in with
+  // no local copy). It must NEVER depend on the team catalogue — that loads in the
+  // background and a slow/failed catalogue read must not strand the user here.
+  if (firebaseConfigured && authUser && userAccess && cloudWorkspaceLoading) {
     return (
       <LoadingWorkspaceScreen
-        syncState={{
-          ...syncState,
-          status: cloudCatalogueReady ? "Loading Firebase workspace" : "Loading team workspace catalogue",
-        }}
+        syncState={{ ...syncState, status: "Opening your workspace" }}
         onSignOut={signOutFirebase}
       />
     );
@@ -4091,9 +4221,11 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       const range = sel.getRangeAt(0);
       const pb = pageBodyRef.current;
       if (!pb || !pb.contains(range.commonAncestorContainer)) return null;
-      const blockEl = range.commonAncestorContainer.nodeType === 1
-        ? range.commonAncestorContainer.closest("[data-block-id]")
-        : range.commonAncestorContainer.parentElement?.closest("[data-block-id]");
+      const nodeEl = (node) => node && (node.nodeType === 1 ? node : node.parentElement);
+      const startEditable = nodeEl(range.startContainer)?.closest?.(".editable");
+      const endEditable = nodeEl(range.endContainer)?.closest?.(".editable");
+      if (!startEditable || startEditable !== endEditable) return null;
+      const blockEl = startEditable.closest("[data-block-id]");
       if (!blockEl) return null;
       const rect = range.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) return null;
@@ -4195,6 +4327,47 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     const cellText = (cell) => {
       const ed = cell.querySelector(".editable") || cell;
       return (window.stripHtml ? window.stripHtml(ed.innerHTML || "") : (ed.textContent || "")).replace(/​/g, "").trim();
+    };
+    const cellHtml = (cell) => {
+      const ed = cell.querySelector(".editable") || cell;
+      const html = (ed.innerHTML || "").replace(/​/g, "");
+      return window.sanitizeHtml ? window.sanitizeHtml(html) : html;
+    };
+    const buildSelectedCellsPayload = (cellMatrix) => {
+      const textMatrix = cellMatrix.map((row) => row.map(cellText));
+      const htmlMatrix = cellMatrix.map((row) => row.map(cellHtml));
+      const tsv = textMatrix.map((r) => r.join("\t")).join("\n");
+      const htmlTbl = `<table data-wault-cell-selection="1">${htmlMatrix.map((r) => `<tr>${r.map((c) => `<td>${c || ""}</td>`).join("")}</tr>`).join("")}</table>`;
+      const html = `<!--StartFragment-->${htmlTbl}<!--EndFragment-->`;
+      const blockPayload = JSON.stringify([{
+        id: window.nid(),
+        type: "table",
+        cellSelection: true,
+        headers: htmlMatrix[0] || [],
+        rows: htmlMatrix.slice(1).map((cells) => ({ id: window.nid(), cells })),
+      }]);
+      return { textMatrix, htmlMatrix, tsv, html, blockPayload };
+    };
+    const writeSelectedCellsPayload = (e, cellMatrix) => {
+      const payload = buildSelectedCellsPayload(cellMatrix);
+      e.clipboardData.setData("text/html", payload.html);
+      e.clipboardData.setData("text/plain", payload.tsv);
+      try { e.clipboardData.setData("application/x-wault-cells", JSON.stringify(payload.htmlMatrix)); } catch (_) {}
+      try { e.clipboardData.setData("application/x-wault-blocks", payload.blockPayload); } catch (_) {}
+      e.preventDefault();
+    };
+    const writeSelectedCellsSystemClipboard = async (cellMatrix) => {
+      const payload = buildSelectedCellsPayload(cellMatrix);
+      try {
+        if (navigator.clipboard && window.ClipboardItem) {
+          await navigator.clipboard.write([new window.ClipboardItem({
+            "text/html": new Blob([payload.html], { type: "text/html" }),
+            "text/plain": new Blob([payload.tsv], { type: "text/plain" }),
+          })]);
+        } else if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(payload.tsv);
+        }
+      } catch (_) {}
     };
 
     // ── Selection-accurate helpers ────────────────────────────────────────
@@ -4314,12 +4487,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       // (A) Table cell-range selection captured during a cross-cell drag.
       const cellSel = cellSelRef.current;
       if (cellSel?.matrix?.length) {
-        const matrix = cellSel.matrix.map((row) => row.map(cellText));
-        const tsv = matrix.map((r) => r.join("\t")).join("\n");
-        const htmlTbl = `<table>${matrix.map((r) => `<tr>${r.map((c) => `<td>${(c || "").replace(/&/g,"&amp;").replace(/</g,"&lt;")}</td>`).join("")}</tr>`).join("")}</table>`;
-        e.clipboardData.setData("text/html", `<!--StartFragment-->${htmlTbl}<!--EndFragment-->`);
-        e.clipboardData.setData("text/plain", tsv);
-        e.preventDefault();
+        writeSelectedCellsPayload(e, cellSel.matrix);
         return;
       }
 
@@ -4348,24 +4516,25 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       if (!touched.length) return;
 
       // ── Table cell-range copy (TSV + <table>) — works across multiple cells ──
-      const tableBlockEl = (range.commonAncestorContainer.nodeType === 1 ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement)?.closest?.(".tbl-wrap table");
-      if (tableBlockEl && touched.length === 1 && (touched[0].type === "table" || touched[0].type === "content-shooting-table")) {
+      // Do NOT rely on range.commonAncestorContainer being inside the table: when
+      // users drag-highlight cells, browsers often report `.page-body` as the
+      // common ancestor. Use the touched table block as the authority instead.
+      const tableBlock = touched.length === 1 && (touched[0].type === "table" || touched[0].type === "content-shooting-table") ? touched[0] : null;
+      const tableBlockRoot = tableBlock ? pageBody.querySelector(`[data-block-id="${tableBlock.id}"]`) : null;
+      const tableBlockEl = tableBlockRoot?.querySelector?.(".tbl-wrap table");
+      if (tableBlockEl) {
         const rows = [...tableBlockEl.querySelectorAll("tr")];
         const matrix = [];
         rows.forEach((tr) => {
           const cells = [...tr.querySelectorAll("th,td")].filter((c) => c.querySelector(".editable"));
           const picked = cells.filter((c) => { try { return range.intersectsNode(c); } catch { return false; } });
-          if (picked.length) matrix.push(picked.map(cellText));
+          if (picked.length) matrix.push(picked);
         });
         const cellCount = matrix.reduce((n, r) => n + r.length, 0);
         // A selection inside a SINGLE cell falls through to the inline path below,
         // so partial text in one cell copies as exactly that text — not the whole cell.
         if (matrix.length && cellCount > 1) {
-          const tsv = matrix.map((r) => r.join("\t")).join("\n");
-          const htmlTbl = `<table>${matrix.map((r) => `<tr>${r.map((c) => `<td>${(c || "").replace(/&/g,"&amp;").replace(/</g,"&lt;")}</td>`).join("")}</tr>`).join("")}</table>`;
-          e.clipboardData.setData("text/html", `<!--StartFragment-->${htmlTbl}<!--EndFragment-->`);
-          e.clipboardData.setData("text/plain", tsv);
-          e.preventDefault();
+          writeSelectedCellsPayload(e, matrix);
           return;
         }
       }
@@ -4520,13 +4689,41 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       try { sel.removeAllRanges(); } catch (_) {}
     };
 
+    // A blue table-cell rectangle is WAULT-managed state, not always a native
+    // browser text selection. In that focus state, some browsers dispatch ⌘C to
+    // document/body instead of `.page-body` (or skip the copy event entirely).
+    // This fallback makes the visible cell selection the authority: if cells are
+    // selected, ⌘C always writes just those cells to the system clipboard.
+    const onCellSelectionCopyKey = (e) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || String(e.key || "").toLowerCase() !== "c") return;
+      const cellSel = cellSelRef.current;
+      if (!cellSel?.matrix?.length) return;
+      window._waultClipboard = null;
+      e.preventDefault();
+      e.stopPropagation();
+      writeSelectedCellsSystemClipboard(cellSel.matrix);
+    };
+
+    const onDocumentCellCopy = (e) => {
+      if (e.defaultPrevented) return;
+      const cellSel = cellSelRef.current;
+      if (!cellSel?.matrix?.length) return;
+      window._waultClipboard = null;
+      writeSelectedCellsPayload(e, cellSel.matrix);
+      e.stopPropagation();
+    };
+
     pageBody.addEventListener("keydown", onRangeDeleteKey, true);
     pageBody.addEventListener("copy", onCopy);
     pageBody.addEventListener("cut", onCut);
+    document.addEventListener("keydown", onCellSelectionCopyKey, true);
+    document.addEventListener("copy", onDocumentCellCopy, true);
     return () => {
       pageBody.removeEventListener("keydown", onRangeDeleteKey, true);
       pageBody.removeEventListener("copy", onCopy);
       pageBody.removeEventListener("cut", onCut);
+      document.removeEventListener("keydown", onCellSelectionCopyKey, true);
+      document.removeEventListener("copy", onDocumentCellCopy, true);
     };
     // page?.id: rebind to the fresh page-body node after every page switch
     // (page-container is keyed). See the regression-guard comment above. Keep this dep.
@@ -4925,6 +5122,21 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     cellSelRef.current = matrix.length ? { matrix } : null;
   };
 
+  // Cell under (x,y) within this table, or the nearest one (0 distance = inside).
+  // Used to clamp an in-table drag so the selection can never escape the table.
+  const nearestCellInTable = (table, x, y) => {
+    const cells = [...table.querySelectorAll("td, th")].filter((c) => c.querySelector(".editable"));
+    let best = null, bestDist = Infinity;
+    for (const c of cells) {
+      const r = c.getBoundingClientRect();
+      const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+      const dy = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+      const d = dx * dx + dy * dy;
+      if (d < bestDist) { bestDist = d; best = c; }
+    }
+    return best;
+  };
+
   const beginBlockMarquee = (e) => {
     if (e.button !== 0 || !pageBodyRef.current) return;
     const interactive = e.target.closest?.('[contenteditable="true"], input, textarea, select, button, .block-delete-btn, .table-block, .kpi-card, .milestone-row');
@@ -4998,16 +5210,34 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
         return; // native selection does the work
       }
 
-      // (2) Same table, different cells → highlight the rectangular cell range.
+      // (2) Drag began inside a TABLE → the selection MUST stay inside that table
+      //     as a clean rectangular cell range. This is the fix for the highlight
+      //     bleeding across neighbouring cells/columns: previously, any frame where
+      //     the pointer didn't resolve to a cell in the same table fell through to
+      //     the cross-block native-selection path (3) below, which paints a raw
+      //     browser selection across every cell between the two points. Now an
+      //     in-table drag is always contained: the end cell is clamped to the
+      //     nearest cell in the start table when the pointer is between cells or has
+      //     left the table, and we never produce a cross-block native range.
       const startCell = drag.startEditable?.closest?.("td, th");
-      const endCell = endEditable?.closest?.("td, th");
       const startTable = startCell?.closest?.("table");
-      const endTable = endCell?.closest?.("table");
-      if (startTable && startTable === endTable && startCell && endCell) {
-        e.preventDefault();
-        window.getSelection()?.removeAllRanges();
-        if (multiSelectedIdsRef.current.size) setMultiSelectedIds(new Set());
-        applyCellRange(startTable, startCell, endCell);
+      if (startTable && startCell) {
+        let endCell = endEditable?.closest?.("td, th");
+        if (!endCell || endCell.closest("table") !== startTable) {
+          endCell = nearestCellInTable(startTable, e.clientX, e.clientY) || startCell;
+        }
+        drag.crossBlockRange = null; // never re-assert a native range on mouseup
+        if (endCell && endCell !== startCell) {
+          // Crossed into another cell → highlight just the dragged rectangle.
+          e.preventDefault();
+          window.getSelection()?.removeAllRanges();
+          if (multiSelectedIdsRef.current.size) setMultiSelectedIds(new Set());
+          applyCellRange(startTable, startCell, endCell);
+        } else {
+          // Still within the start cell → leave native character-level selection
+          // to do the work; just make sure no stray cell-range/native bleed remains.
+          clearCellHighlight();
+        }
         return;
       }
 
@@ -5154,6 +5384,23 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       }
     }, 800);
   };
+
+  // Reliability: re-assert our presence when the tab regains focus. A backgrounded
+  // tab's presence entry can be removed by onDisconnect or go stale (>30s), which is
+  // why teammates intermittently couldn't see who was editing without a reload.
+  // Re-broadcasting the current editing block on focus restores the live indicator.
+  useEffect(() => {
+    const reassert = () => {
+      if (document.visibilityState !== "visible") return;
+      if (presenceBlockRef.current) broadcastPresence(presenceBlockRef.current);
+    };
+    document.addEventListener("visibilitychange", reassert);
+    window.addEventListener("focus", reassert);
+    return () => {
+      document.removeEventListener("visibilitychange", reassert);
+      window.removeEventListener("focus", reassert);
+    };
+  }, [authUser?.uid, activeWorkspaceId]);
 
   // Return null (not a visible "No page selected" div) so there's no flash during rapid nav
   if (!page) return null;

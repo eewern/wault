@@ -1447,7 +1447,8 @@
   }
   /* The hovered drop target — subtle highlight so it's obvious where the block will land */
   .block-shell.drop-before .block-wrap,
-  .block-shell.drop-after .block-wrap {
+  .block-shell.drop-after .block-wrap,
+  .block-shell.drop-slot .block-wrap {
     background: rgba(88,196,212,0.10);
     border-radius: 6px;
     box-shadow: inset 0 0 0 1px rgba(88,196,212,0.22);
@@ -3881,16 +3882,16 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <!-- Data: load XALT Bible content first, then workspace defaults -->
-<script src="workspace-config.js?v=20260627-teamcatalog2"></script>
+<script src="workspace-config.js?v=20260628-sync1"></script>
 <script src="workspace-localStorage-sync.js?v=20260525-fix-data-loss"></script>
 <script src="xalt-bible-data.js?v=20260515-workspaces1"></script>
 <script src="workspace-data.js?v=20260612-cmdcentre1"></script>
 <script src="workspace-persistence.js?v=20260522-workspace-tools1"></script>
-<script src="workspace-api-client.js?v=20260627-teamcatalog2"></script>
+<script src="workspace-api-client.js?v=20260628-sync1"></script>
 <script type="module">
   // Native ESM Firebase init — runs after workspace-config.js (classic) has set SUPABASE_CONFIG.
   // Exposes window.__firebaseInitPromise which workspace-app.jsx awaits (avoids Babel transforming import()).
-  import init from './firebase-sync.mjs?v=20260627-teamcatalog2';
+  import init from './firebase-sync.mjs?v=20260628-sync1';
   let _fbInitDone = false;
   const _fbInit = init(window.SUPABASE_CONFIG || {}).catch((e) => {
     console.warn('Firebase init failed:', e && e.message);
@@ -3905,9 +3906,9 @@
   }, 10000));
   window.__firebaseInitPromise = Promise.race([_fbInit, _fbTimeout]);
 </script>
-<script type="text/babel" src="workspace-blocks.jsx?v=20260627-loadgate1"></script>
-<script type="text/babel" src="focus-home.jsx?v=20260627-loadgate1"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260627-loadgate1"></script>
+<script type="text/babel" src="workspace-blocks.jsx?v=20260701-tablecells2"></script>
+<script type="text/babel" src="focus-home.jsx?v=20260701-tablecells2"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260701-tablecells2"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

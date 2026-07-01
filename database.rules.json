@@ -11,6 +11,7 @@
     },
 
     "workspaceCatalog": {
+      ".read": "auth != null && root.child('access').child(auth.uid).exists()",
       "$workspaceId": {
         ".read": "auth != null && root.child('access').child(auth.uid).exists() && data.exists() && data.child('deleted').val() !== true && (data.child('visibility').val() !== 'private' || data.child('ownerUid').val() === auth.uid)",
         ".write": "auth != null && root.child('access').child(auth.uid).exists() && newData.exists() && newData.child('id').val() === $workspaceId && (newData.child('visibility').val() === 'shared' || newData.child('visibility').val() === 'private') && (!newData.child('deleted').exists() || newData.child('deleted').isBoolean()) && ((newData.child('visibility').val() === 'shared' && (!data.exists() || data.child('visibility').val() !== 'private' || data.child('ownerUid').val() === auth.uid)) || (newData.child('visibility').val() === 'private' && newData.child('ownerUid').val() === auth.uid && (!data.exists() || data.child('ownerUid').val() === auth.uid)))",

@@ -401,6 +401,67 @@ export async function initializeFirebaseSync(config) {
         }
       },
 
+      // List the whole team workspace catalogue straight from Firebase. The
+      // /workspaceCatalog node has a node-level .read for approved users (every
+      // workspace is shared), so the browser no longer needs the Railway API to
+      // discover workspaces. Returns lightweight summaries; content is loaded
+      // separately via loadWorkspace().
+      async listAllWorkspaces() {
+        const user = auth.currentUser;
+        if (!user?.uid) return [];
+        try {
+          const snap = await get(ref(database, 'workspaceCatalog'));
+          if (!snap.exists()) return [];
+          return Object.values(snap.val() || {})
+            .filter((w) => w && w.id && w.deleted !== true)
+            .map((w) => ({
+              id: w.id,
+              name: cleanWorkspaceName(w.name, w.id),
+              visibility: normalizeVisibility(w.visibility),
+              ownerUid: w.ownerUid || '',
+              ownerEmail: String(w.ownerEmail || '').toLowerCase(),
+              updatedAt: w.updatedAt || '',
+              createdAt: w.createdAt || '',
+            }));
+        } catch (error) {
+          console.warn(`⚠️ Failed to list workspace catalogue: ${error.message}`);
+          throw error;
+        }
+      },
+
+      // Live subscription to the team catalogue. Replaces the old 8s Railway poll.
+      // Fires the callback with the same summary shape as listAllWorkspaces().
+      onWorkspaceCatalogUpdate(callback) {
+        try {
+          const dbRef = ref(database, 'workspaceCatalog');
+          const unsubscribe = onValue(dbRef, (snapshot) => {
+            const val = snapshot.exists() ? (snapshot.val() || {}) : {};
+            const list = Object.values(val)
+              .filter((w) => w && w.id && w.deleted !== true)
+              .map((w) => ({
+                id: w.id,
+                name: cleanWorkspaceName(w.name, w.id),
+                visibility: normalizeVisibility(w.visibility),
+                ownerUid: w.ownerUid || '',
+                ownerEmail: String(w.ownerEmail || '').toLowerCase(),
+                updatedAt: w.updatedAt || '',
+                createdAt: w.createdAt || '',
+              }));
+            callback(list);
+          }, (error) => {
+            // Permission/connection errors must NOT silently hang the catalogue.
+            // Surface them and hand back an empty list so the app falls back to its
+            // cached workspace list instead of waiting forever.
+            console.warn(`⚠️ Catalogue listener error (${error?.message || error}); using cached list`);
+            try { callback([]); } catch {}
+          });
+          return unsubscribe;
+        } catch (error) {
+          console.error(`❌ Failed to set up catalogue listener: ${error.message}`);
+          return null;
+        }
+      },
+
       onWorkspaceUpdate(workspaceId, callback) {
         try {
           const dbRef = ref(database, `workspaces/${workspaceId}`);
