@@ -403,9 +403,33 @@
     cursor: pointer;
   }
   .workspace-sub {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     font-size: 11px;
     color: var(--text-muted);
-    margin-top: 3px;
+    margin-top: 6px;
+  }
+  .workspace-visibility-toggle {
+    flex: 0 0 auto;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: rgba(var(--ovr),0.045);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 10.5px;
+    font-weight: 700;
+    line-height: 1;
+    padding: 5px 8px;
+  }
+  .workspace-visibility-toggle:hover {
+    background: rgba(var(--ovr),0.12);
+    color: var(--text-strong);
+  }
+  .workspace-visibility-toggle:disabled {
+    cursor: not-allowed;
+    opacity: 0.38;
   }
   .sidebar-tree {
     flex: 1;
@@ -3626,6 +3650,13 @@
     padding: 9px 8px 9px 4px; border-radius: 10px; border-bottom: 1px solid var(--line);
     transition: background .14s ease, opacity .24s ease, transform .24s ease;
   }
+  .focus-home .fx-task-select {
+    width: 22px; height: 22px; min-width: 22px; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .focus-home .fx-task-select input,
+  .focus-home .fx-select-all input {
+    accent-color: var(--accent); cursor: pointer;
+  }
   .focus-home .fx-task:hover { background: var(--panel-hover); }
   .focus-home .fx-task-leaving { opacity: 0; transform: translateX(10px); }
   .focus-home .fx-task-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
@@ -3697,6 +3728,18 @@
   .focus-home .fx-workspace-tasks-title { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .focus-home .fx-workspace-tasks-title strong { color: var(--text-strong); font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .focus-home .fx-workspace-tasks-title small { color: var(--text-faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .focus-home .fx-workspace-task-tools {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end;
+  }
+  .focus-home .fx-select-all {
+    display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 11px; font-weight: 700; cursor: pointer;
+  }
+  .focus-home .fx-bulk-delete {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text);
+    padding: 5px 8px; font-size: 11px; font-weight: 800; cursor: pointer;
+  }
+  .focus-home .fx-bulk-delete:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
+  .focus-home .fx-bulk-delete:disabled { cursor: not-allowed; opacity: 0.42; }
   .focus-home .fx-workspace-tasks-body { padding: 17px 18px 5px; }
   .focus-home .fx-workspace-tasks-body .fx-bucket { margin-bottom: 21px; }
   .focus-home .fx-workspace-tasks-body .fx-bucket-head { margin-bottom: 8px; }
@@ -3906,9 +3949,9 @@
   }, 10000));
   window.__firebaseInitPromise = Promise.race([_fbInit, _fbTimeout]);
 </script>
-<script type="text/babel" src="workspace-blocks.jsx?v=20260701-tablecells2"></script>
-<script type="text/babel" src="focus-home.jsx?v=20260701-tablecells2"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260701-tablecells2"></script>
+<script type="text/babel" src="workspace-blocks.jsx?v=20260701-workspacefix1"></script>
+<script type="text/babel" src="focus-home.jsx?v=20260704-focusdelete1"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260704-focusdelete1"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

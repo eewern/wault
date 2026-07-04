@@ -213,6 +213,40 @@ function cloudDeleteTask(fb, uid, taskId) {
     .catch((e) => console.warn("FocusHome: task delete failed:", e.message));
 }
 
+function isTaskFromWorkspace(task, workspaceId) {
+  if (!task || !workspaceId) return false;
+  if (task.sourceType === "document" && String(task.sourceId || "").startsWith(`${workspaceId}:`)) return true;
+  return String(task.workspaceId || "") === String(workspaceId);
+}
+
+function cleanupFocusTasksForWorkspace(workspaceId, { fb = window.WorkspaceFirebaseSync, uid = "" } = {}) {
+  if (!workspaceId) return [];
+  const allTasks = migrateLegacy(readJson(LS_TASKS, {}));
+  const removedIds = Object.values(allTasks)
+    .filter((task) => isTaskFromWorkspace(task, workspaceId))
+    .map((task) => task.id)
+    .filter(Boolean);
+  if (!removedIds.length) return [];
+
+  const next = { ...allTasks };
+  removedIds.forEach((id) => delete next[id]);
+  writeJson(LS_TASKS, next);
+
+  const seeded = readJson(LS_SEEDED, null);
+  if (Array.isArray(seeded)) {
+    writeJson(LS_SEEDED, seeded.filter((sourceId) => !String(sourceId || "").startsWith(`${workspaceId}:`)));
+  }
+
+  const resolvedUid = uid || fb?.getCurrentUser?.()?.uid || "";
+  removedIds.forEach((id) => cloudDeleteTask(fb, resolvedUid, id));
+  return removedIds;
+}
+
+window.WaultFocusCleanup = {
+  ...(window.WaultFocusCleanup || {}),
+  deleteWorkspaceTasks: cleanupFocusTasksForWorkspace,
+};
+
 function mergeTaskMaps(local, cloud) {
   const out = { ...(local || {}) };
   Object.entries(cloud || {}).forEach(([id, t]) => {
@@ -379,7 +413,7 @@ function QuickAdd({ onAdd, workspaces = [] }) {
 
 const NEXT_PRIORITY = { high: "medium", medium: "low", low: "high" };
 
-function TaskRow({ task, today, onPatch, onDelete, onPin, onOpenSource, big = false }) {
+function TaskRow({ task, today, onPatch, onDelete, onPin, onOpenSource, big = false, selectable = false, selected = false, onSelect }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.title);
   const [leaving, setLeaving] = useState(false);
@@ -422,6 +456,16 @@ function TaskRow({ task, today, onPatch, onDelete, onPin, onOpenSource, big = fa
 
   return (
     <div className={`fx-task${big ? " fx-task-big" : ""}${done ? " fx-task-done" : ""}${leaving ? " fx-task-leaving" : ""}`}>
+      {selectable && (
+        <label className="fx-task-select" data-tooltip={selected ? "Remove from selection" : "Select this task"}>
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={(e) => onSelect?.(task.id, e.target.checked)}
+            aria-label={`Select ${task.title}`}
+          />
+        </label>
+      )}
       <button
         className={`fx-check${done ? " fx-on" : ""}`}
         onClick={toggleDone}
@@ -505,7 +549,7 @@ const BUCKET_META = {
   waiting:  { title: "On Hold",   cls: "fx-b-hold",     sub: "Paused or blocked on someone else.", empty: "Nothing on hold." },
 };
 
-function Bucket({ id, tasks, today, onPatch, onDelete, onPin, onOpenSource, showEmpty = id === "today" }) {
+function Bucket({ id, tasks, today, onPatch, onDelete, onPin, onOpenSource, showEmpty = id === "today", selectable = false, selectedIds = new Set(), onSelectTask }) {
   const meta = BUCKET_META[id];
   // Don't render big empty boxes for the quiet buckets — only Due Today keeps a
   // guiding empty state, the rest collapse to nothing when empty.
@@ -519,7 +563,7 @@ function Bucket({ id, tasks, today, onPatch, onDelete, onPin, onOpenSource, show
       {tasks.length === 0
         ? <div className="fx-empty">{meta.empty}</div>
         : tasks.map((t) => (
-            <TaskRow key={t.id} task={t} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} />
+            <TaskRow key={t.id} task={t} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} selectable={selectable} selected={selectedIds.has(t.id)} onSelect={onSelectTask} />
           ))}
     </section>
   );
@@ -542,7 +586,7 @@ function DoneSection({ tasks, today, onPatch, onDelete, onPin, onOpenSource, sub
   );
 }
 
-function UpcomingByDate({ tasks, today, onPatch, onDelete, onPin, onOpenSource }) {
+function UpcomingByDate({ tasks, today, onPatch, onDelete, onPin, onOpenSource, selectable = false, selectedIds = new Set(), onSelectTask }) {
   if (!tasks.length) return null;
   const byDate = tasks.reduce((groups, task) => {
     const key = task.dueDate || "No date";
@@ -560,7 +604,7 @@ function UpcomingByDate({ tasks, today, onPatch, onDelete, onPin, onOpenSource }
           <div className="fx-date-group" key={date}>
             <div className="fx-date-group-label">{shortDate(date)}</div>
             {byDate[date].sort(taskOrder).map((task) => (
-              <TaskRow key={task.id} task={task} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} />
+              <TaskRow key={task.id} task={task} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} selectable={selectable} selected={selectedIds.has(task.id)} onSelect={onSelectTask} />
             ))}
           </div>
         ))}
@@ -569,12 +613,14 @@ function UpcomingByDate({ tasks, today, onPatch, onDelete, onPin, onOpenSource }
   );
 }
 
-function WorkspaceTaskGroup({ group, today, onPatch, onDelete, onPin, onOpenSource, doneOnly = false }) {
+function WorkspaceTaskGroup({ group, today, onPatch, onDelete, onPin, onOpenSource, doneOnly = false, selectedIds = new Set(), onSelectTask, onSelectAll, onDeleteSelected }) {
   const buckets = { overdue: [], today: [], upcoming: [], nodate: [], waiting: [], done: [] };
   group.tasks.forEach((task) => buckets[bucketOf(task, today)]?.push(task));
   ["overdue", "today", "upcoming", "nodate", "waiting"].forEach((key) => buckets[key].sort(taskOrder));
   buckets.done.sort((a, b) => String(b.completedAt || b.updatedAt || "").localeCompare(String(a.completedAt || a.updatedAt || "")));
   const openCount = group.tasks.length - buckets.done.length;
+  const selectedCount = group.tasks.filter((task) => selectedIds.has(task.id)).length;
+  const allSelected = group.tasks.length > 0 && selectedCount === group.tasks.length;
   return (
     <section className="fx-workspace-tasks fx-fade">
       <div className="fx-workspace-tasks-head">
@@ -583,19 +629,39 @@ function WorkspaceTaskGroup({ group, today, onPatch, onDelete, onPin, onOpenSour
           <strong>{group.name}</strong>
           <small>{doneOnly ? `${group.tasks.length} completed` : `${openCount} open`}</small>
         </span>
+        <span className="fx-workspace-task-tools">
+          <label className="fx-select-all" data-tooltip={allSelected ? "Clear this workspace group selection" : "Select every task in this workspace group"}>
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={(e) => onSelectAll?.(group.id, group.tasks.map((task) => task.id), e.target.checked)}
+              aria-label={`Select all tasks in ${group.name}`}
+            />
+            Select all
+          </label>
+          <button
+            className="fx-bulk-delete"
+            type="button"
+            disabled={selectedCount === 0}
+            onClick={() => onDeleteSelected?.(group.id)}
+            data-tooltip={selectedCount ? `Delete ${selectedCount} selected task${selectedCount === 1 ? "" : "s"} from this group` : "Select tasks in this group first"}
+          >
+            Delete selected{selectedCount ? ` (${selectedCount})` : ""}
+          </button>
+        </span>
       </div>
       <div className="fx-workspace-tasks-body">
         {doneOnly ? (
           [...group.tasks]
             .sort((a, b) => String(b.completedAt || b.updatedAt || "").localeCompare(String(a.completedAt || a.updatedAt || "")))
-            .map((task) => <TaskRow key={task.id} task={task} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} />)
+            .map((task) => <TaskRow key={task.id} task={task} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} selectable selected={selectedIds.has(task.id)} onSelect={onSelectTask} />)
         ) : (
           <React.Fragment>
-            <Bucket id="overdue" tasks={buckets.overdue} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} />
-            <Bucket id="today" tasks={buckets.today} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} />
-            <UpcomingByDate tasks={buckets.upcoming} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} />
-            <Bucket id="nodate" tasks={buckets.nodate} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} />
-            <Bucket id="waiting" tasks={buckets.waiting} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} />
+            <Bucket id="overdue" tasks={buckets.overdue} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} selectable selectedIds={selectedIds} onSelectTask={onSelectTask} />
+            <Bucket id="today" tasks={buckets.today} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} selectable selectedIds={selectedIds} onSelectTask={onSelectTask} />
+            <UpcomingByDate tasks={buckets.upcoming} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} selectable selectedIds={selectedIds} onSelectTask={onSelectTask} />
+            <Bucket id="nodate" tasks={buckets.nodate} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} selectable selectedIds={selectedIds} onSelectTask={onSelectTask} />
+            <Bucket id="waiting" tasks={buckets.waiting} today={today} onPatch={onPatch} onDelete={onDelete} onPin={onPin} onOpenSource={onOpenSource} showEmpty={false} selectable selectedIds={selectedIds} onSelectTask={onSelectTask} />
           </React.Fragment>
         )}
       </div>
@@ -761,9 +827,10 @@ function WorkspaceCards({ workspaces, activeWorkspaceId, data, onOpen }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // FocusHome — the page component the main app mounts for HOME_PAGE_ID.
 // ─────────────────────────────────────────────────────────────────────────────
-function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorkspace, setCurrentPage, completeChecklistItem, cloudConnected }) {
+function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = [], authUser, switchWorkspace, setCurrentPage, completeChecklistItem, cloudConnected }) {
   const [today, setToday] = useState(todayKey());
   const [tasks, setTasks] = useState(() => migrateLegacy(readJson(LS_TASKS, {})));
+  const [groupSelections, setGroupSelections] = useState({});
   const [otherSuggestions, setOtherSuggestions] = useState([]); // non-active workspaces
   const [otherEvents, setOtherEvents] = useState([]);
 
@@ -772,6 +839,7 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
   const localOnly = !cloudConnected || !authUser;
+  const deletedWorkspaceKey = (deletedWorkspaceIds || []).filter(Boolean).sort().join("|");
 
   useEffect(() => {
     const refresh = () => setToday(todayKey());
@@ -838,6 +906,31 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
       if (typeof unsub === "function") { try { unsub(); } catch {} }
     };
   }, [authUser?.uid]);
+
+  useEffect(() => {
+    if (!deletedWorkspaceKey) return;
+    const ids = deletedWorkspaceKey.split("|").filter(Boolean);
+    let removed = [];
+    ids.forEach((workspaceId) => {
+      removed = [...removed, ...cleanupFocusTasksForWorkspace(workspaceId, { fb: fbRef.current, uid: uidRef.current })];
+    });
+    if (!removed.length) return;
+    const removedSet = new Set(removed);
+    setTasks((prev) => {
+      const next = { ...prev };
+      removedSet.forEach((id) => delete next[id]);
+      writeJson(LS_TASKS, next);
+      return next;
+    });
+    setGroupSelections((prev) => {
+      const next = {};
+      Object.entries(prev).forEach(([groupId, idsForGroup]) => {
+        const kept = (idsForGroup || []).filter((id) => !removedSet.has(id));
+        if (kept.length) next[groupId] = kept;
+      });
+      return next;
+    });
+  }, [deletedWorkspaceKey]);
 
   // Suggestions + events from the ACTIVE workspace come from the live data prop
   // (instant), other workspaces from their localStorage caches (scan on mount).
@@ -925,15 +1018,28 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
     cloudSaveTask(fbRef.current, uidRef.current, updated);
   }, [activeWorkspaceId, completeChecklistItem]);
 
-  const deleteTask = useCallback((id) => {
+  const deleteTasks = useCallback((ids) => {
+    const idsToDelete = [...new Set((Array.isArray(ids) ? ids : [ids]).filter(Boolean))];
+    if (!idsToDelete.length) return;
+    const deleteSet = new Set(idsToDelete);
     setTasks((prev) => {
       const next = { ...prev };
-      delete next[id];
+      idsToDelete.forEach((id) => delete next[id]);
       writeJson(LS_TASKS, next);
       return next;
     });
-    cloudDeleteTask(fbRef.current, uidRef.current, id);
+    idsToDelete.forEach((id) => cloudDeleteTask(fbRef.current, uidRef.current, id));
+    setGroupSelections((prev) => {
+      const next = {};
+      Object.entries(prev).forEach(([groupId, idsForGroup]) => {
+        const kept = (idsForGroup || []).filter((id) => !deleteSet.has(id));
+        if (kept.length) next[groupId] = kept;
+      });
+      return next;
+    });
   }, []);
+
+  const deleteTask = useCallback((id) => deleteTasks([id]), [deleteTasks]);
 
   const addTask = useCallback(({ title, priority, dueDate, workspaceId = "" }) => {
     const workspace = (workspaces || []).find((ws) => ws?.id === workspaceId);
@@ -1169,6 +1275,34 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
     return [...groups.values()].sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
   }, [tasks, workspaces, activeWorkspaceId, focusView]);
 
+  const selectGroupTasks = useCallback((groupId, taskIds, checked) => {
+    setGroupSelections((prev) => {
+      const next = { ...prev };
+      if (checked) next[groupId] = [...new Set(taskIds || [])];
+      else delete next[groupId];
+      return next;
+    });
+  }, []);
+
+  const selectGroupTask = useCallback((groupId, taskId, checked) => {
+    setGroupSelections((prev) => {
+      const current = new Set(prev[groupId] || []);
+      if (checked) current.add(taskId);
+      else current.delete(taskId);
+      const next = { ...prev };
+      if (current.size) next[groupId] = [...current];
+      else delete next[groupId];
+      return next;
+    });
+  }, []);
+
+  const deleteSelectedGroupTasks = useCallback((groupId) => {
+    const ids = groupSelections[groupId] || [];
+    if (!ids.length) return;
+    if (ids.length > 1 && !confirm(`Delete ${ids.length} selected tasks from this workspace group?`)) return;
+    deleteTasks(ids);
+  }, [deleteTasks, groupSelections]);
+
   // ── Auto-fill Today's Priorities: top up EMPTY pin slots (up to 3) from
   // DUE-TODAY tasks only. Finishing a priority frees a slot → the next due-today
   // task pushes up. If nothing is due today, Priorities stays empty. Never
@@ -1263,7 +1397,20 @@ function FocusHome({ data, activeWorkspaceId, workspaces, authUser, switchWorksp
               <span className="fx-alltasks-total">{focusView === "done" ? doneTasks.length : openTasks.length} total</span>
             </div>
             {workspaceTaskGroups.length ? workspaceTaskGroups.map((group) => (
-              <WorkspaceTaskGroup key={group.id} group={group} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} doneOnly={focusView === "done"} />
+              <WorkspaceTaskGroup
+                key={group.id}
+                group={group}
+                today={today}
+                onPatch={patchTask}
+                onDelete={deleteTask}
+                onPin={pinTask}
+                onOpenSource={openSource}
+                doneOnly={focusView === "done"}
+                selectedIds={new Set(groupSelections[group.id] || [])}
+                onSelectTask={(taskId, checked) => selectGroupTask(group.id, taskId, checked)}
+                onSelectAll={selectGroupTasks}
+                onDeleteSelected={deleteSelectedGroupTasks}
+              />
             )) : <div className="fx-empty fx-alltasks-empty">{focusView === "done" ? "No completed tasks yet." : "No unfinished tasks. Add your next task above."}</div>}
           </section>
         )}

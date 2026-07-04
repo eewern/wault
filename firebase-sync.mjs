@@ -92,6 +92,11 @@ export async function initializeFirebaseSync(config) {
       const text = String(name || '').trim();
       return text || fallback;
     };
+    const canSeeWorkspaceCatalogEntry = (meta, user = auth.currentUser) => {
+      if (!meta || meta.deleted === true) return false;
+      if (normalizeVisibility(meta.visibility) !== 'private') return true;
+      return !!(user?.uid && meta.ownerUid === user.uid);
+    };
 
     async function loadWorkspaceCatalogEntry(workspaceId) {
       if (!workspaceId) return null;
@@ -412,8 +417,10 @@ export async function initializeFirebaseSync(config) {
         try {
           const snap = await get(ref(database, 'workspaceCatalog'));
           if (!snap.exists()) return [];
-          return Object.values(snap.val() || {})
-            .filter((w) => w && w.id && w.deleted !== true)
+          const rows = Object.values(snap.val() || {}).filter((w) => w && w.id);
+          const deletedWorkspaceIds = rows.filter((w) => w.deleted === true).map((w) => w.id);
+          const list = rows
+            .filter((w) => canSeeWorkspaceCatalogEntry(w, user))
             .map((w) => ({
               id: w.id,
               name: cleanWorkspaceName(w.name, w.id),
@@ -423,6 +430,8 @@ export async function initializeFirebaseSync(config) {
               updatedAt: w.updatedAt || '',
               createdAt: w.createdAt || '',
             }));
+          list.deletedWorkspaceIds = deletedWorkspaceIds;
+          return list;
         } catch (error) {
           console.warn(`⚠️ Failed to list workspace catalogue: ${error.message}`);
           throw error;
@@ -433,11 +442,14 @@ export async function initializeFirebaseSync(config) {
       // Fires the callback with the same summary shape as listAllWorkspaces().
       onWorkspaceCatalogUpdate(callback) {
         try {
+          const user = auth.currentUser;
           const dbRef = ref(database, 'workspaceCatalog');
           const unsubscribe = onValue(dbRef, (snapshot) => {
             const val = snapshot.exists() ? (snapshot.val() || {}) : {};
-            const list = Object.values(val)
-              .filter((w) => w && w.id && w.deleted !== true)
+            const rows = Object.values(val).filter((w) => w && w.id);
+            const deletedWorkspaceIds = rows.filter((w) => w.deleted === true).map((w) => w.id);
+            const list = rows
+              .filter((w) => canSeeWorkspaceCatalogEntry(w, user))
               .map((w) => ({
                 id: w.id,
                 name: cleanWorkspaceName(w.name, w.id),
@@ -447,7 +459,8 @@ export async function initializeFirebaseSync(config) {
                 updatedAt: w.updatedAt || '',
                 createdAt: w.createdAt || '',
               }));
-            callback(list);
+            list.deletedWorkspaceIds = deletedWorkspaceIds;
+            callback(list, deletedWorkspaceIds);
           }, (error) => {
             // Permission/connection errors must NOT silently hang the catalogue.
             // Surface them and hand back an empty list so the app falls back to its
@@ -478,14 +491,19 @@ export async function initializeFirebaseSync(config) {
       // Forcibly remove a workspace node from Firebase. Called during deletion to
       // guarantee the node is gone even if an in-flight save just wrote it back.
       async removeWorkspace(workspaceId) {
-        if (!auth.currentUser) return;
+        if (!auth.currentUser) throw new Error('Not signed in');
         try {
-          await upsertWorkspaceCatalogEntry(workspaceId, { deleted: true });
+          // Delete child nodes BEFORE tombstoning the catalogue entry. The DB
+          // rules intentionally block writes to deleted/private-inaccessible
+          // workspaces, so tombstoning first can prevent the cleanup write.
           await remove(ref(database, `workspaces/${workspaceId}`));
           try { await remove(ref(database, `presence/${workspaceId}`)); } catch {}
+          await upsertWorkspaceCatalogEntry(workspaceId, { deleted: true });
           console.log(`🗑️ Removed workspace from Firebase: ${workspaceId}`);
+          return true;
         } catch (err) {
           console.warn('⚠️ Firebase workspace remove failed:', err.message);
+          throw err;
         }
       },
 

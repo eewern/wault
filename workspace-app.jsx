@@ -407,6 +407,13 @@ function migrateRetiredDayPagesInLocalStorage() {
 function initializeLocalWorkspaces() {
   migrateRetiredDayPagesInLocalStorage();
   let workspaces = readJson(LOCAL_WORKSPACES_KEY, null);
+  if (Array.isArray(workspaces)) {
+    const filtered = workspaces.filter((workspace) => workspace?.id && !isWorkspaceTombstoned(workspace.id));
+    if (filtered.length !== workspaces.length) {
+      workspaces = filtered;
+      localStorage.setItem(LOCAL_WORKSPACES_KEY, JSON.stringify(workspaces));
+    }
+  }
   if (!Array.isArray(workspaces) || workspaces.length === 0) {
     const legacy = readJson(STORAGE_KEY, null);
     // Honour tombstones; but never end up with zero workspaces.
@@ -525,9 +532,12 @@ function normalizeWorkspaceSummary(workspace) {
 }
 
 function replaceSignedInWorkspaceCatalogue(discovered) {
+  const deletedIds = new Set(discovered?.deletedWorkspaceIds || []);
+  deletedIds.forEach((id) => tombstoneWorkspace(id));
+  const tombstoned = getDeletedWorkspaceIds();
   const list = (Array.isArray(discovered) ? discovered : [])
     .map(normalizeWorkspaceSummary)
-    .filter(Boolean);
+    .filter((workspace) => workspace && !tombstoned.has(workspace.id) && !deletedIds.has(workspace.id));
   localStorage.setItem(LOCAL_WORKSPACES_KEY, JSON.stringify(list));
   return list;
 }
@@ -537,17 +547,22 @@ function replaceSignedInWorkspaceCatalogue(discovered) {
 // workspace can briefly be absent from the snapshot. Preserve the currently-active
 // workspace so a switch/create race never kicks the user out of it.
 function mergeSignedInWorkspaceCatalogue(discovered, activeId) {
+  const deletedIds = new Set(discovered?.deletedWorkspaceIds || []);
+  deletedIds.forEach((id) => tombstoneWorkspace(id));
+  const tombstoned = getDeletedWorkspaceIds();
   const list = (Array.isArray(discovered) ? discovered : [])
     .map(normalizeWorkspaceSummary)
-    .filter(Boolean);
+    .filter((workspace) => workspace && !tombstoned.has(workspace.id) && !deletedIds.has(workspace.id));
   // An empty snapshot is almost always a transient/permission error (you can't
   // delete your last workspace), so never let it wipe the dropdown — keep the
   // cached list instead.
   if (!list.length) {
-    const cached = (readJson(LOCAL_WORKSPACES_KEY, []) || []).map(normalizeWorkspaceSummary).filter(Boolean);
+    const cached = (readJson(LOCAL_WORKSPACES_KEY, []) || [])
+      .map(normalizeWorkspaceSummary)
+      .filter((workspace) => workspace && !tombstoned.has(workspace.id) && !deletedIds.has(workspace.id));
     if (cached.length) return cached;
   }
-  if (activeId && !list.some((w) => w.id === activeId)) {
+  if (activeId && !tombstoned.has(activeId) && !deletedIds.has(activeId) && !list.some((w) => w.id === activeId)) {
     const localActive = (readJson(LOCAL_WORKSPACES_KEY, []) || []).find((w) => w?.id === activeId);
     const normalized = localActive ? normalizeWorkspaceSummary(localActive) : null;
     if (normalized) list.push(normalized);
@@ -677,6 +692,16 @@ function mergeDiscoveredWorkspaces(discovered, { pruneMissing = false, deletedId
 
 function localBackupKey(workspaceId) {
   return `workspace_v4_backups_${workspaceId}`;
+}
+
+function cleanupLocalWorkspaceArtifacts(workspaceId) {
+  if (!workspaceId) return;
+  try {
+    localStorage.removeItem(localWorkspaceDataKey(workspaceId));
+    localStorage.removeItem(localBackupKey(workspaceId));
+    localStorage.removeItem(localLastPageKey(workspaceId));
+    localStorage.removeItem(`${workspaceId}_local_saved_at`);
+  } catch {}
 }
 
 function writeLocalAutoBackup(workspaceId, data, reason = "autosave") {
@@ -1946,6 +1971,10 @@ function App() {
         setCloudWorkspaceLoading(false);
         return false;
       }
+      if (isWorkspaceTombstoned(workspaceId)) {
+        setCloudWorkspaceLoading(false);
+        return false;
+      }
 
       // ── Cache-first render (no full-screen gate on switch) ─────────────────
       // If we have a local copy of this workspace, show it INSTANTLY and refresh
@@ -2186,7 +2215,11 @@ function App() {
     const firebaseSync = window.WorkspaceFirebaseSync;
     if (!firebaseSync?.onWorkspaceCatalogUpdate) return;
 
-    const unsub = firebaseSync.onWorkspaceCatalogUpdate((list) => {
+    const unsub = firebaseSync.onWorkspaceCatalogUpdate((list, deletedIds = []) => {
+      (deletedIds || []).forEach((workspaceId) => {
+        tombstoneWorkspace(workspaceId);
+        cleanupLocalWorkspaceArtifacts(workspaceId);
+      });
       const nextList = mergeSignedInWorkspaceCatalogue(list || [], activeLocalWorkspaceId);
       setLocalWorkspaces(nextList);
       setSyncState((s) => ({
@@ -2928,17 +2961,11 @@ function App() {
       return;
     }
 
-    // Firebase workspace discovery is server-backed, so deletion must reach the
-    // same catalogue before we remove the browser copy. Otherwise the next
-    // discovery pass correctly sees the remote workspace and adds it back.
+    // Firebase workspace discovery is catalogue-backed, so deletion must reach
+    // Firebase before we remove the browser copy. The API bridge is only an
+    // optional cleanup path now; lack of a Railway/API key must not block UI
+    // deletion for signed-in users.
     if (authUser && userAccess) {
-      const bridge = window.WorkspaceApiBridge;
-      if (!bridge?.deleteWorkspace) {
-        const message = "Workspace deletion is unavailable. Please check your connection and try again.";
-        setSyncState((s) => ({ ...s, error: message, status: "Delete failed" }));
-        alert(message);
-        return;
-      }
       // Cancel any pending save debounce for this workspace before contacting the server.
       // Without this, an in-flight browser→Firebase write can complete after the server
       // has already removed the workspace, resurrecting it for every other device.
@@ -2948,10 +2975,17 @@ function App() {
       }
       setSyncState((s) => ({ ...s, busy: true, error: "", status: "Deleting workspace" }));
       try {
-        await bridge.deleteWorkspace(id);
-        // Belt-and-suspenders: also nuke the individual Firebase node. An in-flight
-        // browser save that started before the deletion could have just written it back.
-        await window.WorkspaceFirebaseSync?.removeWorkspace?.(id);
+        if (!window.WorkspaceFirebaseSync?.removeWorkspace) {
+          throw new Error("Firebase workspace deletion is unavailable. Please reload and try again.");
+        }
+        await window.WorkspaceFirebaseSync.removeWorkspace(id);
+        // Optional: keep the MCP/Railway bridge catalogue tidy when available,
+        // but do not fail the user-facing delete if this background cleanup fails.
+        if (window.WorkspaceApiBridge?.deleteWorkspace) {
+          Promise.resolve(window.WorkspaceApiBridge.deleteWorkspace(id)).catch((error) => {
+            console.warn("⚠️ API bridge workspace cleanup failed:", error.message);
+          });
+        }
       } catch (error) {
         setSyncState((s) => ({ ...s, busy: false, error: error.message, status: "Delete failed" }));
         alert(error.message || "Workspace deletion failed. Please try again.");
@@ -2962,16 +2996,20 @@ function App() {
     // Tombstone the id so neither the seed-init nor the server discovery merge
     // resurrects it on the next reload.
     tombstoneWorkspace(id);
-    const nextWorkspaces = localWorkspaces.filter((item) => item.id !== id);
+    const nextWorkspaces = workspaceList.filter((item) => item.id !== id);
     const nextActive = id === activeLocalWorkspaceId
       ? nextWorkspaces[0]
       : (nextWorkspaces.find((item) => item.id === activeLocalWorkspaceId) || nextWorkspaces[0]);
     localStorage.setItem(LOCAL_WORKSPACES_KEY, JSON.stringify(nextWorkspaces));
-    localStorage.removeItem(localWorkspaceDataKey(id));
-    localStorage.removeItem(localBackupKey(id));
-    localStorage.removeItem(localLastPageKey(id));
-    localStorage.removeItem(`${id}_local_saved_at`);
+    cleanupLocalWorkspaceArtifacts(id);
     localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, nextActive.id);
+    skipPersistenceWorkspaceRef.current = id;
+    pendingLocalSaveRef.current = false;
+    if (loadedWorkspaceIdRef.current === id) loadedWorkspaceIdRef.current = nextActive.id;
+    window.WaultFocusCleanup?.deleteWorkspaceTasks?.(id, {
+      fb: window.WorkspaceFirebaseSync,
+      uid: authUser?.uid,
+    });
     const nextData = loadLocalWorkspaceData(nextActive.id);
     setLocalWorkspaces(nextWorkspaces);
     setActiveLocalWorkspaceId(nextActive.id);
@@ -2984,6 +3022,56 @@ function App() {
       busy: false,
       status: authUser && userAccess ? "Synced" : "Local draft",
     }));
+  };
+
+  const updateWorkspaceVisibility = async (id, visibility) => {
+    const normalizedVisibility = visibility === "private" ? "private" : "shared";
+    if (!id) return;
+    const workspace = (localWorkspaces || []).find((item) => item.id === id) || {};
+
+    if (authUser?.uid && userAccess && window.WorkspaceFirebaseSync?.updateWorkspaceCatalog) {
+      const isAppOwner = userAccess.role === "owner";
+      const isWorkspaceOwner = !workspace.ownerUid || workspace.ownerUid === authUser.uid;
+      if (!isAppOwner && !isWorkspaceOwner) {
+        alert("Only the workspace creator or owner can change this workspace visibility.");
+        return;
+      }
+      setSyncState((s) => ({ ...s, busy: true, error: "", status: "Updating workspace visibility" }));
+      try {
+        const meta = await window.WorkspaceFirebaseSync.updateWorkspaceCatalog(id, {
+          ...workspace,
+          visibility: normalizedVisibility,
+          ownerUid: workspace.ownerUid || authUser.uid,
+          ownerEmail: workspace.ownerEmail || (authUser.email || userAccess.email || "").toLowerCase(),
+        });
+        const nextWorkspaces = localWorkspaces.map((item) => (
+          item.id === id
+            ? { ...item, ...normalizeWorkspaceSummary({ ...item, ...meta, visibility: normalizedVisibility }) }
+            : item
+        ));
+        localStorage.setItem(LOCAL_WORKSPACES_KEY, JSON.stringify(nextWorkspaces));
+        setLocalWorkspaces(nextWorkspaces);
+        setSyncState((s) => ({
+          ...s,
+          busy: false,
+          error: "",
+          workspaces: nextWorkspaces,
+          status: normalizedVisibility === "private" ? "Workspace is now private" : "Workspace is now shared",
+          firebaseStatus: "Team catalogue updated",
+        }));
+      } catch (error) {
+        setSyncState((s) => ({ ...s, busy: false, error: error.message, status: "Visibility update failed" }));
+        alert(error.message || "Workspace visibility update failed. Please try again.");
+      }
+      return;
+    }
+
+    const nextWorkspaces = localWorkspaces.map((item) => (
+      item.id === id ? { ...item, visibility: normalizedVisibility, updatedAt: new Date().toISOString() } : item
+    ));
+    localStorage.setItem(LOCAL_WORKSPACES_KEY, JSON.stringify(nextWorkspaces));
+    setLocalWorkspaces(nextWorkspaces);
+    setSyncState((s) => ({ ...s, workspaces: nextWorkspaces, status: "Local draft" }));
   };
 
   const renameWorkspace = async (id, rawName) => {
@@ -3173,7 +3261,7 @@ function App() {
   const cloudWorkspaceAllowed = !!(authUser?.uid && userAccess && !firebaseAccessDenied);
   const canCreateWorkspace = cloudWorkspaceAllowed || (!configured || syncState.role === "owner" || syncState.role === "admin");
   const canManageActiveWorkspace = cloudWorkspaceAllowed
-    ? (activeWorkspaceMeta.visibility === "private" ? activeWorkspaceMeta.ownerUid === authUser.uid : true)
+    ? (userAccess.role === "owner" || !activeWorkspaceMeta.ownerUid || activeWorkspaceMeta.ownerUid === authUser.uid)
     : (!configured || syncState.role === "owner" || syncState.role === "admin");
   // Temporarily disabled for local testing
   // if (configured && !syncState.user) { ... }
@@ -3283,6 +3371,7 @@ function App() {
         onCreateWorkspace={createWorkspace}
         onRenameWorkspace={renameWorkspace}
         onDeleteWorkspace={deleteWorkspaceById}
+        onUpdateWorkspaceVisibility={updateWorkspaceVisibility}
         onSwitchWorkspace={switchWorkspace}
         canManageWorkspace={canManageActiveWorkspace}
         canCreateWorkspace={canCreateWorkspace}
@@ -3299,6 +3388,7 @@ function App() {
           data={data}
           activeWorkspaceId={syncState.user ? syncState.workspaceId : activeLocalWorkspaceId}
           workspaces={syncState.user ? (syncState.workspaces || []) : localWorkspaces}
+          deletedWorkspaceIds={[...getDeletedWorkspaceIds()]}
           authUser={authUser}
           switchWorkspace={switchWorkspace}
           setCurrentPage={setCurrentPage}
@@ -3348,7 +3438,7 @@ function Sidebar({
   pinPage, unpinPage, pasteExternalPage, setWorkspacePrivacy,
   exportData, importData,
   syncState, onSignIn, onSignOut, onInviteMember, workspaces, activeWorkspaceId,
-  onCreateWorkspace, onRenameWorkspace, onDeleteWorkspace, onSwitchWorkspace, canManageWorkspace = false, canCreateWorkspace = false, onUndo, onRedo,
+  onCreateWorkspace, onRenameWorkspace, onDeleteWorkspace, onUpdateWorkspaceVisibility, onSwitchWorkspace, canManageWorkspace = false, canCreateWorkspace = false, onUndo, onRedo,
   authUser, userAccess, onFirebaseSignOut, onMobileClose, onOpenHome, homeActive,
 }) {
   // Backup/restore is an owner-only operation; members never see the backup interface.
@@ -3542,9 +3632,10 @@ function Sidebar({
 
   const rootPages = data.rootOrder.map(id => data.pages[id]).filter(Boolean);
   const activeWorkspace = (workspaces || []).find((workspace) => workspace.id === activeWorkspaceId);
+  const activeVisibility = activeWorkspace?.visibility === "private" ? "private" : "shared";
   const activeVisibilityLabel = activeWorkspace?.visibility === "private"
     ? "private to me"
-    : (authUser ? "shared with team" : "local");
+    : (authUser ? "public to team" : "public");
   const todayMeta = useMemo(() => formatWorkspaceDate(new Date()), []);
   const submitWorkspace = (e) => {
     e.preventDefault();
@@ -3567,6 +3658,11 @@ function Sidebar({
     onRenameWorkspace(activeWorkspaceId, name);
     setRenamingWorkspace(false);
     setWorkspaceRenameDraft("");
+  };
+  const toggleActiveWorkspaceVisibility = () => {
+    if (!activeWorkspaceId || !canManageWorkspace || !onUpdateWorkspaceVisibility) return;
+    const nextVisibility = activeVisibility === "private" ? "shared" : "private";
+    onUpdateWorkspaceVisibility(activeWorkspaceId, nextVisibility);
   };
 
   return (
@@ -3645,7 +3741,21 @@ function Sidebar({
             <button className="workspace-create-submit" type="submit">Save</button>
           </form>
         )}
-        <div className="workspace-sub">{Object.keys(data.pages).length} pages · {activeVisibilityLabel}</div>
+        <div className="workspace-sub">
+          <span>{Object.keys(data.pages).length} pages · {activeVisibilityLabel}</span>
+          {activeWorkspace && (
+            <button
+              className="workspace-visibility-toggle"
+              type="button"
+              disabled={!canManageWorkspace}
+              onClick={toggleActiveWorkspaceVisibility}
+              title={canManageWorkspace ? "Switch workspace visibility" : "Only the workspace creator or owner can change visibility"}
+              aria-label={activeVisibility === "private" ? "Make workspace public" : "Make workspace private"}
+            >
+              {activeVisibility === "private" ? "Make public" : "Make private"}
+            </button>
+          )}
+        </div>
       </div>
       <div className="sidebar-tree"
         onDragOver={(e) => {
