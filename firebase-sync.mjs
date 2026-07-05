@@ -335,6 +335,18 @@ export async function initializeFirebaseSync(config) {
             return false;
           }
 
+          const existingSnap = await get(ref(database, `workspaces/${workspaceId}`));
+          const existingRecord = existingSnap.exists() ? (existingSnap.val() || {}) : null;
+          const baseUpdatedAt = metadata.baseUpdatedAt || "";
+          if (existingRecord?.updated_at && baseUpdatedAt) {
+            const remoteMs = Date.parse(existingRecord.updated_at) || 0;
+            const baseMs = Date.parse(baseUpdatedAt) || 0;
+            if (remoteMs > baseMs && existingRecord.saveId !== saveId) {
+              console.warn(`⚠️ Save blocked — Firebase has a newer workspace revision: ${workspaceId}`);
+              return false;
+            }
+          }
+
           await upsertWorkspaceCatalogEntry(workspaceId, {
             name: metadata.name || workspaceData?.settings?.workspaceName || workspaceId,
             visibility: metadata.visibility,
@@ -344,14 +356,15 @@ export async function initializeFirebaseSync(config) {
           });
 
           const dbRef = ref(database, `workspaces/${workspaceId}`);
+          const updatedAt = new Date().toISOString();
           await set(dbRef, {
             workspace: workspaceData,   // full React state object
-            updated_at: new Date().toISOString(),
+            updated_at: updatedAt,
             source: 'firebase',
             saveId,  // session ID — lets the listener ignore its own echoes
           });
           console.log(`✅ Saved workspace to Firebase: ${workspaceId}`);
-          return true;
+          return { ok: true, updated_at: updatedAt };
         } catch (error) {
           console.error(`❌ Failed to save workspace: ${error.message}`);
           return false;

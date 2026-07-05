@@ -3934,7 +3934,7 @@
 <script type="module">
   // Native ESM Firebase init — runs after workspace-config.js (classic) has set SUPABASE_CONFIG.
   // Exposes window.__firebaseInitPromise which workspace-app.jsx awaits (avoids Babel transforming import()).
-  import init from './firebase-sync.mjs?v=20260628-sync1';
+  import init from './firebase-sync.mjs?v=20260706-cloudsource1';
   let _fbInitDone = false;
   const _fbInit = init(window.SUPABASE_CONFIG || {}).catch((e) => {
     console.warn('Firebase init failed:', e && e.message);
@@ -3951,7 +3951,7 @@
 </script>
 <script type="text/babel" src="workspace-blocks.jsx?v=20260701-workspacefix1"></script>
 <script type="text/babel" src="focus-home.jsx?v=20260704-focusdelete1"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260704-focusdelete1"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260706-cloudsource1"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped
