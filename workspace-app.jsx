@@ -7,6 +7,8 @@ const LOCAL_WORKSPACES_KEY = "workspace_v4_workspaces";
 const LOCAL_ACTIVE_WORKSPACE_KEY = "workspace_v4_active_workspace";
 const LOCAL_LAST_PAGE_PREFIX = "workspace_v4_last_page_";
 const LOCAL_WORKSPACE_DATA_PREFIX = "workspace_v4_data_";
+const LOCAL_PENDING_WORKSPACE_PREFIX = "workspace_v4_pending_";
+const LOCAL_FIREBASE_REV_PREFIX = "workspace_v4_firebase_rev_";
 // Tombstone of deleted workspace ids. Workspaces come back otherwise: seeds are
 // re-added by initializeLocalWorkspaces, and the server discovery merge re-adds
 // from Firebase. Both must honour this set so a delete actually sticks.
@@ -65,6 +67,8 @@ const ensureTrailingTextBlock = (blocks = []) => {
 };
 const localWorkspaceDataKey = (id) => `${LOCAL_WORKSPACE_DATA_PREFIX}${id}`;
 const localLastPageKey = (id) => `${LOCAL_LAST_PAGE_PREFIX}${id}`;
+const localPendingWorkspaceKey = (id) => `${LOCAL_PENDING_WORKSPACE_PREFIX}${id}`;
+const localFirebaseRevisionKey = (id) => `${LOCAL_FIREBASE_REV_PREFIX}${id}`;
 const rememberLocalPage = (workspaceId, pageId) => {
   if (!workspaceId || !pageId) return;
   try { localStorage.setItem(localLastPageKey(workspaceId), pageId); } catch {}
@@ -700,8 +704,43 @@ function cleanupLocalWorkspaceArtifacts(workspaceId) {
     localStorage.removeItem(localWorkspaceDataKey(workspaceId));
     localStorage.removeItem(localBackupKey(workspaceId));
     localStorage.removeItem(localLastPageKey(workspaceId));
+    localStorage.removeItem(localPendingWorkspaceKey(workspaceId));
+    localStorage.removeItem(localFirebaseRevisionKey(workspaceId));
     localStorage.removeItem(`${workspaceId}_local_saved_at`);
   } catch {}
+}
+
+function readPendingWorkspaceDraft(workspaceId) {
+  if (!workspaceId) return null;
+  const draft = readJson(localPendingWorkspaceKey(workspaceId), null);
+  if (!draft?.data?.pages || draft.workspaceId !== workspaceId) return null;
+  return draft;
+}
+
+function writePendingWorkspaceDraft(workspaceId, data, baseUpdatedAt = "") {
+  if (!workspaceId || !data?.pages || isWorkspaceUnavailableData(data)) return null;
+  const draft = {
+    workspaceId,
+    data,
+    baseUpdatedAt: baseUpdatedAt || "",
+    savedAt: new Date().toISOString(),
+  };
+  try { localStorage.setItem(localPendingWorkspaceKey(workspaceId), JSON.stringify(draft)); } catch {}
+  return draft;
+}
+
+function clearPendingWorkspaceDraft(workspaceId) {
+  if (!workspaceId) return;
+  try { localStorage.removeItem(localPendingWorkspaceKey(workspaceId)); } catch {}
+}
+
+function shouldReplayPendingDraft(pending, remoteUpdatedAt = "") {
+  if (!pending?.data?.pages || !pending.savedAt) return false;
+  const pendingMs = Date.parse(pending.savedAt) || 0;
+  const remoteMs = Date.parse(remoteUpdatedAt || "") || 0;
+  const baseMs = Date.parse(pending.baseUpdatedAt || "") || 0;
+  if (pendingMs <= remoteMs) return false;
+  return !!baseMs && remoteMs <= baseMs;
 }
 
 function writeLocalAutoBackup(workspaceId, data, reason = "autosave") {
@@ -1724,6 +1763,7 @@ function App() {
   const lastRemoteDataRef = useRef(null);
   const lastRemoteUpdatedAtRef = useRef("");
   const cloudPreviewWorkspaceRef = useRef(null);
+  const cloudPreviewDataRef = useRef(null);
   // True from when a Firebase save is in-flight until it resolves. The listener
   // skips remote applies while this is set so a slow save can't be raced by old data.
   const pendingLocalSaveRef = useRef(false);
@@ -1959,11 +1999,17 @@ function App() {
           lastRemoteDataRef.current = next;
           lastRemoteUpdatedAtRef.current = remoteRecord.updated_at || new Date().toISOString();
           cloudPreviewWorkspaceRef.current = null;
+          cloudPreviewDataRef.current = null;
           loadedWorkspaceIdRef.current = workspaceId;
           try {
             localStorage.setItem(localWorkspaceDataKey(workspaceId), JSON.stringify(next));
             localStorage.setItem(`${workspaceId}_local_saved_at`, lastRemoteUpdatedAtRef.current);
+            localStorage.setItem(localFirebaseRevisionKey(workspaceId), lastRemoteUpdatedAtRef.current);
           } catch {}
+          const pending = readPendingWorkspaceDraft(workspaceId);
+          if (pending && (Date.parse(pending.savedAt) || 0) <= (Date.parse(lastRemoteUpdatedAtRef.current) || 0)) {
+            clearPendingWorkspaceDraft(workspaceId);
+          }
           return next;
         });
       });
@@ -1998,6 +2044,7 @@ function App() {
         lastRemoteDataRef.current = null;     // local cache is not a confirmed remote base
         lastRemoteUpdatedAtRef.current = "";
         cloudPreviewWorkspaceRef.current = workspaceId;
+        cloudPreviewDataRef.current = cached;
         loadedWorkspaceIdRef.current = null;
         setData(cached);
         setCloudWorkspaceLoading(false);
@@ -2011,22 +2058,30 @@ function App() {
         if (firebaseRecord?.workspace) {
           console.log('📡 Loading workspace from Firebase source of truth');
           const loaded = restoreRememberedPage(workspaceId, normalizeWorkspaceData(firebaseRecord.workspace));
+          const remoteUpdatedAt = firebaseRecord.updated_at || new Date().toISOString();
+          const pending = readPendingWorkspaceDraft(workspaceId);
+          const replayPending = shouldReplayPendingDraft(pending, remoteUpdatedAt);
+          if (pending && !replayPending && (Date.parse(pending.savedAt) || 0) <= (Date.parse(remoteUpdatedAt) || 0)) {
+            clearPendingWorkspaceDraft(workspaceId);
+          }
           if (skipPersistenceWorkspaceRef.current === workspaceId) skipPersistenceWorkspaceRef.current = null;
           cloudPreviewWorkspaceRef.current = null;
+          cloudPreviewDataRef.current = null;
           loadedWorkspaceIdRef.current = workspaceId;
-          setData(loaded);
-          lastRemoteUpdatedAtRef.current = firebaseRecord.updated_at || new Date().toISOString();
+          lastRemoteUpdatedAtRef.current = remoteUpdatedAt;
+          lastRemoteDataRef.current = loaded;
+          setData(replayPending ? restoreRememberedPage(workspaceId, normalizeWorkspaceData(pending.data)) : loaded);
           try {
             localStorage.setItem(localWorkspaceDataKey(workspaceId), JSON.stringify(loaded));
             localStorage.setItem(`${workspaceId}_local_saved_at`, lastRemoteUpdatedAtRef.current);
+            localStorage.setItem(localFirebaseRevisionKey(workspaceId), lastRemoteUpdatedAtRef.current);
           } catch {}
-          lastRemoteDataRef.current = loaded;
           setupListener(firebaseSync, workspaceId);
           setSyncState((s) => ({
             ...s,
             workspaceId,
-            status: "Loaded from Firebase",
-            firebaseStatus: "Synced to cloud ✓",
+            status: replayPending ? "Restoring unsynced draft" : "Loaded from Firebase",
+            firebaseStatus: replayPending ? "Restoring unsynced draft to Firebase" : "Synced to cloud ✓",
             error: "",
           }));
           return true;
@@ -2041,6 +2096,7 @@ function App() {
         lastRemoteDataRef.current = unavailable;
         lastRemoteUpdatedAtRef.current = "";
         cloudPreviewWorkspaceRef.current = null;
+        cloudPreviewDataRef.current = null;
         loadedWorkspaceIdRef.current = null;
         setData(unavailable);
         setSyncState((s) => ({
@@ -2076,6 +2132,7 @@ function App() {
       lastRemoteDataRef.current = null;
       lastRemoteUpdatedAtRef.current = "";
       cloudPreviewWorkspaceRef.current = null;
+      cloudPreviewDataRef.current = null;
       pendingLocalSaveRef.current = false;
       loadedWorkspaceIdRef.current = null;
 
@@ -2293,6 +2350,23 @@ function App() {
       console.warn('⚠️ Skipping persistence for cloud error placeholder:', activeLocalWorkspaceId);
       return;
     }
+    const signedInUnsynced = !!(
+      authUser &&
+      activeLocalWorkspaceId &&
+      data?.pages &&
+      !isWorkspaceUnavailableData(data) &&
+      data !== lastRemoteDataRef.current
+    );
+    const uneditedCloudPreview = !!(
+      authUser &&
+      cloudPreviewWorkspaceRef.current === activeLocalWorkspaceId &&
+      data === cloudPreviewDataRef.current
+    );
+    if (signedInUnsynced && !uneditedCloudPreview) {
+      writePendingWorkspaceDraft(activeLocalWorkspaceId, data, lastRemoteUpdatedAtRef.current || "");
+      const backup = writeLocalAutoBackup(activeLocalWorkspaceId, data, "pending-cloud-save");
+      if (backup) setSyncState((s) => ({ ...s, backupStatus: `Safety backup ${new Date(backup.createdAt).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}` }));
+    }
     // ── Switch-race guard (prevents cross-workspace page contamination) ────────
     // When signed in, `data` must belong to the active workspace before we persist
     // it. During a switch, `activeLocalWorkspaceId` flips to the new workspace a
@@ -2390,6 +2464,8 @@ function App() {
             lastRemoteDataRef.current = latestSaveRef.current?.data ?? data;
             lastRemoteUpdatedAtRef.current = saved.updated_at || new Date().toISOString();
             cloudPreviewWorkspaceRef.current = null;
+            cloudPreviewDataRef.current = null;
+            clearPendingWorkspaceDraft(activeLocalWorkspaceId);
             pendingLocalSaveRef.current = false;
             console.log('✅ Saved to Firebase');
             setSyncState((s) => ({ ...s, firebaseStatus: 'Synced to cloud ✓' }));
@@ -2419,6 +2495,10 @@ function App() {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(d));
         localStorage.setItem(`${ws}_local_saved_at`, new Date().toISOString());
         saveLocalWorkspaceData(ws, d);
+        if (authUser?.uid && d?.pages && d !== lastRemoteDataRef.current && !isWorkspaceUnavailableData(d)) {
+          writePendingWorkspaceDraft(ws, d, lastRemoteUpdatedAtRef.current || "");
+          writeLocalAutoBackup(ws, d, "pagehide-pending-cloud-save");
+        }
       } catch {}
     };
     const onVisibility = () => { if (document.visibilityState === "hidden") flush(); };
@@ -2476,6 +2556,8 @@ function App() {
             lastRemoteDataRef.current = latestSaveRef.current?.data ?? cur;
             lastRemoteUpdatedAtRef.current = ok.updated_at || new Date().toISOString();
             cloudPreviewWorkspaceRef.current = null;
+            cloudPreviewDataRef.current = null;
+            clearPendingWorkspaceDraft(activeLocalWorkspaceId);
             setSyncState((s) => ({ ...s, firebaseStatus: "Synced to cloud ✓" }));
           }
         } catch { pendingLocalSaveRef.current = false; }
@@ -2934,6 +3016,8 @@ function App() {
         lastRemoteDataRef.current = defaultData;
         lastRemoteUpdatedAtRef.current = saved.updated_at || nowIso;
         cloudPreviewWorkspaceRef.current = null;
+        cloudPreviewDataRef.current = null;
+        clearPendingWorkspaceDraft(id);
         loadedWorkspaceIdRef.current = id;   // this workspace's content is now what's loaded
         setLocalWorkspaces(nextWorkspaces);
         setActiveLocalWorkspaceId(id);

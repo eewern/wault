@@ -347,6 +347,20 @@ export async function initializeFirebaseSync(config) {
             }
           }
 
+          const updatedAt = new Date().toISOString();
+          if (existingRecord?.workspace) {
+            try {
+              await set(ref(database, `workspaceBackups/${workspaceId}/${Date.now()}`), {
+                workspace: existingRecord.workspace,
+                updated_at: existingRecord.updated_at || '',
+                backed_up_at: updatedAt,
+                saveId: existingRecord.saveId || '',
+              });
+            } catch (backupError) {
+              console.warn(`⚠️ Workspace backup failed before save (${workspaceId}): ${backupError.message}`);
+            }
+          }
+
           await upsertWorkspaceCatalogEntry(workspaceId, {
             name: metadata.name || workspaceData?.settings?.workspaceName || workspaceId,
             visibility: metadata.visibility,
@@ -356,7 +370,6 @@ export async function initializeFirebaseSync(config) {
           });
 
           const dbRef = ref(database, `workspaces/${workspaceId}`);
-          const updatedAt = new Date().toISOString();
           await set(dbRef, {
             workspace: workspaceData,   // full React state object
             updated_at: updatedAt,
