@@ -92,6 +92,52 @@ export async function initializeFirebaseSync(config) {
       const text = String(name || '').trim();
       return text || fallback;
     };
+    const summarizeWorkspaceData = (workspace) => {
+      const pages = workspace?.pages && typeof workspace.pages === 'object' ? workspace.pages : {};
+      let blocks = 0;
+      let checklistItems = 0;
+      let approxChars = 0;
+      Object.values(pages).forEach((page) => {
+        (page?.blocks || []).forEach((block) => {
+          blocks += 1;
+          if (Array.isArray(block.items)) checklistItems += block.items.length;
+          try { approxChars += JSON.stringify(block).length; } catch {}
+        });
+      });
+      return {
+        pages: Object.keys(pages).length,
+        blocks,
+        checklistItems,
+        approxChars,
+        hasUnavailablePage: !!pages.cloud_workspace_unavailable,
+      };
+    };
+    const isDangerousWorkspaceOverwrite = (existingWorkspace, nextWorkspace, metadata = {}) => {
+      if (metadata.allowDangerousOverwrite === true) return false;
+      const before = summarizeWorkspaceData(existingWorkspace);
+      const after = summarizeWorkspaceData(nextWorkspace);
+      if (after.hasUnavailablePage) return true;
+      if (before.pages >= 2 && after.pages <= 1) return true;
+      if (before.approxChars > 5000 && after.approxChars < Math.max(1000, before.approxChars * 0.25)) return true;
+      if (before.blocks >= 20 && after.blocks < Math.max(3, before.blocks * 0.25)) return true;
+      return false;
+    };
+    async function writeAuditLog(action, workspaceId, payload = {}) {
+      try {
+        const user = auth.currentUser;
+        const now = new Date().toISOString();
+        await set(ref(database, `workspaceAuditLogs/${workspaceId}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}`), {
+          action,
+          created_at: now,
+          uid: user?.uid || '',
+          email: String(user?.email || '').toLowerCase(),
+          workspaceId,
+          ...payload,
+        });
+      } catch (err) {
+        console.warn(`⚠️ Audit log failed (${action}): ${err.message}`);
+      }
+    }
     const canSeeWorkspaceCatalogEntry = (meta, user = auth.currentUser) => {
       if (!meta || meta.deleted === true) return false;
       if (normalizeVisibility(meta.visibility) !== 'private') return true;
@@ -337,17 +383,38 @@ export async function initializeFirebaseSync(config) {
 
           const existingSnap = await get(ref(database, `workspaces/${workspaceId}`));
           const existingRecord = existingSnap.exists() ? (existingSnap.val() || {}) : null;
+          if (existingRecord?.workspace && isDangerousWorkspaceOverwrite(existingRecord.workspace, workspaceData, metadata)) {
+            await writeAuditLog('save_blocked_dangerous_overwrite', workspaceId, {
+              path: `workspaces/${workspaceId}`,
+              saveId: saveId || '',
+              existingSummary: summarizeWorkspaceData(existingRecord.workspace),
+              nextSummary: summarizeWorkspaceData(workspaceData),
+              baseUpdatedAt: metadata.baseUpdatedAt || '',
+            });
+            console.warn(`🛑 Save blocked — refusing to overwrite real workspace with empty/default data: ${workspaceId}`);
+            return { ok: false, blocked: true, reason: 'dangerous_overwrite' };
+          }
           const baseUpdatedAt = metadata.baseUpdatedAt || "";
           if (existingRecord?.updated_at && baseUpdatedAt) {
             const remoteMs = Date.parse(existingRecord.updated_at) || 0;
             const baseMs = Date.parse(baseUpdatedAt) || 0;
             if (remoteMs > baseMs && existingRecord.saveId !== saveId) {
+              await writeAuditLog('save_blocked_stale_revision', workspaceId, {
+                path: `workspaces/${workspaceId}`,
+                saveId: saveId || '',
+                existingUpdatedAt: existingRecord.updated_at || '',
+                baseUpdatedAt,
+                existingSummary: summarizeWorkspaceData(existingRecord.workspace),
+                nextSummary: summarizeWorkspaceData(workspaceData),
+              });
               console.warn(`⚠️ Save blocked — Firebase has a newer workspace revision: ${workspaceId}`);
-              return false;
+              return { ok: false, blocked: true, reason: 'stale_revision' };
             }
           }
 
           const updatedAt = new Date().toISOString();
+          const previousSummary = summarizeWorkspaceData(existingRecord?.workspace);
+          const nextSummary = summarizeWorkspaceData(workspaceData);
           if (existingRecord?.workspace) {
             try {
               await set(ref(database, `workspaceBackups/${workspaceId}/${Date.now()}`), {
@@ -355,6 +422,7 @@ export async function initializeFirebaseSync(config) {
                 updated_at: existingRecord.updated_at || '',
                 backed_up_at: updatedAt,
                 saveId: existingRecord.saveId || '',
+                summary: previousSummary,
               });
             } catch (backupError) {
               console.warn(`⚠️ Workspace backup failed before save (${workspaceId}): ${backupError.message}`);
@@ -375,11 +443,154 @@ export async function initializeFirebaseSync(config) {
             updated_at: updatedAt,
             source: 'firebase',
             saveId,  // session ID — lets the listener ignore its own echoes
+            summary: nextSummary,
+          });
+          const versionPayload = {
+            workspace: workspaceData,
+            updated_at: updatedAt,
+            saveId: saveId || '',
+            uid: currentUser.uid,
+            email: String(currentUser.email || '').toLowerCase(),
+            summary: nextSummary,
+            base_updated_at: metadata.baseUpdatedAt || '',
+          };
+          try {
+            await set(ref(database, `workspaceVersions/${workspaceId}/${Date.now()}`), versionPayload);
+            await set(ref(database, `workspaceDailyExports/${workspaceId}/${updatedAt.slice(0, 10)}`), versionPayload);
+          } catch (versionError) {
+            console.warn(`⚠️ Workspace version history failed (${workspaceId}): ${versionError.message}`);
+          }
+          await writeAuditLog(existingRecord?.workspace ? 'workspace_update' : 'workspace_create', workspaceId, {
+            path: `workspaces/${workspaceId}`,
+            saveId: saveId || '',
+            previousUpdatedAt: existingRecord?.updated_at || '',
+            updatedAt,
+            previousSummary,
+            nextSummary,
           });
           console.log(`✅ Saved workspace to Firebase: ${workspaceId}`);
           return { ok: true, updated_at: updatedAt };
         } catch (error) {
           console.error(`❌ Failed to save workspace: ${error.message}`);
+          return false;
+        }
+      },
+
+      async saveWorkspaceDraft(workspaceId, workspaceData, saveId = null, metadata = {}) {
+        try {
+          const currentUser = auth.currentUser;
+          if (!currentUser?.uid) {
+            console.warn('⚠️ Draft save blocked — user not authenticated');
+            return false;
+          }
+          if (accessOkCacheUid !== currentUser.uid) {
+            accessOkCacheUid = currentUser.uid;
+            accessOkCache = null;
+          }
+          if (accessOkCache === null) {
+            const accessSnap = await get(ref(database, `access/${currentUser.uid}`));
+            accessOkCache = accessSnap.exists() || isOwnerEmail(currentUser.email);
+          }
+          if (!accessOkCache) {
+            console.warn('⚠️ Draft save blocked — user not in access list');
+            return false;
+          }
+          const savedAt = new Date().toISOString();
+          const summary = summarizeWorkspaceData(workspaceData);
+          await set(ref(database, `workspaceDrafts/${workspaceId}/${currentUser.uid}`), {
+            workspace: workspaceData,
+            saved_at: savedAt,
+            base_updated_at: metadata.baseUpdatedAt || '',
+            saveId,
+            email: String(currentUser.email || '').toLowerCase(),
+            summary,
+          });
+          await writeAuditLog('workspace_draft_save', workspaceId, {
+            path: `workspaceDrafts/${workspaceId}/${currentUser.uid}`,
+            saveId: saveId || '',
+            savedAt,
+            summary,
+          });
+          return { ok: true, saved_at: savedAt };
+        } catch (error) {
+          console.warn(`⚠️ Failed to save workspace draft: ${error.message}`);
+          return false;
+        }
+      },
+
+      async loadWorkspaceDraft(workspaceId) {
+        try {
+          const currentUser = auth.currentUser;
+          if (!currentUser?.uid) return null;
+          const snap = await get(ref(database, `workspaceDrafts/${workspaceId}/${currentUser.uid}`));
+          return snap.exists() ? (snap.val() || null) : null;
+        } catch (error) {
+          console.warn(`⚠️ Failed to load workspace draft: ${error.message}`);
+          return null;
+        }
+      },
+
+      async clearWorkspaceDraft(workspaceId) {
+        try {
+          const currentUser = auth.currentUser;
+          if (!currentUser?.uid) return false;
+          await remove(ref(database, `workspaceDrafts/${workspaceId}/${currentUser.uid}`));
+          await writeAuditLog('workspace_draft_clear', workspaceId, {
+            path: `workspaceDrafts/${workspaceId}/${currentUser.uid}`,
+          });
+          return true;
+        } catch (error) {
+          console.warn(`⚠️ Failed to clear workspace draft: ${error.message}`);
+          return false;
+        }
+      },
+
+      async listWorkspaceVersions(workspaceId, limit = 25) {
+        try {
+          const currentUser = auth.currentUser;
+          if (!currentUser?.uid) return [];
+          const snap = await get(ref(database, `workspaceVersions/${workspaceId}`));
+          if (!snap.exists()) return [];
+          return Object.entries(snap.val() || {})
+            .map(([id, row]) => ({
+              id,
+              updated_at: row.updated_at || '',
+              email: row.email || '',
+              uid: row.uid || '',
+              saveId: row.saveId || '',
+              summary: row.summary || summarizeWorkspaceData(row.workspace),
+            }))
+            .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+            .slice(0, Math.max(1, Math.min(Number(limit) || 25, 100)));
+        } catch (error) {
+          console.warn(`⚠️ Failed to list workspace versions: ${error.message}`);
+          return [];
+        }
+      },
+
+      async restoreWorkspaceVersion(workspaceId, versionId) {
+        try {
+          const currentUser = auth.currentUser;
+          if (!currentUser?.uid) throw new Error('Not signed in');
+          const snap = await get(ref(database, `workspaceVersions/${workspaceId}/${versionId}`));
+          if (!snap.exists()) throw new Error('Version not found');
+          const version = snap.val() || {};
+          if (!version.workspace?.pages) throw new Error('Version has no workspace data');
+          await writeAuditLog('workspace_restore_requested', workspaceId, {
+            path: `workspaceVersions/${workspaceId}/${versionId}`,
+            versionId,
+            versionUpdatedAt: version.updated_at || '',
+            summary: version.summary || summarizeWorkspaceData(version.workspace),
+          });
+          return await this.saveWorkspace(workspaceId, version.workspace, `restore_${Date.now()}`, {
+            name: version.workspace?.settings?.workspaceName || workspaceId,
+            visibility: 'shared',
+            baseUpdatedAt: '',
+            allowDangerousOverwrite: true,
+            restoredFromVersion: versionId,
+          });
+        } catch (error) {
+          console.error(`❌ Failed to restore workspace version: ${error.message}`);
           return false;
         }
       },
@@ -519,13 +730,35 @@ export async function initializeFirebaseSync(config) {
       async removeWorkspace(workspaceId) {
         if (!auth.currentUser) throw new Error('Not signed in');
         try {
-          // Delete child nodes BEFORE tombstoning the catalogue entry. The DB
-          // rules intentionally block writes to deleted/private-inaccessible
-          // workspaces, so tombstoning first can prevent the cleanup write.
-          await remove(ref(database, `workspaces/${workspaceId}`));
+          const existingSnap = await get(ref(database, `workspaces/${workspaceId}`));
+          const existingRecord = existingSnap.exists() ? (existingSnap.val() || {}) : null;
+          const deletedAt = new Date().toISOString();
+          if (existingRecord?.workspace) {
+            const summary = summarizeWorkspaceData(existingRecord.workspace);
+            await set(ref(database, `workspaceTrash/${workspaceId}/${Date.now()}`), {
+              ...existingRecord,
+              deleted_at: deletedAt,
+              deleted_by_uid: auth.currentUser.uid,
+              deleted_by_email: String(auth.currentUser.email || '').toLowerCase(),
+              summary,
+            });
+            await set(ref(database, `workspaces/${workspaceId}`), {
+              ...existingRecord,
+              deleted: true,
+              deleted_at: deletedAt,
+              deleted_by_uid: auth.currentUser.uid,
+              updated_at: deletedAt,
+              summary,
+            });
+            await writeAuditLog('workspace_soft_delete', workspaceId, {
+              path: `workspaces/${workspaceId}`,
+              deletedAt,
+              summary,
+            });
+          }
           try { await remove(ref(database, `presence/${workspaceId}`)); } catch {}
           await upsertWorkspaceCatalogEntry(workspaceId, { deleted: true });
-          console.log(`🗑️ Removed workspace from Firebase: ${workspaceId}`);
+          console.log(`🗑️ Soft-deleted workspace in Firebase: ${workspaceId}`);
           return true;
         } catch (err) {
           console.warn('⚠️ Firebase workspace remove failed:', err.message);

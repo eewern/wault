@@ -91,10 +91,13 @@ function fxStripHtml(html) {
 const LS_TASKS = "wault_focus_tasks_v2";
 const LS_MIGRATED = "wault_focus_migrated_v2";
 const LS_SEEDED = "wault_focus_seeded_v1";   // sourceIds already auto-pulled (don't resurrect deleted ones)
+const LS_DELETED = "wault_focus_deleted_v1"; // recent user-deleted task/source ids (guards cloud/listener races)
 const LS_PINSEED = "wault_focus_pinseed_v1"; // { date, userUnpinned:[] } for auto-fill of Today's Priorities
 const LS_DAYS = "wault_focus_days";       // legacy (3-priority ritual) — read-only for migration
 const LS_LATER = "wault_focus_later";     // legacy — migrated into tasks
 const wsDataKey = (id) => `workspace_v4_data_${id}`;
+const wsSavedAtKey = (id) => `${id}_local_saved_at`;
+const FOCUS_DELETE_TOMBSTONE_MS = 30 * 24 * 60 * 60 * 1000;
 
 function getSessionId() {
   try {
@@ -208,9 +211,58 @@ function cloudSaveTask(fb, uid, task) {
 // protects this session's fresh tasks from stale remote-deletion snapshots.
 const stamped = (task) => ({ ...task, saveId: SESSION_ID, updatedAt: new Date().toISOString() });
 function cloudDeleteTask(fb, uid, taskId) {
-  if (!fb || !uid || !taskId) return;
-  fb.set(fb.ref(fb.database, `focus/${uid}/tasks/${taskId}`), null)
-    .catch((e) => console.warn("FocusHome: task delete failed:", e.message));
+  if (!fb || !uid || !taskId) return Promise.resolve(true);
+  return fb.set(fb.ref(fb.database, `focus/${uid}/tasks/${taskId}`), null)
+    .then(() => true)
+    .catch((e) => {
+      console.warn("FocusHome: task delete failed:", e.message);
+      return false;
+    });
+}
+
+function parseSourceId(sourceId) {
+  const [wsId, pageId, itemId] = String(sourceId || "").split(":");
+  return { wsId, pageId, itemId };
+}
+
+function readFocusDeleteTombstones() {
+  const now = Date.now();
+  const raw = readJson(LS_DELETED, {}) || {};
+  const out = {
+    taskIds: raw.taskIds && typeof raw.taskIds === "object" ? { ...raw.taskIds } : {},
+    sourceIds: raw.sourceIds && typeof raw.sourceIds === "object" ? { ...raw.sourceIds } : {},
+  };
+  let changed = false;
+  ["taskIds", "sourceIds"].forEach((key) => {
+    Object.entries(out[key]).forEach(([id, ts]) => {
+      if (!ts || now - Number(ts) > FOCUS_DELETE_TOMBSTONE_MS) {
+        delete out[key][id];
+        changed = true;
+      }
+    });
+  });
+  if (changed) writeJson(LS_DELETED, out);
+  return out;
+}
+
+function rememberDeletedFocusTasks(tasks) {
+  const list = (Array.isArray(tasks) ? tasks : [tasks]).filter(Boolean);
+  if (!list.length) return;
+  const tombstones = readFocusDeleteTombstones();
+  const now = Date.now();
+  list.forEach((task) => {
+    if (task.id) tombstones.taskIds[task.id] = now;
+    if (task.sourceType === "document" && task.sourceId) tombstones.sourceIds[task.sourceId] = now;
+  });
+  writeJson(LS_DELETED, tombstones);
+}
+
+function isDeletedFocusTask(task, tombstones = readFocusDeleteTombstones()) {
+  if (!task) return false;
+  return !!(
+    (task.id && tombstones.taskIds[task.id]) ||
+    (task.sourceType === "document" && task.sourceId && tombstones.sourceIds[task.sourceId])
+  );
 }
 
 function isTaskFromWorkspace(task, workspaceId) {
@@ -230,6 +282,7 @@ function cleanupFocusTasksForWorkspace(workspaceId, { fb = window.WorkspaceFireb
 
   const next = { ...allTasks };
   removedIds.forEach((id) => delete next[id]);
+  rememberDeletedFocusTasks(removedIds.map((id) => allTasks[id]).filter(Boolean));
   writeJson(LS_TASKS, next);
 
   const seeded = readJson(LS_SEEDED, null);
@@ -248,8 +301,13 @@ window.WaultFocusCleanup = {
 };
 
 function mergeTaskMaps(local, cloud) {
-  const out = { ...(local || {}) };
+  const tombstones = readFocusDeleteTombstones();
+  const out = {};
+  Object.entries(local || {}).forEach(([id, t]) => {
+    if (!isDeletedFocusTask({ ...t, id: t?.id || id }, tombstones)) out[id] = t;
+  });
   Object.entries(cloud || {}).forEach(([id, t]) => {
+    if (isDeletedFocusTask({ ...t, id: t?.id || id }, tombstones)) return;
     const cur = out[id];
     if (!cur || String(t?.updatedAt || "") > String(cur.updatedAt || "")) out[id] = t;
   });
@@ -288,7 +346,7 @@ function scanWorkspaceData(wsId, wsName, data, seen, out) {
 // a direct localStorage write within 200ms).
 function completeWorkspaceItem(sourceId, done) {
   try {
-    const [wsId, pageId, itemId] = String(sourceId).split(":");
+    const { wsId, pageId, itemId } = parseSourceId(sourceId);
     if (!wsId || !pageId || !itemId) return false;
     const data = readJson(wsDataKey(wsId), null);
     const page = data?.pages?.[pageId];
@@ -303,6 +361,68 @@ function completeWorkspaceItem(sourceId, done) {
     if (found) writeJson(wsDataKey(wsId), data);
     return found;
   } catch { return false; }
+}
+
+function removeChecklistItemFromWorkspaceData(data, pageId, itemId) {
+  const page = data?.pages?.[pageId];
+  if (!page || !Array.isArray(page.blocks)) return { data, found: false };
+  let found = false;
+  const blocks = page.blocks.map((b) => {
+    if (b?.type !== "checklist" || !Array.isArray(b.items)) return b;
+    if (!b.items.some((it) => it && it.id === itemId)) return b;
+    found = true;
+    return { ...b, items: b.items.filter((it) => !(it && it.id === itemId)) };
+  });
+  if (!found) return { data, found: false };
+  return {
+    data: { ...data, pages: { ...data.pages, [pageId]: { ...page, blocks } } },
+    found: true,
+  };
+}
+
+async function deleteWorkspaceChecklistSource(sourceId, { activeWorkspaceId, deleteChecklistItem, fb, workspaces } = {}) {
+  const { wsId, pageId, itemId } = parseSourceId(sourceId);
+  if (!wsId || !pageId || !itemId) return false;
+
+  if (wsId === activeWorkspaceId && typeof deleteChecklistItem === "function") {
+    return !!(await Promise.resolve(deleteChecklistItem(pageId, itemId)));
+  }
+
+  const localData = readJson(wsDataKey(wsId), null);
+  let remoteRecord = null;
+  const cloudAvailable = !!(fb?.loadWorkspace && fb?.saveWorkspace);
+  if (cloudAvailable) {
+    remoteRecord = await fb.loadWorkspace(wsId);
+    if (!remoteRecord?.workspace) return false;
+  }
+  const baseData = remoteRecord?.workspace || localData;
+  if (!baseData?.pages) return false;
+
+  const removed = removeChecklistItemFromWorkspaceData(baseData, pageId, itemId);
+  if (!removed.found) return true;
+
+  if (fb?.saveWorkspace && remoteRecord?.workspace) {
+    const workspace = (workspaces || []).find((ws) => ws?.id === wsId) || {};
+    const saved = await fb.saveWorkspace(wsId, removed.data, SESSION_ID, {
+      name: workspace.name || wsId,
+      visibility: workspace.visibility || "shared",
+      ownerUid: workspace.ownerUid || "",
+      ownerEmail: workspace.ownerEmail || "",
+      baseUpdatedAt: remoteRecord.updated_at || "",
+    });
+    if (!saved) return false;
+    try {
+      localStorage.setItem(wsDataKey(wsId), JSON.stringify(removed.data));
+      localStorage.setItem(wsSavedAtKey(wsId), saved.updated_at || new Date().toISOString());
+    } catch {}
+    return true;
+  }
+
+  try {
+    localStorage.setItem(wsDataKey(wsId), JSON.stringify(removed.data));
+    localStorage.setItem(wsSavedAtKey(wsId), new Date().toISOString());
+  } catch {}
+  return true;
 }
 
 // Streak: consecutive days (ending today/yesterday) with ≥1 task completed.
@@ -535,7 +655,7 @@ function TaskRow({ task, today, onPatch, onDelete, onPin, onOpenSource, big = fa
             >{task.pinnedDate === today ? "★" : "☆"}</button>
           </React.Fragment>
         )}
-        <button className="fx-mini fx-mini-del" data-tooltip="Delete this task (the workspace to-do stays)" onClick={() => onDelete(task.id)}>×</button>
+        <button className="fx-mini fx-mini-del" data-tooltip={task.sourceType === "document" ? "Delete this task and its workspace to-do" : "Delete this Focus task"} onClick={() => onDelete(task.id)}>×</button>
       </span>
     </div>
   );
@@ -761,7 +881,8 @@ function Upcoming({ tasks, events, today }) {
 }
 
 function WorkspacePull({ suggestions, existingSourceIds, onImport }) {
-  const fresh = suggestions.filter((s) => !existingSourceIds.has(s.sourceId));
+  const deletedSources = readFocusDeleteTombstones().sourceIds || {};
+  const fresh = suggestions.filter((s) => !existingSourceIds.has(s.sourceId) && !deletedSources[s.sourceId]);
   return (
     <div className="fx-card">
       <div className="fx-card-h">From your workspace</div>
@@ -827,7 +948,7 @@ function WorkspaceCards({ workspaces, activeWorkspaceId, data, onOpen }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // FocusHome — the page component the main app mounts for HOME_PAGE_ID.
 // ─────────────────────────────────────────────────────────────────────────────
-function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = [], authUser, switchWorkspace, setCurrentPage, completeChecklistItem, cloudConnected }) {
+function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = [], authUser, switchWorkspace, setCurrentPage, completeChecklistItem, deleteChecklistItem, cloudConnected }) {
   const [today, setToday] = useState(todayKey());
   const [tasks, setTasks] = useState(() => migrateLegacy(readJson(LS_TASKS, {})));
   const [groupSelections, setGroupSelections] = useState({});
@@ -869,7 +990,7 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
           writeJson(LS_TASKS, merged);
           // Push local-only tasks up so both sides converge.
           Object.values(merged).forEach((t) => {
-            if (!cloud[t.id]) cloudSaveTask(fb, uid, t);
+            if (!cloud[t.id] && !isDeletedFocusTask(t)) cloudSaveTask(fb, uid, t);
           });
           return merged;
         });
@@ -881,12 +1002,19 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
           setTasks((prev) => {
             let changed = false;
             const next = { ...prev };
+            const tombstones = readFocusDeleteTombstones();
             Object.entries(val).forEach(([id, t]) => {
               if (t?.saveId === SESSION_ID) return;
+              if (isDeletedFocusTask({ ...t, id: t?.id || id }, tombstones)) return;
               const cur = next[id];
               if (!cur || String(t?.updatedAt || "") > String(cur.updatedAt || "")) { next[id] = t; changed = true; }
             });
             Object.keys(next).forEach((id) => {
+              if (isDeletedFocusTask({ ...next[id], id: next[id]?.id || id }, tombstones)) {
+                delete next[id];
+                changed = true;
+                return;
+              }
               // Deleted remotely — drop it, unless this session created it
               // (a stale snapshot must never eat a just-added task).
               if (!val[id] && next[id]?.saveId && next[id].saveId !== SESSION_ID) {
@@ -1018,10 +1146,13 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
     cloudSaveTask(fbRef.current, uidRef.current, updated);
   }, [activeWorkspaceId, completeChecklistItem]);
 
-  const deleteTasks = useCallback((ids) => {
-    const idsToDelete = [...new Set((Array.isArray(ids) ? ids : [ids]).filter(Boolean))];
+  const removeFocusTaskRecords = useCallback((tasksToRemove) => {
+    const list = (Array.isArray(tasksToRemove) ? tasksToRemove : [tasksToRemove]).filter(Boolean);
+    if (!list.length) return;
+    const idsToDelete = [...new Set(list.map((task) => task.id).filter(Boolean))];
     if (!idsToDelete.length) return;
     const deleteSet = new Set(idsToDelete);
+    rememberDeletedFocusTasks(list);
     setTasks((prev) => {
       const next = { ...prev };
       idsToDelete.forEach((id) => delete next[id]);
@@ -1038,6 +1169,39 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
       return next;
     });
   }, []);
+
+  const deleteTasks = useCallback(async (ids) => {
+    const idsToDelete = [...new Set((Array.isArray(ids) ? ids : [ids]).filter(Boolean))];
+    if (!idsToDelete.length) return;
+    const tasksToDelete = idsToDelete.map((id) => tasksRef.current[id]).filter(Boolean);
+    const confirmed = [];
+    const failed = [];
+
+    for (const task of tasksToDelete) {
+      if (task.sourceType !== "document" || !task.sourceId) {
+        confirmed.push(task);
+        continue;
+      }
+      try {
+        const ok = await deleteWorkspaceChecklistSource(task.sourceId, {
+          activeWorkspaceId,
+          deleteChecklistItem,
+          fb: fbRef.current,
+          workspaces,
+        });
+        if (ok) confirmed.push(task);
+        else failed.push(task);
+      } catch (err) {
+        console.warn("FocusHome: source checklist delete failed:", err.message);
+        failed.push(task);
+      }
+    }
+
+    if (confirmed.length) removeFocusTaskRecords(confirmed);
+    if (failed.length) {
+      alert(`Could not delete ${failed.length} linked workspace task${failed.length === 1 ? "" : "s"} from Firebase. Nothing was removed from Focus for those failed item${failed.length === 1 ? "" : "s"}.`);
+    }
+  }, [activeWorkspaceId, deleteChecklistItem, removeFocusTaskRecords, workspaces]);
 
   const deleteTask = useCallback((id) => deleteTasks([id]), [deleteTasks]);
 
@@ -1069,8 +1233,9 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
   useEffect(() => {
     if (!activeWorkspaceId || !activeSuggestions.length) return;
     const seeded = new Set(readJson(LS_SEEDED, []) || []);
+    const deletedSources = readFocusDeleteTombstones().sourceIds || {};
     const have = new Set(Object.values(tasksRef.current).map((t) => t && t.sourceId).filter(Boolean));
-    const toAdd = activeSuggestions.filter((s) => s.sourceId && !have.has(s.sourceId) && !seeded.has(s.sourceId));
+    const toAdd = activeSuggestions.filter((s) => s.sourceId && !have.has(s.sourceId) && !seeded.has(s.sourceId) && !deletedSources[s.sourceId]);
     if (!toAdd.length) return;
     toAdd.forEach((s) => { importSuggestion(s); seeded.add(s.sourceId); });
     writeJson(LS_SEEDED, [...seeded]);
@@ -1192,13 +1357,22 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
       cloudSaveTask(fbRef.current, uidRef.current, updated);
     };
 
+    const workspaceDataAvailable = !!(activeWorkspaceId && data?.pages && !data.pages.cloud_workspace_unavailable);
     const docTasks = Object.values(tasksRef.current).filter((t) => t?.sourceType === "document" && t.sourceId);
+    const missingSourceTasks = workspaceDataAvailable
+      ? docTasks.filter((t) => {
+          const { wsId } = parseSourceId(t.sourceId);
+          return wsId === activeWorkspaceId && !cur.has(t.sourceId);
+        })
+      : [];
+    if (missingSourceTasks.length) removeFocusTaskRecords(missingSourceTasks);
+
     const prev = lastDoneMap;
 
     if (!prev || prev.wsId !== activeWorkspaceId) {
       // Baseline (mount or workspace switch): completions are sticky — propagate
       // done=true from checklist to task, never un-complete from a baseline.
-      docTasks.forEach((t) => {
+      docTasks.filter((t) => !missingSourceTasks.some((missing) => missing.id === t.id)).forEach((t) => {
         if (cur.get(t.sourceId) === true && t.status !== "done") silentPatch(t, true);
       });
     } else {
@@ -1210,7 +1384,7 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
       });
     }
     lastDoneMap = { wsId: activeWorkspaceId, map: cur };
-  }, [data, activeWorkspaceId]);
+  }, [data, activeWorkspaceId, removeFocusTaskRecords]);
 
   // ── Derived views ──────────────────────────────────────────────────────────
   const all = Object.values(tasks).filter((t) => t && t.title);
@@ -1304,15 +1478,15 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
   }, [deleteTasks, groupSelections]);
 
   // ── Auto-fill Today's Priorities: top up EMPTY pin slots (up to 3) from
-  // DUE-TODAY tasks only. Finishing a priority frees a slot → the next due-today
-  // task pushes up. If nothing is due today, Priorities stays empty. Never
+  // overdue first, then due-today tasks. Finishing a priority frees a slot, and
+  // the next urgent dated task pushes up. If nothing is due, Priorities stays empty. Never
   // overrides your own pins and never re-adds something you unpinned today.
   useEffect(() => {
     if (pinned.length >= 3) return;
     const seed = readJson(LS_PINSEED, null);
     const unpinned = new Set(seed && seed.date === today ? (seed.userUnpinned || []) : []);
     const pinnedSet = new Set(pinned.map((t) => t.id));
-    const candidates = buckets.today
+    const candidates = [...buckets.overdue, ...buckets.today]
       .filter((t) => t && t.status !== "done" && !pinnedSet.has(t.id) && !unpinned.has(t.id));
     candidates.slice(0, 3 - pinned.length).forEach((t) => pinTask(t.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1373,10 +1547,10 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
               <section className="fx-bucket fx-b-pinned fx-focus-block fx-fade">
                 <div className="fx-bucket-head">
                   <h2 className="fx-focus-title">Today's Priorities {pinned.length > 0 && <span className="fx-count">{pinned.length}/3</span>}</h2>
-                  <span className="fx-bucket-sub">Auto-filled from today's due tasks — finish one and the next moves up. Pin your own with ☆.</span>
+                  <span className="fx-bucket-sub">Auto-filled from overdue and today's due tasks — finish one and the next moves up. Pin your own with ☆.</span>
                 </div>
                 {pinned.length === 0
-                  ? <div className="fx-empty">Nothing due today. When a task is due today it rises here automatically.</div>
+                  ? <div className="fx-empty">Nothing overdue or due today. When a task becomes urgent it rises here automatically.</div>
                   : pinned.map((t) => (
                       <TaskRow key={t.id} task={t} today={today} onPatch={patchTask} onDelete={deleteTask} onPin={pinTask} onOpenSource={openSource} big />
                     ))}

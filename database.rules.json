@@ -20,6 +20,56 @@
       }
     },
 
+    "workspaceDrafts": {
+      "$workspaceId": {
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('deleted').val() !== true && (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid)))",
+          ".write": "auth != null && auth.uid === $uid && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('deleted').val() !== true && (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid)))",
+          ".validate": "!newData.exists() || (newData.hasChildren(['workspace', 'saved_at']) && newData.child('saved_at').isString() && (!newData.child('base_updated_at').exists() || newData.child('base_updated_at').isString()) && (!newData.child('saveId').exists() || newData.child('saveId').isString()) && (!newData.child('email').exists() || newData.child('email').isString()))"
+        }
+      }
+    },
+
+    "workspaceVersions": {
+      "$workspaceId": {
+        ".read": "auth != null && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid))",
+        "$versionId": {
+          ".write": "auth != null && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid))",
+          ".validate": "newData.hasChildren(['workspace', 'updated_at', 'summary']) && newData.child('updated_at').isString()"
+        }
+      }
+    },
+
+    "workspaceDailyExports": {
+      "$workspaceId": {
+        ".read": "auth != null && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid))",
+        "$date": {
+          ".write": "auth != null && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid))",
+          ".validate": "newData.hasChildren(['workspace', 'updated_at', 'summary']) && newData.child('updated_at').isString()"
+        }
+      }
+    },
+
+    "workspaceTrash": {
+      "$workspaceId": {
+        ".read": "auth != null && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid))",
+        "$trashId": {
+          ".write": "auth != null && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid))",
+          ".validate": "newData.hasChildren(['workspace', 'deleted_at', 'summary']) && newData.child('deleted_at').isString()"
+        }
+      }
+    },
+
+    "workspaceAuditLogs": {
+      "$workspaceId": {
+        ".read": "auth != null && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid))",
+        "$eventId": {
+          ".write": "auth != null && root.child('access').child(auth.uid).exists() && (!root.child('workspaceCatalog').child($workspaceId).exists() || (root.child('workspaceCatalog').child($workspaceId).child('visibility').val() !== 'private' || root.child('workspaceCatalog').child($workspaceId).child('ownerUid').val() === auth.uid))",
+          ".validate": "newData.hasChildren(['action', 'created_at', 'workspaceId']) && newData.child('action').isString() && newData.child('created_at').isString() && newData.child('workspaceId').val() === $workspaceId"
+        }
+      }
+    },
+
     "workspaceCatalog": {
       ".read": "auth != null && root.child('access').child(auth.uid).exists()",
       "$workspaceId": {
