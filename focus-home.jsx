@@ -220,10 +220,6 @@ function cloudDeleteTask(fb, uid, taskId) {
     });
 }
 
-function focusFirebaseSaveSucceeded(result) {
-  return !!result && result.ok !== false;
-}
-
 function parseSourceId(sourceId) {
   const [wsId, pageId, itemId] = String(sourceId || "").split(":");
   return { wsId, pageId, itemId };
@@ -415,7 +411,6 @@ async function deleteWorkspaceChecklistSource(sourceId, { activeWorkspaceId, del
       baseUpdatedAt: remoteRecord.updated_at || "",
     });
     if (!saved) return false;
-    if (!focusFirebaseSaveSucceeded(saved)) return false;
     try {
       localStorage.setItem(wsDataKey(wsId), JSON.stringify(removed.data));
       localStorage.setItem(wsSavedAtKey(wsId), saved.updated_at || new Date().toISOString());
@@ -953,7 +948,7 @@ function WorkspaceCards({ workspaces, activeWorkspaceId, data, onOpen }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // FocusHome — the page component the main app mounts for HOME_PAGE_ID.
 // ─────────────────────────────────────────────────────────────────────────────
-function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = [], authUser, switchWorkspace, setCurrentPage, completeChecklistItem, deleteChecklistItem, deleteChecklistItems, cloudConnected }) {
+function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = [], authUser, switchWorkspace, setCurrentPage, completeChecklistItem, deleteChecklistItem, cloudConnected }) {
   const [today, setToday] = useState(todayKey());
   const [tasks, setTasks] = useState(() => migrateLegacy(readJson(LS_TASKS, {})));
   const [groupSelections, setGroupSelections] = useState({});
@@ -1181,16 +1176,10 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
     const tasksToDelete = idsToDelete.map((id) => tasksRef.current[id]).filter(Boolean);
     const confirmed = [];
     const failed = [];
-    const activeWorkspaceLinkedTasks = [];
 
     for (const task of tasksToDelete) {
       if (task.sourceType !== "document" || !task.sourceId) {
         confirmed.push(task);
-        continue;
-      }
-      const { wsId, pageId, itemId } = parseSourceId(task.sourceId);
-      if (wsId && wsId === activeWorkspaceId && typeof deleteChecklistItems === "function") {
-        activeWorkspaceLinkedTasks.push({ task, pageId, itemId });
         continue;
       }
       try {
@@ -1208,22 +1197,11 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
       }
     }
 
-    if (activeWorkspaceLinkedTasks.length) {
-      try {
-        const ok = await Promise.resolve(deleteChecklistItems(activeWorkspaceLinkedTasks.map(({ pageId, itemId }) => ({ pageId, itemId }))));
-        if (ok) confirmed.push(...activeWorkspaceLinkedTasks.map(({ task }) => task));
-        else failed.push(...activeWorkspaceLinkedTasks.map(({ task }) => task));
-      } catch (err) {
-        console.warn("FocusHome: active workspace batch checklist delete failed:", err.message);
-        failed.push(...activeWorkspaceLinkedTasks.map(({ task }) => task));
-      }
-    }
-
     if (confirmed.length) removeFocusTaskRecords(confirmed);
     if (failed.length) {
       alert(`Could not delete ${failed.length} linked workspace task${failed.length === 1 ? "" : "s"} from Firebase. Nothing was removed from Focus for those failed item${failed.length === 1 ? "" : "s"}.`);
     }
-  }, [activeWorkspaceId, deleteChecklistItem, deleteChecklistItems, removeFocusTaskRecords, workspaces]);
+  }, [activeWorkspaceId, deleteChecklistItem, removeFocusTaskRecords, workspaces]);
 
   const deleteTask = useCallback((id) => deleteTasks([id]), [deleteTasks]);
 
