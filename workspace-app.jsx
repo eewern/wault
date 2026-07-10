@@ -2886,6 +2886,44 @@ function App() {
     return { data: { ...sourceData, pages: { ...sourceData.pages, [pageId]: { ...page, blocks } } }, found: true };
   };
 
+  const removeChecklistItemsFromWorkspaceData = (sourceData, items = []) => {
+    const byPage = new Map();
+    (items || []).forEach((item) => {
+      const pageId = item?.pageId;
+      const itemId = item?.itemId;
+      if (!pageId || !itemId) return;
+      if (!byPage.has(pageId)) byPage.set(pageId, new Set());
+      byPage.get(pageId).add(itemId);
+    });
+    if (!byPage.size || !sourceData?.pages) return { data: sourceData, foundIds: [] };
+
+    const pages = { ...sourceData.pages };
+    const foundIds = [];
+    byPage.forEach((itemIds, pageId) => {
+      const page = pages[pageId];
+      if (!page || !Array.isArray(page.blocks)) return;
+      let pageChanged = false;
+      const blocks = page.blocks.map((b) => {
+        if (b.type !== "checklist" || !Array.isArray(b.items)) return b;
+        const before = b.items.length;
+        const nextItems = b.items.filter((i) => {
+          if (i && itemIds.has(i.id)) {
+            foundIds.push(`${pageId}:${i.id}`);
+            return false;
+          }
+          return true;
+        });
+        if (nextItems.length !== before) pageChanged = true;
+        return nextItems.length === before ? b : { ...b, items: nextItems };
+      });
+      if (pageChanged) pages[pageId] = { ...page, blocks };
+    });
+
+    return foundIds.length
+      ? { data: { ...sourceData, pages }, foundIds: [...new Set(foundIds)] }
+      : { data: sourceData, foundIds: [] };
+  };
+
   const completeChecklistItem = (pageId, itemId, done) => setData(d => {
     const page = d.pages[pageId];
     if (!page || !Array.isArray(page.blocks)) return d;
@@ -2900,13 +2938,19 @@ function App() {
   });
 
   const deleteChecklistItem = async (pageId, itemId) => {
+    const result = await deleteChecklistItems([{ pageId, itemId }]);
+    return result === true || result?.ok === true;
+  };
+
+  const deleteChecklistItems = async (items = []) => {
     const before = latestSaveRef.current?.data || data;
-    const removed = removeChecklistItemFromWorkspaceData(before, pageId, itemId);
-    if (!removed.found) return true;
+    const removed = removeChecklistItemsFromWorkspaceData(before, items);
+    if (!removed.foundIds?.length) return true;
     const nextData = removed.data;
+    latestSaveRef.current = { data: nextData, ws: activeLocalWorkspaceId };
     setData(nextData);
     try {
-      persistWorkspaceLocallyNow(activeLocalWorkspaceId, nextData, "focus-linked-task-delete", lastRemoteUpdatedAtRef.current || "");
+      persistWorkspaceLocallyNow(activeLocalWorkspaceId, nextData, "focus-linked-task-bulk-delete", lastRemoteUpdatedAtRef.current || "");
     } catch {}
     if (!(authUser?.uid && userAccess && window.WorkspaceFirebaseSync?.saveWorkspace)) return true;
 
@@ -2922,6 +2966,7 @@ function App() {
           });
       pendingLocalSaveRef.current = false;
       if (!firebaseSaveSucceeded(saved)) {
+        latestSaveRef.current = { data: before, ws: activeLocalWorkspaceId };
         setData(before);
         setSyncState((s) => ({ ...s, error: firebaseSaveFailureMessage(saved), firebaseStatus: firebaseSaveFailureMessage(saved, "Task delete failed") }));
         return false;
@@ -2935,6 +2980,7 @@ function App() {
       return true;
     } catch (err) {
       pendingLocalSaveRef.current = false;
+      latestSaveRef.current = { data: before, ws: activeLocalWorkspaceId };
       setData(before);
       console.warn("⚠️ Checklist item delete failed:", err.message);
       setSyncState((s) => ({ ...s, firebaseStatus: "Task delete failed" }));
@@ -3841,6 +3887,7 @@ function App() {
           setCurrentPage={setCurrentPage}
           completeChecklistItem={completeChecklistItem}
           deleteChecklistItem={deleteChecklistItem}
+          deleteChecklistItems={deleteChecklistItems}
           cloudConnected={!!window.WorkspaceFirebaseSync}
         />
       ) : (
