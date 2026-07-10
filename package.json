@@ -8,7 +8,8 @@
     "build:netlify": "node scripts/build-netlify-public.mjs",
     "start:api": "node workspace-api-server.mjs",
     "start:mcp": "node wault-mcp-http.mjs",
-    "start:mcp:local": "node wault-mcp.mjs"
+    "start:mcp:local": "node wault-mcp.mjs",
+    "backup:firebase": "node scripts/wault-firebase-backup.mjs firebase-exports/wault-firebase-$(date +%Y%m%d-%H%M%S).json"
   },
   "engines": {
     "node": ">=18"

@@ -19,3 +19,8 @@ workspace-api-store.json
 # Local backups / one-off migration scripts
 firebase-*backup*.json
 migrate-to-firebase.mjs
+
+# Local Firebase data exports (contain workspace data — never commit)
+firebase-exports/
+_wault_firebase_export.json
+_tmp_*.mjs
