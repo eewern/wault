@@ -970,7 +970,7 @@ function FirebaseAccessDeniedScreen({ email, onSignOut }) {
         <h1>Request sent</h1>
         <p>
           <strong>{email}</strong> is signed in, and your request is now visible to the
-          workspace owner. You'll get access as soon as they approve you — just refresh
+          workspace owner. You'll get access as soon as they approve you. Just refresh
           this page after that.
         </p>
         <button className="auth-btn secondary" onClick={onSignOut}>Sign in with a different account</button>
@@ -983,7 +983,10 @@ function PrivateWorkspaceScreen({ email, onSignOut }) {
   return (
     <main className="auth-gate">
       <section className="auth-card">
-        <div style={{ fontSize:40, marginBottom:8 }}>🔒</div>
+        <svg width="26" height="26" viewBox="0 0 20 20" fill="none" stroke="var(--accent)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: 14 }}>
+          <rect x="4.5" y="9" width="11" height="8" rx="1.8" />
+          <path d="M6.5 9V6.2a3.5 3.5 0 0 1 7 0V9" />
+        </svg>
         <div className="auth-kicker">Private workspace</div>
         <h1>Access restricted</h1>
         <p>This workspace has been made <strong>private</strong> by the owner. Only the owner can access it right now.</p>
