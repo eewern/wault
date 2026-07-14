@@ -15,6 +15,7 @@ const publicFiles = [
   "workspace-data.js",
   "workspace-persistence.js",
   "workspace-api-client.js",
+  "reliability-core.js",
   "firebase-sync.mjs",
   "workspace-blocks.jsx",
   "focus-home.jsx",

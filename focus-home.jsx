@@ -192,6 +192,18 @@ function parseQuickAdd(raw) {
 }
 
 // ── Cloud sync (focus/$uid/tasks) ────────────────────────────────────────────
+const focusTaskWriteQueues = new Map();
+function enqueueFocusTaskWrite(taskId, writer) {
+  const previous = focusTaskWriteQueues.get(taskId) || Promise.resolve();
+  const next = previous.catch(() => {}).then(writer);
+  focusTaskWriteQueues.set(taskId, next);
+  const cleanup = () => {
+    if (focusTaskWriteQueues.get(taskId) === next) focusTaskWriteQueues.delete(taskId);
+  };
+  next.then(cleanup, cleanup);
+  return next;
+}
+
 async function cloudLoadTasks(fb, uid) {
   try {
     const snap = await fb.get(fb.ref(fb.database, `focus/${uid}/tasks`));
@@ -201,23 +213,67 @@ async function cloudLoadTasks(fb, uid) {
     return null;
   }
 }
+function focusTaskAuditContext(uid, task, taskId = task?.id || "") {
+  const sourceParts = String(task?.sourceId || "").split(":");
+  const workspaceId = task?.sourceType === "document" && sourceParts[0]
+    ? sourceParts[0]
+    : (task?.workspaceId || `focus_${uid}`);
+  return {
+    workspaceId,
+    documentId: task?.sourceType === "document" ? (sourceParts[1] || "") : "",
+    taskId,
+    databasePath: `focus/${uid}/tasks/${taskId}`,
+  };
+}
 function cloudSaveTask(fb, uid, task) {
-  if (!fb || !uid || !task?.id) return;
-  fb.set(fb.ref(fb.database, `focus/${uid}/tasks/${task.id}`), task)
-    .catch((e) => console.warn("FocusHome: task save failed:", e.message));
+  if (!fb || !uid || !task?.id) return Promise.resolve(true);
+  return enqueueFocusTaskWrite(task.id, async () => {
+    const context = focusTaskAuditContext(uid, task);
+    await fb.set(fb.ref(fb.database, context.databasePath), task);
+    await fb.writeAuditLog?.("focus_task_upsert", context.workspaceId, {
+      path: context.databasePath,
+      documentId: context.documentId,
+      taskId: context.taskId,
+      payloadSummary: {
+        titleChars: String(task.title || "").length,
+        status: task.status || "",
+        sourceType: task.sourceType || "focus",
+      },
+    });
+  })
+    .then(() => true)
+    .catch((e) => {
+      console.warn("FocusHome: task save failed:", e.message);
+      return false;
+    });
 }
 // Stamp a task with this session's id before storing it ANYWHERE (local + cloud
 // hold identical copies): saveId lets the live listener skip our own echoes and
 // protects this session's fresh tasks from stale remote-deletion snapshots.
 const stamped = (task) => ({ ...task, saveId: SESSION_ID, updatedAt: new Date().toISOString() });
-function cloudDeleteTask(fb, uid, taskId) {
+function cloudDeleteTask(fb, uid, taskId, task = null) {
   if (!fb || !uid || !taskId) return Promise.resolve(true);
-  return fb.set(fb.ref(fb.database, `focus/${uid}/tasks/${taskId}`), null)
+  return enqueueFocusTaskWrite(taskId, async () => {
+    const context = focusTaskAuditContext(uid, task, taskId);
+    await fb.set(fb.ref(fb.database, context.databasePath), null);
+    await fb.writeAuditLog?.("focus_task_delete", context.workspaceId, {
+      path: context.databasePath,
+      documentId: context.documentId,
+      taskId: context.taskId,
+      payloadSummary: { sourceType: task?.sourceType || "focus" },
+    });
+  })
     .then(() => true)
     .catch((e) => {
       console.warn("FocusHome: task delete failed:", e.message);
       return false;
     });
+}
+
+function focusFirebaseSaveSucceeded(result) {
+  return window.WaultReliability?.firebaseSaveSucceeded
+    ? window.WaultReliability.firebaseSaveSucceeded(result)
+    : (result === true || result?.ok === true);
 }
 
 function parseSourceId(sourceId) {
@@ -291,13 +347,32 @@ function cleanupFocusTasksForWorkspace(workspaceId, { fb = window.WorkspaceFireb
   }
 
   const resolvedUid = uid || fb?.getCurrentUser?.()?.uid || "";
-  removedIds.forEach((id) => cloudDeleteTask(fb, resolvedUid, id));
+  removedIds.forEach((id) => cloudDeleteTask(fb, resolvedUid, id, allTasks[id]));
   return removedIds;
+}
+
+function cleanupFocusTasksForSources(sourceIds, { fb = window.WorkspaceFirebaseSync, uid = "" } = {}) {
+  const sources = new Set((Array.isArray(sourceIds) ? sourceIds : [sourceIds]).filter(Boolean));
+  if (!sources.size) return [];
+  const allTasks = migrateLegacy(readJson(LS_TASKS, {}));
+  const removedTasks = Object.values(allTasks).filter((task) => (
+    task?.sourceType === "document" && task.sourceId && sources.has(task.sourceId)
+  ));
+  if (!removedTasks.length) return [];
+
+  const next = { ...allTasks };
+  removedTasks.forEach((task) => { delete next[task.id]; });
+  rememberDeletedFocusTasks(removedTasks);
+  writeJson(LS_TASKS, next);
+  const resolvedUid = uid || fb?.getCurrentUser?.()?.uid || "";
+  removedTasks.forEach((task) => cloudDeleteTask(fb, resolvedUid, task.id, task));
+  return removedTasks.map((task) => task.id);
 }
 
 window.WaultFocusCleanup = {
   ...(window.WaultFocusCleanup || {}),
   deleteWorkspaceTasks: cleanupFocusTasksForWorkspace,
+  deleteSourceTasks: cleanupFocusTasksForSources,
 };
 
 function mergeTaskMaps(local, cloud) {
@@ -341,6 +416,19 @@ function scanWorkspaceData(wsId, wsName, data, seen, out) {
   });
 }
 
+function workspaceChecklistState(wsId, data) {
+  const state = new Map();
+  Object.values(data?.pages || {}).forEach((page) => {
+    (page?.blocks || []).forEach((block) => {
+      if (block?.type !== "checklist" || !Array.isArray(block.items)) return;
+      block.items.forEach((item) => {
+        if (item?.id) state.set(`${wsId}:${page.id}:${item.id}`, !!item.done);
+      });
+    });
+  });
+  return state;
+}
+
 // Legacy write-back for NON-ACTIVE workspaces only (active ws goes through
 // completeChecklistItem → host setData, or the host's save effect would clobber
 // a direct localStorage write within 200ms).
@@ -361,6 +449,55 @@ function completeWorkspaceItem(sourceId, done) {
     if (found) writeJson(wsDataKey(wsId), data);
     return found;
   } catch { return false; }
+}
+
+function setChecklistItemDoneInWorkspaceData(data, pageId, itemId, done) {
+  const page = data?.pages?.[pageId];
+  if (!page || !Array.isArray(page.blocks)) return { data, found: false };
+  let found = false;
+  const blocks = page.blocks.map((block) => {
+    if (block?.type !== "checklist" || !Array.isArray(block.items)) return block;
+    if (!block.items.some((item) => item?.id === itemId)) return block;
+    found = true;
+    return {
+      ...block,
+      items: block.items.map((item) => item?.id === itemId ? { ...item, done: !!done } : item),
+    };
+  });
+  if (!found) return { data, found: false };
+  return { data: { ...data, pages: { ...data.pages, [pageId]: { ...page, blocks } } }, found: true };
+}
+
+async function completeWorkspaceChecklistSource(sourceId, done, { fb, workspaces } = {}) {
+  const { wsId, pageId, itemId } = parseSourceId(sourceId);
+  if (!wsId || !pageId || !itemId) return false;
+  if (!(fb?.loadWorkspace && fb?.saveWorkspace)) return completeWorkspaceItem(sourceId, done);
+
+  let remoteRecord = await fb.loadWorkspace(wsId);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (!remoteRecord?.workspace?.pages) return false;
+    const updated = setChecklistItemDoneInWorkspaceData(remoteRecord.workspace, pageId, itemId, done);
+    if (!updated.found) return true;
+    const workspace = (workspaces || []).find((entry) => entry?.id === wsId) || {};
+    const saved = await fb.saveWorkspace(wsId, updated.data, SESSION_ID, {
+      name: workspace.name || wsId,
+      visibility: workspace.visibility || "shared",
+      ownerUid: workspace.ownerUid || "",
+      ownerEmail: workspace.ownerEmail || "",
+      baseUpdatedAt: remoteRecord.updated_at || "",
+      baseRevision: Number(remoteRecord.revision || 0),
+    });
+    if (focusFirebaseSaveSucceeded(saved)) {
+      try {
+        localStorage.setItem(wsDataKey(wsId), JSON.stringify(updated.data));
+        localStorage.setItem(wsSavedAtKey(wsId), saved.updated_at || new Date().toISOString());
+      } catch {}
+      return true;
+    }
+    if (saved?.reason !== "stale_revision" || !saved.remote?.workspace) return false;
+    remoteRecord = saved.remote;
+  }
+  return false;
 }
 
 function removeChecklistItemFromWorkspaceData(data, pageId, itemId) {
@@ -389,35 +526,38 @@ async function deleteWorkspaceChecklistSource(sourceId, { activeWorkspaceId, del
   }
 
   const localData = readJson(wsDataKey(wsId), null);
-  let remoteRecord = null;
   const cloudAvailable = !!(fb?.loadWorkspace && fb?.saveWorkspace);
   if (cloudAvailable) {
-    remoteRecord = await fb.loadWorkspace(wsId);
-    if (!remoteRecord?.workspace) return false;
-  }
-  const baseData = remoteRecord?.workspace || localData;
-  if (!baseData?.pages) return false;
-
-  const removed = removeChecklistItemFromWorkspaceData(baseData, pageId, itemId);
-  if (!removed.found) return true;
-
-  if (fb?.saveWorkspace && remoteRecord?.workspace) {
+    let remoteRecord = await fb.loadWorkspace(wsId);
     const workspace = (workspaces || []).find((ws) => ws?.id === wsId) || {};
-    const saved = await fb.saveWorkspace(wsId, removed.data, SESSION_ID, {
-      name: workspace.name || wsId,
-      visibility: workspace.visibility || "shared",
-      ownerUid: workspace.ownerUid || "",
-      ownerEmail: workspace.ownerEmail || "",
-      baseUpdatedAt: remoteRecord.updated_at || "",
-    });
-    if (!saved) return false;
-    try {
-      localStorage.setItem(wsDataKey(wsId), JSON.stringify(removed.data));
-      localStorage.setItem(wsSavedAtKey(wsId), saved.updated_at || new Date().toISOString());
-    } catch {}
-    return true;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (!remoteRecord?.workspace?.pages) return false;
+      const removed = removeChecklistItemFromWorkspaceData(remoteRecord.workspace, pageId, itemId);
+      if (!removed.found) return true;
+      const saved = await fb.saveWorkspace(wsId, removed.data, SESSION_ID, {
+        name: workspace.name || wsId,
+        visibility: workspace.visibility || "shared",
+        ownerUid: workspace.ownerUid || "",
+        ownerEmail: workspace.ownerEmail || "",
+        baseUpdatedAt: remoteRecord.updated_at || "",
+        baseRevision: Number(remoteRecord.revision || 0),
+      });
+      if (focusFirebaseSaveSucceeded(saved)) {
+        try {
+          localStorage.setItem(wsDataKey(wsId), JSON.stringify(removed.data));
+          localStorage.setItem(wsSavedAtKey(wsId), saved.updated_at || new Date().toISOString());
+        } catch {}
+        return true;
+      }
+      if (saved?.reason !== "stale_revision" || !saved.remote?.workspace) return false;
+      remoteRecord = saved.remote;
+    }
+    return false;
   }
 
+  if (!localData?.pages) return false;
+  const removed = removeChecklistItemFromWorkspaceData(localData, pageId, itemId);
+  if (!removed.found) return true;
   try {
     localStorage.setItem(wsDataKey(wsId), JSON.stringify(removed.data));
     localStorage.setItem(wsSavedAtKey(wsId), new Date().toISOString());
@@ -954,13 +1094,34 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
   const [groupSelections, setGroupSelections] = useState({});
   const [otherSuggestions, setOtherSuggestions] = useState([]); // non-active workspaces
   const [otherEvents, setOtherEvents] = useState([]);
+  const [focusSaveState, setFocusSaveState] = useState("saved");
 
   const fbRef = useRef(null);
   const uidRef = useRef(null);
+  const focusWritesInFlightRef = useRef(0);
+  const focusWriteFailedRef = useRef(false);
+  const otherChecklistSnapshotRef = useRef(new Map());
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
   const localOnly = !cloudConnected || !authUser;
   const deletedWorkspaceKey = (deletedWorkspaceIds || []).filter(Boolean).sort().join("|");
+  const trackFocusCloudWrite = useCallback((promise) => {
+    if (!fbRef.current || !uidRef.current) return Promise.resolve(promise);
+    if (focusWritesInFlightRef.current === 0) focusWriteFailedRef.current = false;
+    focusWritesInFlightRef.current += 1;
+    setFocusSaveState("saving");
+    return Promise.resolve(promise).then((ok) => {
+      if (!ok) focusWriteFailedRef.current = true;
+      focusWritesInFlightRef.current = Math.max(0, focusWritesInFlightRef.current - 1);
+      setFocusSaveState(focusWritesInFlightRef.current > 0 ? "saving" : focusWriteFailedRef.current ? "failed" : "saved");
+      return ok;
+    }).catch(() => {
+      focusWriteFailedRef.current = true;
+      focusWritesInFlightRef.current = Math.max(0, focusWritesInFlightRef.current - 1);
+      setFocusSaveState(focusWritesInFlightRef.current > 0 ? "saving" : "failed");
+      return false;
+    });
+  }, []);
 
   useEffect(() => {
     const refresh = () => setToday(todayKey());
@@ -994,6 +1155,12 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
           });
           return merged;
         });
+      }
+      const pendingDeletes = Object.keys(readFocusDeleteTombstones().taskIds || {});
+      if (pendingDeletes.length) {
+        setFocusSaveState("saving");
+        const results = await Promise.all(pendingDeletes.map((taskId) => cloudDeleteTask(fb, uid, taskId)));
+        if (!cancelled) setFocusSaveState(results.every(Boolean) ? "saved" : "failed");
       }
       if (cancelled) return;
       try {
@@ -1066,6 +1233,11 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
     () => (workspaces || []).find((w) => w.id === activeWorkspaceId)?.name || "This workspace",
     [workspaces, activeWorkspaceId]
   );
+  const workspaceSubscriptionKey = (workspaces || [])
+    .filter((workspace) => workspace?.id)
+    .map((workspace) => `${workspace.id}:${workspace.name || ""}`)
+    .sort()
+    .join("|");
   const activeSuggestions = useMemo(() => {
     const out = [];
     scanWorkspaceData(activeWorkspaceId, activeWsName, data, new Set(), out);
@@ -1074,22 +1246,92 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
   }, [data, activeWorkspaceId, activeWsName]);
 
   useEffect(() => {
-    const others = (workspaces || []).filter((w) => w?.id && w.id !== activeWorkspaceId).slice(0, 10);
-    const out = [];
-    const seen = new Set();
-    const evs = [];
-    others.forEach((ws) => {
-      const cached = readJson(wsDataKey(ws.id), null);
-      if (cached) {
-        scanWorkspaceData(ws.id, ws.name, cached, seen, out);
-        Object.values(cached.events || {}).forEach((ev) => {
-          if (ev?.date && ev?.title) evs.push({ ...ev, wsName: ws.name || ws.id });
+    const others = (workspaces || []).filter((workspace) => workspace?.id && workspace.id !== activeWorkspaceId);
+    const workspaceData = new Map();
+    const unsubscribers = [];
+    let cancelled = false;
+
+    const publish = () => {
+      if (cancelled) return;
+      const suggestions = [];
+      const seen = new Set();
+      const events = [];
+      others.forEach((workspace) => {
+        const otherData = workspaceData.get(workspace.id);
+        if (!otherData?.pages) return;
+        scanWorkspaceData(workspace.id, workspace.name, otherData, seen, suggestions);
+        Object.values(otherData.events || {}).forEach((event) => {
+          if (event?.date && event?.title) events.push({ ...event, wsName: workspace.name || workspace.id });
         });
-      }
+      });
+      setOtherSuggestions(suggestions);
+      setOtherEvents(events);
+    };
+
+    const reconcileRemovedSources = (workspaceId, otherData) => {
+      const liveState = workspaceChecklistState(workspaceId, otherData);
+      const previousState = otherChecklistSnapshotRef.current.get(workspaceId) || null;
+      const workspaceTasks = Object.values(tasksRef.current).filter((task) => (
+        task?.sourceType === "document" &&
+        String(task.sourceId || "").startsWith(`${workspaceId}:`)
+      ));
+      const removedTasks = workspaceTasks.filter((task) => !liveState.has(task.sourceId));
+      const removedIds = removedTasks.length
+        ? cleanupFocusTasksForSources(removedTasks.map((task) => task.sourceId), { fb: fbRef.current, uid: uidRef.current })
+        : [];
+      const removedSet = new Set(removedIds);
+      const completionUpdates = workspaceTasks.filter((task) => {
+        if (removedSet.has(task.id) || !liveState.has(task.sourceId)) return false;
+        const done = liveState.get(task.sourceId);
+        if (!previousState) return done === true && task.status !== "done";
+        return previousState.has(task.sourceId) && previousState.get(task.sourceId) !== done && (task.status === "done") !== done;
+      }).map((task) => stamped({
+        ...task,
+        status: liveState.get(task.sourceId) ? "done" : "todo",
+        completedAt: liveState.get(task.sourceId) ? (task.completedAt || new Date().toISOString()) : null,
+      }));
+      otherChecklistSnapshotRef.current.set(workspaceId, liveState);
+      if (!removedIds.length && !completionUpdates.length) return;
+
+      const next = { ...tasksRef.current };
+      removedSet.forEach((id) => delete next[id]);
+      completionUpdates.forEach((task) => { next[task.id] = task; });
+      tasksRef.current = next;
+      writeJson(LS_TASKS, next);
+      setTasks(next);
+      completionUpdates.forEach((task) => {
+        trackFocusCloudWrite(cloudSaveTask(fbRef.current, uidRef.current, task));
+      });
+    };
+
+    others.forEach((workspace) => {
+      const cached = readJson(wsDataKey(workspace.id), null);
+      if (cached?.pages) workspaceData.set(workspace.id, cached);
     });
-    setOtherSuggestions(out);
-    setOtherEvents(evs);
-  }, [workspaces, activeWorkspaceId]);
+    publish();
+
+    const fb = fbRef.current || window.WorkspaceFirebaseSync;
+    if (authUser?.uid && fb?.onWorkspaceUpdate) {
+      others.forEach((workspace) => {
+        const unsubscribe = fb.onWorkspaceUpdate(workspace.id, (record) => {
+          if (cancelled || !record?.workspace?.pages) return;
+          workspaceData.set(workspace.id, record.workspace);
+          try {
+            localStorage.setItem(wsDataKey(workspace.id), JSON.stringify(record.workspace));
+            localStorage.setItem(wsSavedAtKey(workspace.id), record.updated_at || new Date().toISOString());
+          } catch {}
+          reconcileRemovedSources(workspace.id, record.workspace);
+          publish();
+        });
+        if (typeof unsubscribe === "function") unsubscribers.push(unsubscribe);
+      });
+    }
+
+    return () => {
+      cancelled = true;
+      unsubscribers.forEach((unsubscribe) => { try { unsubscribe(); } catch {} });
+    };
+  }, [workspaceSubscriptionKey, activeWorkspaceId, authUser?.uid, trackFocusCloudWrite]);
 
   const suggestions = useMemo(() => {
     const seen = new Set(activeSuggestions.map((s) => s.title.toLowerCase()));
@@ -1116,8 +1358,8 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
       writeJson(LS_TASKS, next);
       return next;
     });
-    cloudSaveTask(fbRef.current, uidRef.current, t);
-  }, []);
+    trackFocusCloudWrite(cloudSaveTask(fbRef.current, uidRef.current, t));
+  }, [trackFocusCloudWrite]);
 
   const patchTask = useCallback((id, patch) => {
     const cur = tasksRef.current[id];
@@ -1133,7 +1375,10 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
       if (wsId && wsId === activeWorkspaceId && typeof completeChecklistItem === "function") {
         completeChecklistItem(pageId, itemId, updated.status === "done");
       } else {
-        completeWorkspaceItem(cur.sourceId, updated.status === "done");
+        trackFocusCloudWrite(completeWorkspaceChecklistSource(cur.sourceId, updated.status === "done", {
+          fb: fbRef.current,
+          workspaces,
+        }));
       }
     }
 
@@ -1143,8 +1388,8 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
       writeJson(LS_TASKS, next);
       return next;
     });
-    cloudSaveTask(fbRef.current, uidRef.current, updated);
-  }, [activeWorkspaceId, completeChecklistItem]);
+    trackFocusCloudWrite(cloudSaveTask(fbRef.current, uidRef.current, updated));
+  }, [activeWorkspaceId, completeChecklistItem, trackFocusCloudWrite, workspaces]);
 
   const removeFocusTaskRecords = useCallback((tasksToRemove) => {
     const list = (Array.isArray(tasksToRemove) ? tasksToRemove : [tasksToRemove]).filter(Boolean);
@@ -1159,7 +1404,8 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
       writeJson(LS_TASKS, next);
       return next;
     });
-    idsToDelete.forEach((id) => cloudDeleteTask(fbRef.current, uidRef.current, id));
+    const taskById = new Map(list.map((task) => [task.id, task]));
+    trackFocusCloudWrite(Promise.all(idsToDelete.map((id) => cloudDeleteTask(fbRef.current, uidRef.current, id, taskById.get(id) || null))).then((results) => results.every(Boolean)));
     setGroupSelections((prev) => {
       const next = {};
       Object.entries(prev).forEach(([groupId, idsForGroup]) => {
@@ -1168,7 +1414,7 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
       });
       return next;
     });
-  }, []);
+  }, [trackFocusCloudWrite]);
 
   const deleteTasks = useCallback(async (ids) => {
     const idsToDelete = [...new Set((Array.isArray(ids) ? ids : [ids]).filter(Boolean))];
@@ -1281,27 +1527,26 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
   }, [commitTask]);
 
   const pinTask = useCallback((id) => {
-    setTasks((prev) => {
-      const cur = prev[id];
-      if (!cur) return prev;
-      const pinnedNow = Object.values(prev).filter((t) => t.pinnedDate === todayKey() && t.status !== "done");
-      const isPinned = cur.pinnedDate === todayKey();
-      if (!isPinned && pinnedNow.length >= 3) return prev; // Top 3 means three.
-      // A manual UNPIN today is remembered so the auto-fill effect won't re-add it.
-      if (isPinned) {
-        const seed = readJson(LS_PINSEED, null);
-        const day = todayKey();
-        const base = (seed && seed.date === day) ? seed : { date: day, userUnpinned: [] };
-        if (!base.userUnpinned.includes(id)) base.userUnpinned.push(id);
-        writeJson(LS_PINSEED, base);
-      }
-      const updated = stamped({ ...cur, pinnedDate: isPinned ? "" : todayKey() });
-      const next = { ...prev, [id]: updated };
-      writeJson(LS_TASKS, next);
-      cloudSaveTask(fbRef.current, uidRef.current, updated);
-      return next;
-    });
-  }, []);
+    const prev = tasksRef.current;
+    const cur = prev[id];
+    if (!cur) return;
+    const pinnedNow = Object.values(prev).filter((task) => task.pinnedDate === todayKey() && task.status !== "done");
+    const isPinned = cur.pinnedDate === todayKey();
+    if (!isPinned && pinnedNow.length >= 3) return;
+    if (isPinned) {
+      const seed = readJson(LS_PINSEED, null);
+      const day = todayKey();
+      const base = (seed && seed.date === day) ? seed : { date: day, userUnpinned: [] };
+      if (!base.userUnpinned.includes(id)) base.userUnpinned.push(id);
+      writeJson(LS_PINSEED, base);
+    }
+    const updated = stamped({ ...cur, pinnedDate: isPinned ? "" : todayKey() });
+    const next = { ...prev, [id]: updated };
+    tasksRef.current = next;
+    writeJson(LS_TASKS, next);
+    setTasks(next);
+    trackFocusCloudWrite(cloudSaveTask(fbRef.current, uidRef.current, updated));
+  }, [trackFocusCloudWrite]);
 
   // Open the page a document-task came from. Active workspace → navigate
   // directly; another workspace → switch first, then jump to the page.
@@ -1354,7 +1599,7 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
         writeJson(LS_TASKS, next);
         return next;
       });
-      cloudSaveTask(fbRef.current, uidRef.current, updated);
+      trackFocusCloudWrite(cloudSaveTask(fbRef.current, uidRef.current, updated));
     };
 
     const workspaceDataAvailable = !!(activeWorkspaceId && data?.pages && !data.pages.cloud_workspace_unavailable);
@@ -1384,7 +1629,7 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
       });
     }
     lastDoneMap = { wsId: activeWorkspaceId, map: cur };
-  }, [data, activeWorkspaceId, removeFocusTaskRecords]);
+  }, [data, activeWorkspaceId, removeFocusTaskRecords, trackFocusCloudWrite]);
 
   // ── Derived views ──────────────────────────────────────────────────────────
   const all = Object.values(tasks).filter((t) => t && t.title);
@@ -1512,7 +1757,10 @@ function FocusHome({ data, activeWorkspaceId, workspaces, deletedWorkspaceIds = 
           </div>
           <div className="fx-hero-side">
             {streak > 0 && <span className="fx-streak" data-tooltip={`${streak} day${streak === 1 ? "" : "s"} in a row with at least one task done — keep the flame alive`}>🔥 {streak}</span>}
-            <span className={`fx-sync${localOnly ? " fx-sync-off" : ""}`} data-tooltip={localOnly ? "Local-only — tasks saved in this browser" : "Synced to your account"} />
+            <span className={`fx-sync-state fx-sync-state-${localOnly ? "local" : focusSaveState}`}>
+              <span className={`fx-sync${localOnly || focusSaveState === "failed" ? " fx-sync-off" : ""}`} />
+              {localOnly ? "Local only" : focusSaveState === "saving" ? "Saving" : focusSaveState === "failed" ? "Failed" : "Saved"}
+            </span>
             <ProgressRing done={doneToday.length} total={doneToday.length + activeToday} />
           </div>
         </div>

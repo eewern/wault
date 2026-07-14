@@ -3574,6 +3574,9 @@
   }
   .focus-home .fx-sync { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
   .focus-home .fx-sync-off { background: var(--text-faint); box-shadow: none; }
+  .focus-home .fx-sync-state { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 11px; font-weight: 700; }
+  .focus-home .fx-sync-state-saving { color: var(--amber); }
+  .focus-home .fx-sync-state-failed { color: var(--danger); }
   .focus-home .fx-ring { position: relative; display: inline-flex; align-items: center; justify-content: center; }
   .focus-home .fx-ring-arc { filter: none; }
   .focus-home .fx-ring-label { position: absolute; font-size: 9.5px; font-weight: 800; color: var(--text-strong); font-variant-numeric: tabular-nums; }
@@ -3958,10 +3961,11 @@
 <script src="workspace-data.js?v=20260612-cmdcentre1"></script>
 <script src="workspace-persistence.js?v=20260522-workspace-tools1"></script>
 <script src="workspace-api-client.js?v=20260628-sync1"></script>
+<script src="reliability-core.js?v=20260715-reliability3"></script>
 <script type="module">
   // Native ESM Firebase init — runs after workspace-config.js (classic) has set SUPABASE_CONFIG.
   // Exposes window.__firebaseInitPromise which workspace-app.jsx awaits (avoids Babel transforming import()).
-  import init from './firebase-sync.mjs?v=20260709-reliability1';
+  import init from './firebase-sync.mjs?v=20260715-reliability3';
   let _fbInitDone = false;
   const _fbInit = init(window.SUPABASE_CONFIG || {}).catch((e) => {
     console.warn('Firebase init failed:', e && e.message);
@@ -3977,8 +3981,8 @@
   window.__firebaseInitPromise = Promise.race([_fbInit, _fbTimeout]);
 </script>
 <script type="text/babel" src="workspace-blocks.jsx?v=20260701-workspacefix1"></script>
-<script type="text/babel" src="focus-home.jsx?v=20260707-focussync1"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260709-reliability1"></script>
+<script type="text/babel" src="focus-home.jsx?v=20260715-reliability3"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260715-reliability3"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

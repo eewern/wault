@@ -9,7 +9,7 @@ export async function initializeFirebaseSync(config) {
     // gstatic CDN — all modules share the same Firebase internal registry (required for RTDB + Auth)
     // Loaded via native <script type="module"> in index.html so Babel never sees these import() calls
     const { initializeApp, getApps } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js');
-    const { getDatabase, ref, set, get, onValue, remove, onDisconnect } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js');
+    const { getDatabase, ref, set, get, onValue, remove, onDisconnect, runTransaction } = await import('https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js');
     const {
       getAuth,
       GoogleAuthProvider,
@@ -39,6 +39,9 @@ export async function initializeFirebaseSync(config) {
     const database = getDatabase(app);
     const auth = getAuth(app);
     const provider = new GoogleAuthProvider();
+    const localReliabilityTestMode = typeof location !== 'undefined'
+      && (location.hostname === '127.0.0.1' || location.hostname === 'localhost')
+      && new URLSearchParams(location.search).get('ui_stress') === '1';
 
     // Keep the user signed in across page refreshes (survives browser close/reopen)
     await setPersistence(auth, browserLocalPersistence);
@@ -112,6 +115,7 @@ export async function initializeFirebaseSync(config) {
         hasUnavailablePage: !!pages.cloud_workspace_unavailable,
       };
     };
+    const uniqueHistoryId = (uid = '') => `${Date.now()}_${String(uid || 'anon').slice(0, 8)}_${Math.random().toString(36).slice(2, 8)}`;
     const isDangerousWorkspaceOverwrite = (existingWorkspace, nextWorkspace, metadata = {}) => {
       if (metadata.allowDangerousOverwrite === true) return false;
       const before = summarizeWorkspaceData(existingWorkspace);
@@ -134,12 +138,15 @@ export async function initializeFirebaseSync(config) {
           workspaceId,
           ...payload,
         });
+        return true;
       } catch (err) {
         console.warn(`⚠️ Audit log failed (${action}): ${err.message}`);
+        return false;
       }
     }
     const canSeeWorkspaceCatalogEntry = (meta, user = auth.currentUser) => {
       if (!meta || meta.deleted === true) return false;
+      if (localReliabilityTestMode && meta.ownerUid !== user?.uid) return false;
       if (normalizeVisibility(meta.visibility) !== 'private') return true;
       return !!(user?.uid && meta.ownerUid === user.uid);
     };
@@ -211,6 +218,11 @@ export async function initializeFirebaseSync(config) {
 
       onAuthStateChange(callback) {
         return onAuthStateChanged(auth, callback);
+      },
+
+      async writeAuditLog(action, workspaceId, payload = {}) {
+        if (!action || !workspaceId) return false;
+        return writeAuditLog(action, workspaceId, payload);
       },
 
       // ── Access control ──────────────────────────────────────────────────────
@@ -381,8 +393,24 @@ export async function initializeFirebaseSync(config) {
             return false;
           }
 
+          const catalogEntry = await loadWorkspaceCatalogEntry(workspaceId);
+          if (catalogEntry?.deleted && metadata.allowDeletedRestore !== true) {
+            await writeAuditLog('save_blocked_deleted_workspace', workspaceId, {
+              path: `workspaces/${workspaceId}`,
+              saveId: saveId || '',
+            });
+            return { ok: false, blocked: true, reason: 'workspace_deleted' };
+          }
+
           const existingSnap = await get(ref(database, `workspaces/${workspaceId}`));
           const existingRecord = existingSnap.exists() ? (existingSnap.val() || {}) : null;
+          if (existingRecord?.deleted && metadata.allowDeletedRestore !== true) {
+            await writeAuditLog('save_blocked_deleted_workspace', workspaceId, {
+              path: `workspaces/${workspaceId}`,
+              saveId: saveId || '',
+            });
+            return { ok: false, blocked: true, reason: 'workspace_deleted', remote: existingRecord };
+          }
           if (existingRecord?.workspace && isDangerousWorkspaceOverwrite(existingRecord.workspace, workspaceData, metadata)) {
             await writeAuditLog('save_blocked_dangerous_overwrite', workspaceId, {
               path: `workspaces/${workspaceId}`,
@@ -394,11 +422,47 @@ export async function initializeFirebaseSync(config) {
             console.warn(`🛑 Save blocked — refusing to overwrite real workspace with empty/default data: ${workspaceId}`);
             return { ok: false, blocked: true, reason: 'dangerous_overwrite' };
           }
-          const baseUpdatedAt = metadata.baseUpdatedAt || "";
-          if (existingRecord?.updated_at && baseUpdatedAt) {
+          const requestedCatalogChange = !!(
+            (metadata.name && cleanWorkspaceName(metadata.name, workspaceId) !== catalogEntry?.name)
+            || (metadata.visibility && normalizeVisibility(metadata.visibility) !== catalogEntry?.visibility)
+            || (metadata.ownerUid && metadata.ownerUid !== catalogEntry?.ownerUid)
+            || (metadata.ownerEmail && String(metadata.ownerEmail).toLowerCase() !== catalogEntry?.ownerEmail)
+          );
+          if (
+            existingRecord?.workspace
+            && catalogEntry
+            && !requestedCatalogChange
+            && globalThis.WaultReliability?.workspaceDataEqual(existingRecord.workspace, workspaceData)
+          ) {
+            return {
+              ok: true,
+              unchanged: true,
+              updated_at: existingRecord.updated_at || '',
+              revision: Number(existingRecord.revision || 0),
+            };
+          }
+          const baseUpdatedAt = metadata.baseUpdatedAt || '';
+          const hasBaseRevision = Number.isFinite(Number(metadata.baseRevision));
+          const baseRevision = hasBaseRevision ? Number(metadata.baseRevision) : null;
+          const existingRevision = Number(existingRecord?.revision || 0);
+          if (existingRecord && hasBaseRevision && existingRevision !== baseRevision) {
+            await writeAuditLog('save_blocked_stale_revision', workspaceId, {
+              path: `workspaces/${workspaceId}`,
+              saveId: saveId || '',
+              existingUpdatedAt: existingRecord.updated_at || '',
+              baseUpdatedAt,
+              existingRevision,
+              baseRevision,
+              existingSummary: summarizeWorkspaceData(existingRecord.workspace),
+              nextSummary: summarizeWorkspaceData(workspaceData),
+            });
+            console.warn(`⚠️ Save blocked — Firebase revision changed: ${workspaceId}`);
+            return { ok: false, blocked: true, reason: 'stale_revision', remote: existingRecord };
+          }
+          if (existingRecord?.updated_at && baseUpdatedAt && !hasBaseRevision) {
             const remoteMs = Date.parse(existingRecord.updated_at) || 0;
             const baseMs = Date.parse(baseUpdatedAt) || 0;
-            if (remoteMs > baseMs && existingRecord.saveId !== saveId) {
+            if (remoteMs > baseMs) {
               await writeAuditLog('save_blocked_stale_revision', workspaceId, {
                 path: `workspaces/${workspaceId}`,
                 saveId: saveId || '',
@@ -417,15 +481,24 @@ export async function initializeFirebaseSync(config) {
           const nextSummary = summarizeWorkspaceData(workspaceData);
           if (existingRecord?.workspace) {
             try {
-              await set(ref(database, `workspaceBackups/${workspaceId}/${Date.now()}`), {
+              await set(ref(database, `workspaceBackups/${workspaceId}/${uniqueHistoryId(currentUser.uid)}`), {
                 workspace: existingRecord.workspace,
                 updated_at: existingRecord.updated_at || '',
                 backed_up_at: updatedAt,
                 saveId: existingRecord.saveId || '',
+                revision: existingRevision,
+                uid: currentUser.uid,
+                email: String(currentUser.email || '').toLowerCase(),
                 summary: previousSummary,
               });
             } catch (backupError) {
-              console.warn(`⚠️ Workspace backup failed before save (${workspaceId}): ${backupError.message}`);
+              await writeAuditLog('save_blocked_backup_failed', workspaceId, {
+                path: `workspaceBackups/${workspaceId}`,
+                saveId: saveId || '',
+                error: backupError.message || 'Backup failed',
+              });
+              console.warn(`🛑 Workspace save blocked because its pre-save backup failed (${workspaceId}): ${backupError.message}`);
+              return { ok: false, blocked: true, reason: 'backup_failed' };
             }
           }
 
@@ -438,24 +511,71 @@ export async function initializeFirebaseSync(config) {
           });
 
           const dbRef = ref(database, `workspaces/${workspaceId}`);
-          await set(dbRef, {
-            workspace: workspaceData,   // full React state object
-            updated_at: updatedAt,
-            source: 'firebase',
-            saveId,  // session ID — lets the listener ignore its own echoes
-            summary: nextSummary,
-          });
+          let transactionReason = '';
+          let transactionRemote = existingRecord;
+          const transactionResult = await runTransaction(dbRef, (currentRecord) => {
+            transactionRemote = currentRecord || null;
+            const currentRevision = Number(currentRecord?.revision || 0);
+            if (currentRecord?.deleted && metadata.allowDeletedRestore !== true) {
+              transactionReason = 'workspace_deleted';
+              return;
+            }
+            if (currentRecord?.workspace && isDangerousWorkspaceOverwrite(currentRecord.workspace, workspaceData, metadata)) {
+              transactionReason = 'dangerous_overwrite';
+              return;
+            }
+            if (currentRecord && hasBaseRevision && currentRevision !== baseRevision) {
+              transactionReason = 'stale_revision';
+              return;
+            }
+            if (currentRecord?.updated_at && baseUpdatedAt && !hasBaseRevision) {
+              const remoteMs = Date.parse(currentRecord.updated_at) || 0;
+              const baseMs = Date.parse(baseUpdatedAt) || 0;
+              if (remoteMs > baseMs) {
+                transactionReason = 'stale_revision';
+                return;
+              }
+            }
+            return {
+              workspace: workspaceData,
+              updated_at: updatedAt,
+              source: 'firebase',
+              saveId,
+              revision: currentRevision + 1,
+              summary: nextSummary,
+            };
+          }, { applyLocally: false });
+
+          if (!transactionResult.committed) {
+            const reason = transactionReason || 'transaction_aborted';
+            await writeAuditLog(`save_blocked_${reason}`, workspaceId, {
+              path: `workspaces/${workspaceId}`,
+              saveId: saveId || '',
+              baseUpdatedAt,
+              baseRevision,
+              existingUpdatedAt: transactionRemote?.updated_at || '',
+              existingRevision: Number(transactionRemote?.revision || 0),
+              existingSummary: summarizeWorkspaceData(transactionRemote?.workspace),
+              nextSummary,
+            });
+            return { ok: false, blocked: true, reason, remote: transactionRemote };
+          }
+
+          const committedRecord = transactionResult.snapshot.val() || {};
+          const committedRevision = Number(committedRecord.revision || existingRevision + 1);
           const versionPayload = {
             workspace: workspaceData,
             updated_at: updatedAt,
             saveId: saveId || '',
+            revision: committedRevision,
             uid: currentUser.uid,
             email: String(currentUser.email || '').toLowerCase(),
             summary: nextSummary,
             base_updated_at: metadata.baseUpdatedAt || '',
+            base_revision: baseRevision,
           };
           try {
-            await set(ref(database, `workspaceVersions/${workspaceId}/${Date.now()}`), versionPayload);
+            await set(ref(database, `workspaceVersions/${workspaceId}/${uniqueHistoryId(currentUser.uid)}`), versionPayload);
             await set(ref(database, `workspaceDailyExports/${workspaceId}/${updatedAt.slice(0, 10)}`), versionPayload);
           } catch (versionError) {
             console.warn(`⚠️ Workspace version history failed (${workspaceId}): ${versionError.message}`);
@@ -465,13 +585,21 @@ export async function initializeFirebaseSync(config) {
             saveId: saveId || '',
             previousUpdatedAt: existingRecord?.updated_at || '',
             updatedAt,
+            previousRevision: existingRevision,
+            revision: committedRevision,
             previousSummary,
             nextSummary,
           });
           console.log(`✅ Saved workspace to Firebase: ${workspaceId}`);
-          return { ok: true, updated_at: updatedAt };
+          return { ok: true, updated_at: updatedAt, revision: committedRevision };
         } catch (error) {
           console.error(`❌ Failed to save workspace: ${error.message}`);
+          await writeAuditLog('workspace_save_failed', workspaceId, {
+            path: `workspaces/${workspaceId}`,
+            saveId: saveId || '',
+            error: error.message || 'Save failed',
+            nextSummary: summarizeWorkspaceData(workspaceData),
+          });
           return false;
         }
       },
@@ -501,6 +629,7 @@ export async function initializeFirebaseSync(config) {
             workspace: workspaceData,
             saved_at: savedAt,
             base_updated_at: metadata.baseUpdatedAt || '',
+            base_revision: Number.isFinite(Number(metadata.baseRevision)) ? Number(metadata.baseRevision) : 0,
             saveId,
             email: String(currentUser.email || '').toLowerCase(),
             summary,
@@ -514,6 +643,12 @@ export async function initializeFirebaseSync(config) {
           return { ok: true, saved_at: savedAt };
         } catch (error) {
           console.warn(`⚠️ Failed to save workspace draft: ${error.message}`);
+          await writeAuditLog('workspace_draft_failed', workspaceId, {
+            path: `workspaceDrafts/${workspaceId}/${auth.currentUser?.uid || 'unknown'}`,
+            saveId: saveId || '',
+            error: error.message || 'Draft save failed',
+            summary: summarizeWorkspaceData(workspaceData),
+          });
           return false;
         }
       },
@@ -587,6 +722,7 @@ export async function initializeFirebaseSync(config) {
             visibility: 'shared',
             baseUpdatedAt: '',
             allowDangerousOverwrite: true,
+            allowDeletedRestore: true,
             restoredFromVersion: versionId,
           });
         } catch (error) {
@@ -636,9 +772,22 @@ export async function initializeFirebaseSync(config) {
 
       async updateWorkspaceCatalog(workspaceId, patch = {}) {
         try {
-          return await upsertWorkspaceCatalogEntry(workspaceId, patch);
+          const updated = await upsertWorkspaceCatalogEntry(workspaceId, patch);
+          await writeAuditLog('workspace_catalog_update', workspaceId, {
+            path: `workspaceCatalog/${workspaceId}`,
+            payloadSummary: {
+              name: updated.name || '',
+              visibility: updated.visibility || 'shared',
+              deleted: updated.deleted === true,
+            },
+          });
+          return updated;
         } catch (error) {
           console.error(`❌ Failed to update workspace catalogue: ${error.message}`);
+          await writeAuditLog('workspace_catalog_update_failed', workspaceId, {
+            path: `workspaceCatalog/${workspaceId}`,
+            error: error.message || 'Catalogue update failed',
+          });
           throw error;
         }
       },
@@ -655,7 +804,9 @@ export async function initializeFirebaseSync(config) {
           const snap = await get(ref(database, 'workspaceCatalog'));
           if (!snap.exists()) return [];
           const rows = Object.values(snap.val() || {}).filter((w) => w && w.id);
-          const deletedWorkspaceIds = rows.filter((w) => w.deleted === true).map((w) => w.id);
+          const deletedWorkspaceIds = rows
+            .filter((w) => w.deleted === true && (!localReliabilityTestMode || w.ownerUid === user.uid))
+            .map((w) => w.id);
           const list = rows
             .filter((w) => canSeeWorkspaceCatalogEntry(w, user))
             .map((w) => ({
@@ -684,7 +835,9 @@ export async function initializeFirebaseSync(config) {
           const unsubscribe = onValue(dbRef, (snapshot) => {
             const val = snapshot.exists() ? (snapshot.val() || {}) : {};
             const rows = Object.values(val).filter((w) => w && w.id);
-            const deletedWorkspaceIds = rows.filter((w) => w.deleted === true).map((w) => w.id);
+            const deletedWorkspaceIds = rows
+              .filter((w) => w.deleted === true && (!localReliabilityTestMode || w.ownerUid === user?.uid))
+              .map((w) => w.id);
             const list = rows
               .filter((w) => canSeeWorkspaceCatalogEntry(w, user))
               .map((w) => ({
@@ -735,7 +888,7 @@ export async function initializeFirebaseSync(config) {
           const deletedAt = new Date().toISOString();
           if (existingRecord?.workspace) {
             const summary = summarizeWorkspaceData(existingRecord.workspace);
-            await set(ref(database, `workspaceTrash/${workspaceId}/${Date.now()}`), {
+            await set(ref(database, `workspaceTrash/${workspaceId}/${uniqueHistoryId(auth.currentUser.uid)}`), {
               ...existingRecord,
               deleted_at: deletedAt,
               deleted_by_uid: auth.currentUser.uid,

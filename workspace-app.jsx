@@ -50,6 +50,13 @@ const workspaceSeeds = () => (
     : [{ id: DEFAULT_LOCAL_WORKSPACE_ID, seedKey: "default", name: "My Workspace", data: window.WORKSPACE_DEFAULT }]
 );
 const cloneWorkspaceData = (data) => JSON.parse(JSON.stringify(data || window.WORKSPACE_DEFAULT));
+const workspaceDataEqual = (left, right) => {
+  if (window.WaultReliability?.workspaceDataEqual) {
+    return window.WaultReliability.workspaceDataEqual(left, right);
+  }
+  if (!left || !right) return left === right;
+  return JSON.stringify(left) === JSON.stringify(right);
+};
 const createTextBlock = () => ({ id: window.nid(), type:"text", text:"" });
 const createEmptyWorkspace = () => normalizeWorkspaceData({
   pages: {},
@@ -163,6 +170,12 @@ const cleanupRetiredChurnsWeek1DayPages = (data) => {
 };
 
 const ensureParentSubpageLinks = (data) => {
+  if (window.WaultReliability?.normalizeParentSubpageLinks) {
+    return window.WaultReliability.normalizeParentSubpageLinks(data, {
+      ensureTrailingTextBlock,
+      isBlankTextBlock,
+    });
+  }
   if (!data || !data.pages) return data;
   const pages = { ...data.pages };
   let changed = false;
@@ -412,13 +425,24 @@ function readJson(key, fallback) {
 }
 
 function firebaseSaveSucceeded(result) {
-  return !!(result && result.ok !== false);
+  return window.WaultReliability?.firebaseSaveSucceeded
+    ? window.WaultReliability.firebaseSaveSucceeded(result)
+    : (result === true || result?.ok === true);
 }
 
 function firebaseSaveFailureMessage(result, fallback = "Cloud save failed") {
   if (result?.reason === "dangerous_overwrite") return "Save blocked: local data looked empty/stale and could overwrite Firebase.";
   if (result?.reason === "stale_revision") return "Save blocked: Firebase has a newer revision.";
+  if (result?.reason === "backup_failed") return "Save blocked: Firebase could not create the required safety backup.";
+  if (result?.reason === "workspace_deleted") return "Save blocked: this workspace has already been deleted.";
   return fallback;
+}
+
+function mergeWorkspaceConflict(baseData, localData, remoteData) {
+  const merged = window.WaultReliability?.mergeWorkspaceConflict
+    ? window.WaultReliability.mergeWorkspaceConflict(baseData || {}, localData || {}, remoteData || {})
+    : localData;
+  return ensureParentSubpageLinks(normalizeWorkspaceData(merged));
 }
 
 function migrateRetiredDayPagesInLocalStorage() {
@@ -795,7 +819,7 @@ async function pruneIndexedWorkspaceBackups(workspaceId) {
   extras.forEach((row) => { try { store.delete(row.id); } catch {} });
 }
 
-async function writeIndexedWorkspaceBackup(workspaceId, data, reason = "autosave", baseUpdatedAt = "") {
+async function writeIndexedWorkspaceBackup(workspaceId, data, reason = "autosave", baseUpdatedAt = "", baseRevision = 0) {
   if (!workspaceId || !data?.pages || isWorkspaceUnavailableData(data)) return null;
   const nowMs = Date.now();
   if (indexedBackupLastWrite[workspaceId] && nowMs - indexedBackupLastWrite[workspaceId] < INDEXED_BACKUP_INTERVAL_MS) return null;
@@ -808,6 +832,7 @@ async function writeIndexedWorkspaceBackup(workspaceId, data, reason = "autosave
     reason,
     createdAt: new Date(nowMs).toISOString(),
     baseUpdatedAt: baseUpdatedAt || "",
+    baseRevision: Number(baseRevision || 0),
     data,
   };
   return new Promise((resolve) => {
@@ -840,12 +865,13 @@ function readPendingWorkspaceDraft(workspaceId) {
   return draft;
 }
 
-function writePendingWorkspaceDraft(workspaceId, data, baseUpdatedAt = "") {
+function writePendingWorkspaceDraft(workspaceId, data, baseUpdatedAt = "", baseRevision = 0) {
   if (!workspaceId || !data?.pages || isWorkspaceUnavailableData(data)) return null;
   const draft = {
     workspaceId,
     data,
     baseUpdatedAt: baseUpdatedAt || "",
+    baseRevision: Number(baseRevision || 0),
     savedAt: new Date().toISOString(),
   };
   try { localStorage.setItem(localPendingWorkspaceKey(workspaceId), JSON.stringify(draft)); } catch {}
@@ -857,13 +883,20 @@ function clearPendingWorkspaceDraft(workspaceId) {
   try { localStorage.removeItem(localPendingWorkspaceKey(workspaceId)); } catch {}
 }
 
-function shouldReplayPendingDraft(pending, remoteUpdatedAt = "") {
+function shouldReplayPendingDraft(pending, remoteUpdatedAt = "", remoteRevision = null) {
+  if (window.WaultReliability?.shouldReplayDraft) {
+    return window.WaultReliability.shouldReplayDraft(pending, remoteUpdatedAt, remoteRevision);
+  }
   if (!pending?.data?.pages || !pending.savedAt) return false;
   const pendingMs = Date.parse(pending.savedAt) || 0;
   const remoteMs = Date.parse(remoteUpdatedAt || "") || 0;
   const baseMs = Date.parse(pending.baseUpdatedAt || "") || 0;
   if (pendingMs <= remoteMs) return false;
   if (!remoteMs) return true;
+  const draftRevision = Number(pending.baseRevision);
+  const currentRevision = Number(remoteRevision);
+  const hasReliableRevision = Number.isFinite(draftRevision) && Number.isFinite(currentRevision) && (draftRevision > 0 || currentRevision > 0);
+  if (hasReliableRevision) return draftRevision === currentRevision;
   return !!baseMs && remoteMs <= baseMs;
 }
 
@@ -873,6 +906,7 @@ function normalizeCloudWorkspaceDraft(workspaceId, draft) {
     workspaceId,
     data: draft.workspace,
     baseUpdatedAt: draft.base_updated_at || "",
+    baseRevision: Number(draft.base_revision || 0),
     savedAt: draft.saved_at,
     source: "firebase-draft",
   };
@@ -884,14 +918,15 @@ function normalizeIndexedWorkspaceBackup(workspaceId, backup) {
     workspaceId,
     data: backup.data,
     baseUpdatedAt: backup.baseUpdatedAt || "",
+    baseRevision: Number(backup.baseRevision || 0),
     savedAt: backup.createdAt,
     source: "indexed-backup",
   };
 }
 
-function newestReplayableDraft(remoteUpdatedAt, ...drafts) {
+function newestReplayableDraft(remoteUpdatedAt, remoteRevision, ...drafts) {
   return drafts
-    .filter((draft) => draft && shouldReplayPendingDraft(draft, remoteUpdatedAt))
+    .filter((draft) => draft && shouldReplayPendingDraft(draft, remoteUpdatedAt, remoteRevision))
     .sort((a, b) => (Date.parse(b.savedAt) || 0) - (Date.parse(a.savedAt) || 0))[0] || null;
 }
 
@@ -908,13 +943,16 @@ function writeLocalAutoBackup(workspaceId, data, reason = "autosave") {
   return snapshot;
 }
 
-function persistWorkspaceLocallyNow(workspaceId, data, reason = "instant-local-save", baseUpdatedAt = "") {
+function persistWorkspaceLocallyNow(workspaceId, data, reason = "instant-local-save", baseUpdatedAt = "", baseRevision = 0) {
   if (!workspaceId || !data?.pages || isWorkspaceUnavailableData(data)) return { workspaces: null, backup: null };
+  // Start the independent IndexedDB safety write before touching localStorage.
+  // A full localStorage quota must not prevent the larger crash-recovery store
+  // from receiving the same snapshot.
+  writeIndexedWorkspaceBackup(workspaceId, data, reason, baseUpdatedAt, baseRevision).catch(() => {});
   localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   localStorage.setItem(`${workspaceId}_local_saved_at`, new Date().toISOString());
   const workspaces = saveLocalWorkspaceData(workspaceId, data);
   const backup = writeLocalAutoBackup(workspaceId, data, reason);
-  writeIndexedWorkspaceBackup(workspaceId, data, reason, baseUpdatedAt).catch(() => {});
   return { workspaces, backup };
 }
 
@@ -1927,11 +1965,23 @@ function App() {
   // typed since the last confirmed Firebase save (guard against listener overwriting content).
   const lastRemoteDataRef = useRef(null);
   const lastRemoteUpdatedAtRef = useRef("");
+  const lastRemoteRevisionRef = useRef(0);
   const cloudPreviewWorkspaceRef = useRef(null);
   const cloudPreviewDataRef = useRef(null);
-  // True from when a Firebase save is in-flight until it resolves. The listener
-  // skips remote applies while this is set so a slow save can't be raced by old data.
+  // Multiple saves can overlap during rapid typing. Track a count so an older
+  // request finishing cannot incorrectly mark a newer in-flight request as idle.
   const pendingLocalSaveRef = useRef(false);
+  const inFlightSaveCountRef = useRef(0);
+  const checklistSourceSnapshotRef = useRef({ workspaceId: null, sourceIds: new Set() });
+  const beginCloudSave = () => {
+    inFlightSaveCountRef.current += 1;
+    pendingLocalSaveRef.current = true;
+  };
+  const finishCloudSave = () => {
+    inFlightSaveCountRef.current = Math.max(0, inFlightSaveCountRef.current - 1);
+    pendingLocalSaveRef.current = inFlightSaveCountRef.current > 0;
+  };
+
   // If a Firebase-listed workspace cannot be loaded, show an error page but never
   // persist that placeholder back over the real cloud record.
   const skipPersistenceWorkspaceRef = useRef(null);
@@ -1940,6 +1990,33 @@ function App() {
   // that contaminated workspaces with each other's pages). Updated only when a
   // workspace's content is actually rendered.
   const loadedWorkspaceIdRef = useRef(null);
+  const activeWorkspaceIdRef = useRef(activeLocalWorkspaceId);
+  activeWorkspaceIdRef.current = activeLocalWorkspaceId;
+
+  useEffect(() => {
+    if (!activeLocalWorkspaceId || !data?.pages || isWorkspaceUnavailableData(data)) return;
+    if (authUser?.uid && loadedWorkspaceIdRef.current !== activeLocalWorkspaceId) return;
+    const currentSourceIds = new Set();
+    Object.values(data.pages).forEach((page) => {
+      (page?.blocks || []).forEach((block) => {
+        if (block?.type !== "checklist" || !Array.isArray(block.items)) return;
+        block.items.forEach((item) => {
+          if (item?.id) currentSourceIds.add(`${activeLocalWorkspaceId}:${page.id}:${item.id}`);
+        });
+      });
+    });
+    const previous = checklistSourceSnapshotRef.current;
+    if (previous.workspaceId === activeLocalWorkspaceId) {
+      const removedSourceIds = [...previous.sourceIds].filter((sourceId) => !currentSourceIds.has(sourceId));
+      if (removedSourceIds.length) {
+        window.WaultFocusCleanup?.deleteSourceTasks?.(removedSourceIds, {
+          fb: window.WorkspaceFirebaseSync,
+          uid: authUser?.uid || "",
+        });
+      }
+    }
+    checklistSourceSnapshotRef.current = { workspaceId: activeLocalWorkspaceId, sourceIds: currentSourceIds };
+  }, [data, activeLocalWorkspaceId, authUser?.uid]);
   // Tracks whether the very first cold workspace load has completed, so the
   // full-screen "Opening workspace" gate only ever shows once (never on switch).
   const initialContentLoadDoneRef = useRef(false);
@@ -2094,10 +2171,18 @@ function App() {
       const unsubscribe = firebaseSync.onWorkspaceUpdate(workspaceId, (remoteRecord) => {
         // remoteRecord = { workspace: {...}, updated_at: "...", source: "firebase" }
         if (!remoteRecord?.workspace) return;
+        // A queued listener callback can arrive after a workspace switch even
+        // after unsubscribe. It must never update the refs or UI for the newly
+        // active workspace with the previous workspace's record.
+        const currentContext = window.WaultReliability?.workspaceContextMatches
+          ? window.WaultReliability.workspaceContextMatches(workspaceId, activeWorkspaceIdRef.current, loadedWorkspaceIdRef.current)
+          : (activeWorkspaceIdRef.current === workspaceId && loadedWorkspaceIdRef.current === workspaceId);
+        if (cancelled || !currentContext) return;
 
         // Skip updates that originated from this browser session (echo prevention)
         if (remoteRecord.saveId && remoteRecord.saveId === localSaveIdRef.current) {
           if (remoteRecord.updated_at) lastRemoteUpdatedAtRef.current = remoteRecord.updated_at;
+          lastRemoteRevisionRef.current = Number(remoteRecord.revision || lastRemoteRevisionRef.current || 0);
           console.log('ℹ️ Skipping own Firebase echo (session ID match)');
           return;
         }
@@ -2120,7 +2205,7 @@ function App() {
           // creates a new state object (≠ this ref), signalling unsaved edits.
           // We skip the remote apply so the user's typing isn't clobbered; the
           // save debounce (200 ms) will push the local version to Firebase shortly.
-          if (current !== lastRemoteDataRef.current) {
+          if (!workspaceDataEqual(current, lastRemoteDataRef.current)) {
             console.log('⏳ Skipping Firebase update — local edits pending save');
             return current;
           }
@@ -2163,6 +2248,7 @@ function App() {
           // and so future listener fires can compare against it to detect local edits.
           lastRemoteDataRef.current = next;
           lastRemoteUpdatedAtRef.current = remoteRecord.updated_at || new Date().toISOString();
+          lastRemoteRevisionRef.current = Number(remoteRecord.revision || 0);
           cloudPreviewWorkspaceRef.current = null;
           cloudPreviewDataRef.current = null;
           loadedWorkspaceIdRef.current = workspaceId;
@@ -2208,6 +2294,7 @@ function App() {
         if (skipPersistenceWorkspaceRef.current === workspaceId) skipPersistenceWorkspaceRef.current = null;
         lastRemoteDataRef.current = null;     // local cache is not a confirmed remote base
         lastRemoteUpdatedAtRef.current = "";
+        lastRemoteRevisionRef.current = 0;
         cloudPreviewWorkspaceRef.current = workspaceId;
         cloudPreviewDataRef.current = cached;
         loadedWorkspaceIdRef.current = null;
@@ -2230,7 +2317,7 @@ function App() {
             firebaseSync.loadWorkspaceDraft ? await firebaseSync.loadWorkspaceDraft(workspaceId) : null
           );
           const indexedDraft = normalizeIndexedWorkspaceBackup(workspaceId, await readLatestIndexedWorkspaceBackup(workspaceId));
-          const replayDraft = newestReplayableDraft(remoteUpdatedAt, pending, cloudDraft, indexedDraft);
+          const replayDraft = newestReplayableDraft(remoteUpdatedAt, Number(firebaseRecord.revision || 0), pending, cloudDraft, indexedDraft);
           const replayPending = !!replayDraft;
           if (pending && !replayPending && (Date.parse(pending.savedAt) || 0) <= (Date.parse(remoteUpdatedAt) || 0)) {
             clearPendingWorkspaceDraft(workspaceId);
@@ -2243,6 +2330,7 @@ function App() {
           cloudPreviewDataRef.current = null;
           loadedWorkspaceIdRef.current = workspaceId;
           lastRemoteUpdatedAtRef.current = remoteUpdatedAt;
+          lastRemoteRevisionRef.current = Number(firebaseRecord.revision || 0);
           lastRemoteDataRef.current = loaded;
           const rendered = replayPending ? restoreRememberedPage(workspaceId, normalizeWorkspaceData(replayDraft.data)) : loaded;
           setData(rendered);
@@ -2267,7 +2355,7 @@ function App() {
           firebaseSync.loadWorkspaceDraft ? await firebaseSync.loadWorkspaceDraft(workspaceId) : null
         );
         const indexedDraft = normalizeIndexedWorkspaceBackup(workspaceId, await readLatestIndexedWorkspaceBackup(workspaceId));
-        const fallbackDraft = newestReplayableDraft("", cloudDraft, indexedDraft);
+        const fallbackDraft = newestReplayableDraft("", null, cloudDraft, indexedDraft);
         if (fallbackDraft?.data?.pages) {
           const restored = restoreRememberedPage(workspaceId, normalizeWorkspaceData(fallbackDraft.data));
           if (skipPersistenceWorkspaceRef.current === workspaceId) skipPersistenceWorkspaceRef.current = null;
@@ -2276,7 +2364,8 @@ function App() {
           loadedWorkspaceIdRef.current = workspaceId;
           lastRemoteDataRef.current = null;
           lastRemoteUpdatedAtRef.current = fallbackDraft.baseUpdatedAt || "";
-          writePendingWorkspaceDraft(workspaceId, restored, fallbackDraft.baseUpdatedAt || "");
+          lastRemoteRevisionRef.current = Number(fallbackDraft.baseRevision || 0);
+          writePendingWorkspaceDraft(workspaceId, restored, fallbackDraft.baseUpdatedAt || "", fallbackDraft.baseRevision || 0);
           setData(restored);
           try {
             localStorage.setItem(localWorkspaceDataKey(workspaceId), JSON.stringify(restored));
@@ -2301,6 +2390,7 @@ function App() {
         );
         lastRemoteDataRef.current = unavailable;
         lastRemoteUpdatedAtRef.current = "";
+        lastRemoteRevisionRef.current = 0;
         cloudPreviewWorkspaceRef.current = null;
         cloudPreviewDataRef.current = null;
         loadedWorkspaceIdRef.current = null;
@@ -2337,9 +2427,11 @@ function App() {
       // local-edit guard think there are always pending edits in the new workspace.
       lastRemoteDataRef.current = null;
       lastRemoteUpdatedAtRef.current = "";
+      lastRemoteRevisionRef.current = 0;
       cloudPreviewWorkspaceRef.current = null;
       cloudPreviewDataRef.current = null;
       pendingLocalSaveRef.current = false;
+      inFlightSaveCountRef.current = 0;
       loadedWorkspaceIdRef.current = null;
 
       // ── Step 1: get or initialise the Firebase sync object ─────────────────
@@ -2503,7 +2595,6 @@ function App() {
       setSyncState((s) => ({
         ...s,
         workspaces: nextList,
-        firebaseStatus: "Team catalogue loaded",
       }));
       setCloudCatalogueReady(true);
 
@@ -2563,7 +2654,7 @@ function App() {
       activeLocalWorkspaceId &&
       data?.pages &&
       !isWorkspaceUnavailableData(data) &&
-      data !== lastRemoteDataRef.current
+      !workspaceDataEqual(data, lastRemoteDataRef.current)
     );
     const uneditedCloudPreview = !!(
       authUser &&
@@ -2571,9 +2662,14 @@ function App() {
       data === cloudPreviewDataRef.current
     );
     if (signedInUnsynced && !uneditedCloudPreview) {
-      writePendingWorkspaceDraft(activeLocalWorkspaceId, data, lastRemoteUpdatedAtRef.current || "");
-      const backup = writeLocalAutoBackup(activeLocalWorkspaceId, data, "pending-cloud-save");
-      if (backup) setSyncState((s) => ({ ...s, backupStatus: `Safety backup ${new Date(backup.createdAt).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}` }));
+      writePendingWorkspaceDraft(activeLocalWorkspaceId, data, lastRemoteUpdatedAtRef.current || "", lastRemoteRevisionRef.current || 0);
+      try {
+        const backup = writeLocalAutoBackup(activeLocalWorkspaceId, data, "pending-cloud-save");
+        if (backup) setSyncState((s) => ({ ...s, backupStatus: `Safety backup ${new Date(backup.createdAt).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}` }));
+      } catch (error) {
+        console.warn("⚠️ Local rolling backup failed; Firebase save will continue:", error.message);
+        setSyncState((s) => ({ ...s, backupStatus: "Local backup failed — cloud save continuing" }));
+      }
     }
     // ── Switch-race guard (prevents cross-workspace page contamination) ────────
     // When signed in, `data` must belong to the active workspace before we persist
@@ -2593,14 +2689,15 @@ function App() {
       return;
     }
     try {
-      const local = persistWorkspaceLocallyNow(activeLocalWorkspaceId, data, signedInUnsynced ? "instant-pending-cloud-save" : "instant-local-save", lastRemoteUpdatedAtRef.current || "");
+      const local = persistWorkspaceLocallyNow(activeLocalWorkspaceId, data, signedInUnsynced ? "instant-pending-cloud-save" : "instant-local-save", lastRemoteUpdatedAtRef.current || "", lastRemoteRevisionRef.current || 0);
       if (!window.WorkspaceStore?.canSave() && local.workspaces) setLocalWorkspaces(local.workspaces);
       if (local.backup) setSyncState((s) => ({ ...s, backupStatus: `Safety backup ${new Date(local.backup.createdAt).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}` }));
     } catch {}
     if (signedInUnsynced && !uneditedCloudPreview && window.WorkspaceFirebaseSync?.saveWorkspaceDraft) {
       const baseUpdatedAt = lastRemoteUpdatedAtRef.current || "";
+      const baseRevision = lastRemoteRevisionRef.current || 0;
       draftSaveTimer.current = setTimeout(() => {
-        window.WorkspaceFirebaseSync.saveWorkspaceDraft(activeLocalWorkspaceId, data, localSaveIdRef.current, { baseUpdatedAt })
+        window.WorkspaceFirebaseSync.saveWorkspaceDraft(activeLocalWorkspaceId, data, localSaveIdRef.current, { baseUpdatedAt, baseRevision })
           .then((saved) => {
             if (saved) setSyncState((s) => ({ ...s, backupStatus: `Cloud safety draft ${new Date(saved.saved_at).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}` }));
           })
@@ -2609,17 +2706,16 @@ function App() {
     }
     saveTimer.current = setTimeout(() => {
       try {
-        const local = persistWorkspaceLocallyNow(activeLocalWorkspaceId, data, "autosave", lastRemoteUpdatedAtRef.current || "");
+        const local = persistWorkspaceLocallyNow(activeLocalWorkspaceId, data, "autosave", lastRemoteUpdatedAtRef.current || "", lastRemoteRevisionRef.current || 0);
         if (!window.WorkspaceStore?.canSave() && local.workspaces) setLocalWorkspaces(local.workspaces);
       } catch {}
 
       // ── Remote-apply guard ──────────────────────────────────────────────
-      // If this `data` is the exact object we just applied FROM a remote Firebase
-      // update, do NOT push it back to the cloud (that caused the infinite
-      // A→B→A re-save loop). localStorage above still ran, so the local cache is
-      // fresh. Any real local edit produces a new object and pushes normally.
-      if (data === lastRemoteDataRef.current) {
-        console.log('ℹ️ Skipping cloud re-push of remote-applied data (loop guard)');
+      // Do not push data that is semantically identical to the confirmed Firebase
+      // snapshot. A workspace switch can create a fresh object without changing
+      // content; treating that as an edit creates no-op versions and collision risk.
+      if (workspaceDataEqual(data, lastRemoteDataRef.current)) {
+        console.log('ℹ️ Skipping unchanged cloud data (loop guard)');
         return;
       }
 
@@ -2634,63 +2730,81 @@ function App() {
       if (window.WorkspaceFirebaseSync?.saveWorkspace) {
         // Mark save in-flight so the listener skips any incoming remote updates
         // that race against this save (old data from another session/tab).
-        pendingLocalSaveRef.current = true;
+        let cloudSaveCountReleased = false;
+        beginCloudSave();
         setSyncState((s) => ({ ...s, error: "", firebaseStatus: "Saving to cloud…" }));
         const activeWorkspaceMeta = (readJson(LOCAL_WORKSPACES_KEY, []) || []).find((workspace) => workspace.id === activeLocalWorkspaceId) || {};
+        const savingWorkspaceId = activeLocalWorkspaceId;
+        const savedSnapshot = data;
+        const baseData = lastRemoteDataRef.current;
         const baseUpdatedAt = lastRemoteUpdatedAtRef.current || "";
-        window.WorkspaceFirebaseSync.saveWorkspace(activeLocalWorkspaceId, data, localSaveIdRef.current, {
-          name: activeWorkspaceMeta.name || activeLocalWorkspaceId,
+        const baseRevision = lastRemoteRevisionRef.current || 0;
+        window.WorkspaceFirebaseSync.saveWorkspace(savingWorkspaceId, savedSnapshot, localSaveIdRef.current, {
+          name: activeWorkspaceMeta.name || savingWorkspaceId,
           visibility: activeWorkspaceMeta.visibility || "shared",
           ownerUid: activeWorkspaceMeta.ownerUid || "",
           ownerEmail: activeWorkspaceMeta.ownerEmail || "",
           baseUpdatedAt,
+          baseRevision,
         })
-          .then(async (saved) => {
+          .then((saved) => {
+            finishCloudSave();
+            cloudSaveCountReleased = true;
             if (!firebaseSaveSucceeded(saved)) {
-              pendingLocalSaveRef.current = false;
-              if (authUser && window.WorkspaceFirebaseSync?.loadWorkspace && baseUpdatedAt) {
-                try {
-                  const rec = await window.WorkspaceFirebaseSync.loadWorkspace(activeLocalWorkspaceId);
-                  if (rec?.workspace && latestSaveRef.current?.ws === activeLocalWorkspaceId) {
-                    const remote = restoreRememberedPage(activeLocalWorkspaceId, normalizeWorkspaceData(rec.workspace));
-                    setData((current) => {
-                      const next = { ...remote, currentPageId: current.currentPageId };
-                      lastRemoteDataRef.current = next;
-                      lastRemoteUpdatedAtRef.current = rec.updated_at || new Date().toISOString();
-                      cloudPreviewWorkspaceRef.current = null;
-                      loadedWorkspaceIdRef.current = activeLocalWorkspaceId;
-                      try {
-                        localStorage.setItem(localWorkspaceDataKey(activeLocalWorkspaceId), JSON.stringify(next));
-                        localStorage.setItem(`${activeLocalWorkspaceId}_local_saved_at`, lastRemoteUpdatedAtRef.current);
-                      } catch {}
-                      return next;
-                    });
-                    setSyncState((s) => ({ ...s, firebaseStatus: "Loaded newer Firebase revision" }));
-                    return;
-                  }
-                } catch {}
+              const remoteRecord = saved?.reason === "stale_revision" ? saved.remote : null;
+              const latest = latestSaveRef.current;
+              if (remoteRecord?.workspace && latest?.ws === savingWorkspaceId) {
+                const localLatest = latest.data || savedSnapshot;
+                const remote = normalizeWorkspaceData(remoteRecord.workspace);
+                const currentPageId = localLatest.currentPageId;
+                const remoteBase = { ...remote, currentPageId };
+                const merged = { ...mergeWorkspaceConflict(baseData, localLatest, remoteBase), currentPageId };
+                lastRemoteDataRef.current = remoteBase;
+                lastRemoteUpdatedAtRef.current = remoteRecord.updated_at || new Date().toISOString();
+                lastRemoteRevisionRef.current = Number(remoteRecord.revision || 0);
+                cloudPreviewWorkspaceRef.current = null;
+                cloudPreviewDataRef.current = null;
+                loadedWorkspaceIdRef.current = savingWorkspaceId;
+                writePendingWorkspaceDraft(savingWorkspaceId, merged, lastRemoteUpdatedAtRef.current, lastRemoteRevisionRef.current);
+                try { persistWorkspaceLocallyNow(savingWorkspaceId, merged, "merged-concurrent-save", lastRemoteUpdatedAtRef.current, lastRemoteRevisionRef.current); } catch {}
+                setData(merged);
+                setSyncState((s) => ({ ...s, error: "", firebaseStatus: "Merged teammate changes — saving…" }));
+                return;
               }
-              setSyncState((s) => ({ ...s, error: firebaseSaveFailureMessage(saved), firebaseStatus: firebaseSaveFailureMessage(saved, authUser ? 'Cloud sync failed' : 'Sign in to sync') }));
+              if (activeWorkspaceIdRef.current === savingWorkspaceId) {
+                setSyncState((s) => ({ ...s, error: firebaseSaveFailureMessage(saved), firebaseStatus: firebaseSaveFailureMessage(saved, authUser ? 'Cloud sync failed' : 'Sign in to sync') }));
+              }
               return;
             }
-            // Save confirmed: update the remote base to the current state so
-            // the listener's local-edit guard works correctly for future updates.
-            // latestSaveRef.current.data tracks the latest render's data (may be
-            // ahead of `data` if the user kept typing during the async save).
-            lastRemoteDataRef.current = latestSaveRef.current?.data ?? data;
-            lastRemoteUpdatedAtRef.current = saved.updated_at || new Date().toISOString();
-            cloudPreviewWorkspaceRef.current = null;
-            cloudPreviewDataRef.current = null;
-            clearPendingWorkspaceDraft(activeLocalWorkspaceId);
-            window.WorkspaceFirebaseSync?.clearWorkspaceDraft?.(activeLocalWorkspaceId);
-            pendingLocalSaveRef.current = false;
+            const latest = latestSaveRef.current;
+            const stillViewingSavedWorkspace = latest?.ws === savingWorkspaceId;
+            if (stillViewingSavedWorkspace && Number(saved.revision || 0) >= lastRemoteRevisionRef.current) {
+              // Only the exact snapshot acknowledged by Firebase becomes the remote
+              // base. A newer render must remain pending and receive its own save.
+              lastRemoteDataRef.current = savedSnapshot;
+              lastRemoteUpdatedAtRef.current = saved.updated_at || new Date().toISOString();
+              lastRemoteRevisionRef.current = Number(saved.revision || 0);
+              cloudPreviewWorkspaceRef.current = null;
+              cloudPreviewDataRef.current = null;
+            }
+            const acknowledgedLatest = window.WaultReliability?.shouldFinalizeAcknowledgedSave
+              ? window.WaultReliability.shouldFinalizeAcknowledgedSave(savedSnapshot, latest, savingWorkspaceId)
+              : (latest?.ws === savingWorkspaceId && latest?.data === savedSnapshot);
+            if (acknowledgedLatest) {
+              clearPendingWorkspaceDraft(savingWorkspaceId);
+              window.WorkspaceFirebaseSync?.clearWorkspaceDraft?.(savingWorkspaceId);
+            }
             console.log('✅ Saved to Firebase');
-            setSyncState((s) => ({ ...s, firebaseStatus: 'Synced to cloud ✓' }));
+            if (stillViewingSavedWorkspace) {
+              setSyncState((s) => ({ ...s, firebaseStatus: acknowledgedLatest ? 'Synced to cloud ✓' : 'Saving newer changes…' }));
+            }
           })
           .catch((err) => {
-            pendingLocalSaveRef.current = false;
+            if (!cloudSaveCountReleased) finishCloudSave();
             console.warn('⚠️ Firebase save failed (non-blocking):', err.message);
-            setSyncState((s) => ({ ...s, firebaseStatus: 'Cloud sync failed' }));
+            if (activeWorkspaceIdRef.current === savingWorkspaceId) {
+              setSyncState((s) => ({ ...s, firebaseStatus: 'Cloud sync failed' }));
+            }
           });
       }
     }, FIREBASE_CANONICAL_SAVE_DELAY_MS);
@@ -2712,10 +2826,13 @@ function App() {
       try {
         const { data: d, ws } = latestSaveRef.current;
         if (skipPersistenceWorkspaceRef.current === ws) return;
-        persistWorkspaceLocallyNow(ws, d, "pagehide-pending-cloud-save", lastRemoteUpdatedAtRef.current || "");
-        if (authUser?.uid && d?.pages && d !== lastRemoteDataRef.current && !isWorkspaceUnavailableData(d)) {
-          writePendingWorkspaceDraft(ws, d, lastRemoteUpdatedAtRef.current || "");
-          window.WorkspaceFirebaseSync?.saveWorkspaceDraft?.(ws, d, localSaveIdRef.current, { baseUpdatedAt: lastRemoteUpdatedAtRef.current || "" });
+        persistWorkspaceLocallyNow(ws, d, "pagehide-pending-cloud-save", lastRemoteUpdatedAtRef.current || "", lastRemoteRevisionRef.current || 0);
+        if (authUser?.uid && d?.pages && !workspaceDataEqual(d, lastRemoteDataRef.current) && !isWorkspaceUnavailableData(d)) {
+          writePendingWorkspaceDraft(ws, d, lastRemoteUpdatedAtRef.current || "", lastRemoteRevisionRef.current || 0);
+          window.WorkspaceFirebaseSync?.saveWorkspaceDraft?.(ws, d, localSaveIdRef.current, {
+            baseUpdatedAt: lastRemoteUpdatedAtRef.current || "",
+            baseRevision: lastRemoteRevisionRef.current || 0,
+          });
         }
       } catch {}
     };
@@ -2758,28 +2875,61 @@ function App() {
       // (1) Un-pushed local edits (e.g. a prior save failed) → re-push so the cloud
       //     and the listener's local-edit guard re-sync. We push OUR data, so no
       //     local work is lost.
-      if (cur !== lastRemoteDataRef.current) {
+      if (!workspaceDataEqual(cur, lastRemoteDataRef.current)) {
+        let catchUpSaveInFlight = false;
         try {
-          pendingLocalSaveRef.current = true;
+          beginCloudSave();
+          catchUpSaveInFlight = true;
+          const baseData = lastRemoteDataRef.current;
+          const baseUpdatedAt = lastRemoteUpdatedAtRef.current || "";
+          const baseRevision = lastRemoteRevisionRef.current || 0;
           const meta = (readJson(LOCAL_WORKSPACES_KEY, []) || []).find((w) => w.id === activeLocalWorkspaceId) || {};
           const ok = await fb.saveWorkspace(activeLocalWorkspaceId, cur, localSaveIdRef.current, {
             name: meta.name || activeLocalWorkspaceId,
             visibility: meta.visibility || "shared",
             ownerUid: meta.ownerUid || "",
             ownerEmail: meta.ownerEmail || "",
-            baseUpdatedAt: lastRemoteUpdatedAtRef.current || "",
+            baseUpdatedAt,
+            baseRevision,
           });
-          pendingLocalSaveRef.current = false;
+          finishCloudSave();
+          catchUpSaveInFlight = false;
           if (firebaseSaveSucceeded(ok) && !cancelled) {
-            lastRemoteDataRef.current = latestSaveRef.current?.data ?? cur;
+            lastRemoteDataRef.current = cur;
             lastRemoteUpdatedAtRef.current = ok.updated_at || new Date().toISOString();
+            lastRemoteRevisionRef.current = Number(ok.revision || 0);
             cloudPreviewWorkspaceRef.current = null;
             cloudPreviewDataRef.current = null;
-            clearPendingWorkspaceDraft(activeLocalWorkspaceId);
-            fb.clearWorkspaceDraft?.(activeLocalWorkspaceId);
-            setSyncState((s) => ({ ...s, firebaseStatus: "Synced to cloud ✓" }));
+            const latest = latestSaveRef.current;
+            const acknowledgedLatest = window.WaultReliability?.shouldFinalizeAcknowledgedSave
+              ? window.WaultReliability.shouldFinalizeAcknowledgedSave(cur, latest, activeLocalWorkspaceId)
+              : (latest?.ws === activeLocalWorkspaceId && latest?.data === cur);
+            if (acknowledgedLatest) {
+              clearPendingWorkspaceDraft(activeLocalWorkspaceId);
+              fb.clearWorkspaceDraft?.(activeLocalWorkspaceId);
+            }
+            setSyncState((s) => ({ ...s, firebaseStatus: acknowledgedLatest ? "Synced to cloud ✓" : "Saving newer changes…" }));
+          } else if (ok?.reason === "stale_revision" && ok.remote?.workspace && !cancelled) {
+            const latest = latestSaveRef.current;
+            const localLatest = latest?.ws === activeLocalWorkspaceId ? latest.data : cur;
+            const remote = normalizeWorkspaceData(ok.remote.workspace);
+            const currentPageId = localLatest.currentPageId;
+            const remoteBase = { ...remote, currentPageId };
+            const merged = { ...mergeWorkspaceConflict(baseData, localLatest, remoteBase), currentPageId };
+            lastRemoteDataRef.current = remoteBase;
+            lastRemoteUpdatedAtRef.current = ok.remote.updated_at || new Date().toISOString();
+            lastRemoteRevisionRef.current = Number(ok.remote.revision || 0);
+            writePendingWorkspaceDraft(activeLocalWorkspaceId, merged, lastRemoteUpdatedAtRef.current, lastRemoteRevisionRef.current);
+            try { persistWorkspaceLocallyNow(activeLocalWorkspaceId, merged, "catch-up-conflict-merge", lastRemoteUpdatedAtRef.current, lastRemoteRevisionRef.current); } catch {}
+            setData(merged);
+            setSyncState((s) => ({ ...s, error: "", firebaseStatus: "Merged teammate changes — saving…" }));
+          } else if (!cancelled) {
+            setSyncState((s) => ({ ...s, error: firebaseSaveFailureMessage(ok), firebaseStatus: firebaseSaveFailureMessage(ok) }));
           }
-        } catch { pendingLocalSaveRef.current = false; }
+        } catch {
+          if (catchUpSaveInFlight) finishCloudSave();
+          if (!cancelled) setSyncState((s) => ({ ...s, firebaseStatus: "Cloud sync failed" }));
+        }
         return;
       }
 
@@ -2791,11 +2941,12 @@ function App() {
         if (rec.saveId && rec.saveId === localSaveIdRef.current) return; // our own latest write
         const remote = normalizeWorkspaceData(rec.workspace);
         setData((current) => {
-          if (current !== lastRemoteDataRef.current) return current; // a local edit started — abort
+          if (!workspaceDataEqual(current, lastRemoteDataRef.current)) return current; // a local edit started — abort
           const next = { ...remote, currentPageId: current.currentPageId };
           if (JSON.stringify(next) === JSON.stringify(current)) return current; // nothing new
           lastRemoteDataRef.current = next;
           lastRemoteUpdatedAtRef.current = rec.updated_at || new Date().toISOString();
+          lastRemoteRevisionRef.current = Number(rec.revision || 0);
           cloudPreviewWorkspaceRef.current = null;
           loadedWorkspaceIdRef.current = activeLocalWorkspaceId;
           try {
@@ -2860,7 +3011,7 @@ function App() {
           lastRemoteDataRef.current = next;
           lastRemoteUpdatedAtRef.current = rec.updated_at || new Date().toISOString();
           setData(next);
-          persistWorkspaceLocallyNow(activeLocalWorkspaceId, next, "restored-version", lastRemoteUpdatedAtRef.current);
+          persistWorkspaceLocallyNow(activeLocalWorkspaceId, next, "restored-version", lastRemoteUpdatedAtRef.current, lastRemoteRevisionRef.current);
         }
         setSyncState((s) => ({ ...s, error: "", firebaseStatus: "Saved ✓" }));
         return true;
@@ -2906,39 +3057,74 @@ function App() {
     const before = latestSaveRef.current?.data || data;
     const removed = removeChecklistItemFromWorkspaceData(before, pageId, itemId);
     if (!removed.found) return true;
-    const nextData = removed.data;
+    let nextData = removed.data;
+    let baseData = lastRemoteDataRef.current;
+    let baseUpdatedAt = lastRemoteUpdatedAtRef.current || "";
+    let baseRevision = lastRemoteRevisionRef.current || 0;
+    latestSaveRef.current = { data: nextData, ws: activeLocalWorkspaceId };
     setData(nextData);
     try {
-      persistWorkspaceLocallyNow(activeLocalWorkspaceId, nextData, "focus-linked-task-delete", lastRemoteUpdatedAtRef.current || "");
+      persistWorkspaceLocallyNow(activeLocalWorkspaceId, nextData, "focus-linked-task-delete", lastRemoteUpdatedAtRef.current || "", lastRemoteRevisionRef.current || 0);
     } catch {}
     if (!(authUser?.uid && userAccess && window.WorkspaceFirebaseSync?.saveWorkspace)) return true;
 
+    let deleteSaveInFlight = false;
     try {
-      pendingLocalSaveRef.current = true;
       const activeWorkspaceMeta = (readJson(LOCAL_WORKSPACES_KEY, []) || []).find((workspace) => workspace.id === activeLocalWorkspaceId) || {};
-      const saved = await window.WorkspaceFirebaseSync.saveWorkspace(activeLocalWorkspaceId, nextData, localSaveIdRef.current, {
-        name: activeWorkspaceMeta.name || activeLocalWorkspaceId,
-        visibility: activeWorkspaceMeta.visibility || "shared",
-        ownerUid: activeWorkspaceMeta.ownerUid || "",
-        ownerEmail: activeWorkspaceMeta.ownerEmail || "",
-        baseUpdatedAt: lastRemoteUpdatedAtRef.current || "",
-          });
-      pendingLocalSaveRef.current = false;
-      if (!firebaseSaveSucceeded(saved)) {
-        setData(before);
-        setSyncState((s) => ({ ...s, error: firebaseSaveFailureMessage(saved), firebaseStatus: firebaseSaveFailureMessage(saved, "Task delete failed") }));
-        return false;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        beginCloudSave();
+        deleteSaveInFlight = true;
+        const saved = await window.WorkspaceFirebaseSync.saveWorkspace(activeLocalWorkspaceId, nextData, localSaveIdRef.current, {
+          name: activeWorkspaceMeta.name || activeLocalWorkspaceId,
+          visibility: activeWorkspaceMeta.visibility || "shared",
+          ownerUid: activeWorkspaceMeta.ownerUid || "",
+          ownerEmail: activeWorkspaceMeta.ownerEmail || "",
+          baseUpdatedAt,
+          baseRevision,
+        });
+        finishCloudSave();
+        deleteSaveInFlight = false;
+        if (firebaseSaveSucceeded(saved)) {
+          lastRemoteDataRef.current = nextData;
+          lastRemoteUpdatedAtRef.current = saved.updated_at || new Date().toISOString();
+          lastRemoteRevisionRef.current = Number(saved.revision || 0);
+          cloudPreviewWorkspaceRef.current = null;
+          cloudPreviewDataRef.current = null;
+          const latest = latestSaveRef.current;
+          const acknowledgedLatest = window.WaultReliability?.shouldFinalizeAcknowledgedSave
+            ? window.WaultReliability.shouldFinalizeAcknowledgedSave(nextData, latest, activeLocalWorkspaceId)
+            : (latest?.ws === activeLocalWorkspaceId && latest?.data === nextData);
+          if (acknowledgedLatest) {
+            clearPendingWorkspaceDraft(activeLocalWorkspaceId);
+            window.WorkspaceFirebaseSync?.clearWorkspaceDraft?.(activeLocalWorkspaceId);
+          }
+          setSyncState((s) => ({ ...s, error: "", firebaseStatus: acknowledgedLatest ? "Synced to cloud ✓" : "Saving newer changes…" }));
+          return true;
+        }
+        if (saved?.reason !== "stale_revision" || !saved.remote?.workspace) {
+          setSyncState((s) => ({ ...s, error: firebaseSaveFailureMessage(saved), firebaseStatus: firebaseSaveFailureMessage(saved, "Task delete failed") }));
+          return false;
+        }
+
+        const remote = normalizeWorkspaceData(saved.remote.workspace);
+        const currentPageId = nextData.currentPageId;
+        const remoteBase = { ...remote, currentPageId };
+        nextData = { ...mergeWorkspaceConflict(baseData, nextData, remoteBase), currentPageId };
+        baseData = remoteBase;
+        baseUpdatedAt = saved.remote.updated_at || new Date().toISOString();
+        baseRevision = Number(saved.remote.revision || 0);
+        lastRemoteDataRef.current = remoteBase;
+        lastRemoteUpdatedAtRef.current = baseUpdatedAt;
+        lastRemoteRevisionRef.current = baseRevision;
+        writePendingWorkspaceDraft(activeLocalWorkspaceId, nextData, baseUpdatedAt, baseRevision);
+        try { persistWorkspaceLocallyNow(activeLocalWorkspaceId, nextData, "focus-delete-conflict-merge", baseUpdatedAt, baseRevision); } catch {}
+        latestSaveRef.current = { data: nextData, ws: activeLocalWorkspaceId };
+        setData(nextData);
       }
-      lastRemoteDataRef.current = nextData;
-      lastRemoteUpdatedAtRef.current = saved.updated_at || new Date().toISOString();
-      cloudPreviewWorkspaceRef.current = null;
-      cloudPreviewDataRef.current = null;
-      clearPendingWorkspaceDraft(activeLocalWorkspaceId);
-      setSyncState((s) => ({ ...s, firebaseStatus: "Synced to cloud ✓" }));
-      return true;
+      setSyncState((s) => ({ ...s, error: "Task delete hit repeated concurrent edits.", firebaseStatus: "Task delete pending retry" }));
+      return false;
     } catch (err) {
-      pendingLocalSaveRef.current = false;
-      setData(before);
+      if (deleteSaveInFlight) finishCloudSave();
       console.warn("⚠️ Checklist item delete failed:", err.message);
       setSyncState((s) => ({ ...s, firebaseStatus: "Task delete failed" }));
       return false;
@@ -3321,6 +3507,7 @@ function App() {
         skipPersistenceWorkspaceRef.current = null;
         lastRemoteDataRef.current = defaultData;
         lastRemoteUpdatedAtRef.current = saved.updated_at || nowIso;
+        lastRemoteRevisionRef.current = Number(saved.revision || 0);
         cloudPreviewWorkspaceRef.current = null;
         cloudPreviewDataRef.current = null;
         clearPendingWorkspaceDraft(id);
@@ -3453,6 +3640,7 @@ function App() {
     localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, nextActive.id);
     skipPersistenceWorkspaceRef.current = id;
     pendingLocalSaveRef.current = false;
+    inFlightSaveCountRef.current = 0;
     if (loadedWorkspaceIdRef.current === id) loadedWorkspaceIdRef.current = nextActive.id;
     window.WaultFocusCleanup?.deleteWorkspaceTasks?.(id, {
       fb: window.WorkspaceFirebaseSync,
@@ -3624,13 +3812,17 @@ function App() {
       // Instant switch: render the cached copy right away (NO full-screen gate).
       // Changing activeLocalWorkspaceId re-runs the Firebase init effect, which
       // refreshes this workspace from the cloud and attaches the live listener.
+      // Lock persistence immediately, even when this browser has no cache for the
+      // destination. Otherwise a queued listener from the previous workspace can
+      // briefly treat its old content as belonging to the new workspace.
+      loadedWorkspaceIdRef.current = null;
       const cachedRaw = readJson(localWorkspaceDataKey(id), null);
       if (cachedRaw && cachedRaw.pages && !isWorkspaceUnavailableData(cachedRaw)) {
         if (skipPersistenceWorkspaceRef.current === id) skipPersistenceWorkspaceRef.current = null;
         lastRemoteDataRef.current = null;       // cache is not a confirmed remote base
         lastRemoteUpdatedAtRef.current = "";
+        lastRemoteRevisionRef.current = 0;
         cloudPreviewWorkspaceRef.current = id;
-        loadedWorkspaceIdRef.current = null;     // Firebase load is the only thing that unlocks autosave
         setData(restoreRememberedPage(id, normalizeWorkspaceData(cachedRaw)));
       }
       return;
@@ -3709,10 +3901,10 @@ function App() {
   const configured = window.WorkspaceStore?.isConfigured();
   const activeWorkspaceMeta = (localWorkspaces || []).find((workspace) => workspace.id === activeLocalWorkspaceId) || {};
   const cloudWorkspaceAllowed = !!(authUser?.uid && userAccess && !firebaseAccessDenied);
-  const canCreateWorkspace = cloudWorkspaceAllowed || (!configured || syncState.role === "owner" || syncState.role === "admin");
-  const canManageActiveWorkspace = cloudWorkspaceAllowed
+  const canCreateWorkspace = DEV_PEEK || cloudWorkspaceAllowed || (!configured || syncState.role === "owner" || syncState.role === "admin");
+  const canManageActiveWorkspace = DEV_PEEK || (cloudWorkspaceAllowed
     ? (userAccess.role === "owner" || !activeWorkspaceMeta.ownerUid || activeWorkspaceMeta.ownerUid === authUser.uid)
-    : (!configured || syncState.role === "owner" || syncState.role === "admin");
+    : (!configured || syncState.role === "owner" || syncState.role === "admin"));
   // Temporarily disabled for local testing
   // if (configured && !syncState.user) { ... }
 
