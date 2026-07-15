@@ -77,6 +77,7 @@ Completed against a temporary authenticated Firebase member and an isolated work
 - [x] Focus-to-workspace linked task delete removed both copies and survived reload.
 - [x] Workspace-to-Focus linked task delete removed both copies and survived reload.
 - [x] Workspace deletion removed the catalogue entry in both tabs and survived reload.
+- [x] Owner team directory loaded approved teammates through Firebase rules, stayed populated after Refresh, and never rendered a read failure as an empty team.
 - [x] A full database export before and after cleanup matched at every Firebase root; real workspace content, Focus, access, history, and catalogue hashes were unchanged.
 - [x] Unchanged workspace snapshots no longer create Firebase revisions, versions, or backups.
 - [x] Local UI tests are owner-scoped and cannot load real shared workspaces.

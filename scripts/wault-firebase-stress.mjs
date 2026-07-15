@@ -182,6 +182,22 @@ try {
   }), 'synthetic member access grant');
   activeDatabaseToken = syntheticAuth.idToken;
   check((await requireOk(request(`access/${testUid}`), 'member access rule readback')).data.role === 'member', 'member could not read its access record');
+  const memberDirectoryRead = await request('access');
+  check(!memberDirectoryRead.ok, 'member could read the owner-only access directory');
+  await requireOk(request(`access/${testUid}`, {
+    method: 'PUT',
+    authToken: await token(),
+    body: { email: `${testUid}@wault.test`, role: 'owner', approvedAt: now() },
+  }), 'synthetic owner promotion');
+  const ownerDirectoryRead = await requireOk(request('access'), 'owner access directory read');
+  check(ownerDirectoryRead.data?.[testUid]?.role === 'owner', 'owner could not read the approved member directory');
+  check((await requireOk(request('signins'), 'owner sign-in directory read')).ok, 'owner could not read sign-in requests');
+  check((await requireOk(request('blocked'), 'owner blocked directory read')).ok, 'owner could not read blocked accounts');
+  await requireOk(request(`access/${testUid}`, {
+    method: 'PUT',
+    authToken: await token(),
+    body: { email: `${testUid}@wault.test`, role: 'member', approvedAt: now() },
+  }), 'synthetic member role restore');
 
   await requireOk(request(paths.catalog, {
     method: 'PUT',

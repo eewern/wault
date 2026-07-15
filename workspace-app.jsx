@@ -1071,6 +1071,16 @@ function TeamAvatar({ email, name, photoURL, size }) {
   return <span style={circleStyle}>{letter}</span>;
 }
 
+function dedupeTeamMembers(list = []) {
+  const seen = new Map();
+  list.forEach((member) => {
+    const key = String(member?.email || member?.uid || '').toLowerCase();
+    if (!key) return;
+    if (!seen.has(key) || member?.role === 'owner') seen.set(key, member);
+  });
+  return [...seen.values()];
+}
+
 // ====== TEAM PANEL (compact sidebar strip) + TEAM MODAL (popup overlay) ======
 function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportData, importData, syncState, onOpenHome, homeActive }) {
   const [showModal, setShowModal] = React.useState(false);
@@ -1093,6 +1103,7 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
   const [msg, setMsg] = React.useState('');
   const [copied, setCopied] = React.useState(false);
   const [listLoaded, setListLoaded] = React.useState(false);
+  const [listRefreshing, setListRefreshing] = React.useState(false);
   // ── API Key state ──────────────────────────────────────────────────────────
   const [apiKey, setApiKey] = React.useState(null);      // null = not loaded, '' = none, 'wn_...' = has key
   const [apiKeyVisible, setApiKeyVisible] = React.useState(false);
@@ -1147,7 +1158,7 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
     }
   };
   // ── end API Key state ──────────────────────────────────────────────────────
-  const [listErr, setListErr] = React.useState(false); // true if load timed-out / rules blocked
+  const [listErr, setListErr] = React.useState('');
   const isOwner = userAccess?.role === 'owner';
 
   // Use module-level TeamAvatar (not a nested component) to avoid React remount on every render
@@ -1156,32 +1167,45 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
   const refresh = React.useCallback(async () => {
     const sync = window.WorkspaceFirebaseSync;
     if (!isOwner || !sync?.getAccessList) return;
-    setListLoaded(false); setListErr(false);
+    setListRefreshing(true); setListErr('');
     try {
-      const [list, pend, blk] = await Promise.all([
-        sync.getAccessList(),
+      const list = await sync.getAccessList();
+      setMembers(dedupeTeamMembers(list));
+      setListLoaded(true);
+      const [pendingResult, blockedResult] = await Promise.allSettled([
         sync.getPendingSignins ? sync.getPendingSignins() : Promise.resolve([]),
         sync.getBlockedUsers ? sync.getBlockedUsers() : Promise.resolve([]),
       ]);
-      // Deduplicate by email — same person can accumulate multiple UIDs across devices/sign-ins.
-      // If a duplicate is found, prefer the owner-role entry; otherwise keep the first seen.
-      const seen = new Map();
-      for (const m of (list || [])) {
-        const key = (m.email || m.uid || '').toLowerCase();
-        if (!seen.has(key) || m.role === 'owner') seen.set(key, m);
+      if (pendingResult.status === 'fulfilled') setPending(pendingResult.value || []);
+      if (blockedResult.status === 'fulfilled') setBlocked(blockedResult.value || []);
+      if (pendingResult.status === 'rejected' || blockedResult.status === 'rejected') {
+        setListErr('Approved teammates loaded, but pending or blocked accounts could not refresh.');
       }
-      setMembers([...seen.values()]);
-      setPending(pend || []);
-      setBlocked(blk || []);
-      setListLoaded(true);
     } catch (err) {
-      setListErr(true);
+      setListErr('Could not load approved teammates from Firebase. Your existing access records are still stored; retry the connection.');
       setListLoaded(true);
+    } finally {
+      setListRefreshing(false);
     }
   }, [isOwner]);
 
   // Refresh whenever the modal opens
   React.useEffect(() => { if (showModal && isOwner) refresh(); }, [showModal, refresh, isOwner]);
+
+  React.useEffect(() => {
+    const sync = window.WorkspaceFirebaseSync;
+    if (!showModal || !isOwner || !sync?.onAccessListUpdate) return undefined;
+    return sync.onAccessListUpdate((list) => {
+      setMembers(dedupeTeamMembers(list));
+      setListLoaded(true);
+      setListRefreshing(false);
+      setListErr('');
+    }, () => {
+      setListLoaded(true);
+      setListRefreshing(false);
+      setListErr('Could not keep the teammate list connected to Firebase. The saved access records were not deleted.');
+    });
+  }, [showModal, isOwner]);
 
   const grant = async (uid, email) => {
     if (!uid || !window.WorkspaceFirebaseSync?.grantAccess) return;
@@ -1263,6 +1287,7 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
     </div>
   );
   const browserApiUrl = (window.WORKSPACE_API_URL || window.location.origin || window.location.href.split(/[?#]/)[0].replace(/\/[^/]*$/, "")).replace(/\/$/, "");
+  const visibleMembers = members.filter((member) => member?.uid !== authUser?.uid);
 
   return (
     <>
@@ -1349,24 +1374,26 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
               {isOwner && (
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                    {sect(`Members${members.length > 0 ? ` (${members.length})` : ''}`)}
+                    {sect(`Members${visibleMembers.length > 0 ? ` (${visibleMembers.length})` : ''}`)}
                     <button
                       onClick={refresh}
                       style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 11, marginTop: -10, flexShrink: 0 }}
                       title="Refresh list"
-                    >↻ Refresh</button>
+                      disabled={listRefreshing}
+                    >{listRefreshing ? 'Refreshing…' : '↻ Refresh'}</button>
                   </div>
-                  {!listLoaded ? (
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: '16px 0' }}>Loading…</div>
-                  ) : listErr ? (
-                    <div style={{ fontSize: 12, color: '#f5a623', background: 'rgba(245,166,35,0.07)', border: '1px solid rgba(245,166,35,0.18)', borderRadius: 8, padding: '10px 13px', lineHeight: 1.5 }}>
-                      ⚠️ Could not load members. Deploy <strong>database.rules.json</strong> via Firebase Console, then click ↻ Refresh.
+                  {listErr && (
+                    <div style={{ fontSize: 12, color: '#f5a623', background: 'rgba(245,166,35,0.07)', border: '1px solid rgba(245,166,35,0.18)', borderRadius: 8, padding: '10px 13px', lineHeight: 1.5, marginBottom: 8 }}>
+                      {listErr}
                     </div>
-                  ) : members.length === 0 ? (
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: '16px 0' }}>No members yet</div>
+                  )}
+                  {!listLoaded || (listRefreshing && visibleMembers.length === 0) ? (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: '16px 0' }}>Loading…</div>
+                  ) : visibleMembers.length === 0 ? (
+                    !listErr && <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: '16px 0' }}>No approved teammates yet</div>
                   ) : (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                      {members.map(m => (
+                      {visibleMembers.map(m => (
                         <div key={m.uid} className="team-member-row">
                           <Avatar email={m.email} name={m.displayName} photoURL={m.photoURL} size={30} />
                           <div style={{ flex: 1, minWidth: 0 }}>

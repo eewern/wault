@@ -24,6 +24,7 @@ if (!DB || !webApiKey || !databaseURL || !authDomain || !projectId || !serviceAc
 const uid = `waultUiStress_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 const email = `${uid}@wault.test`;
 const bootstrapWorkspaceId = `__wault_ui_bootstrap_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+const testRole = process.env.WAULT_UI_TEST_ROLE === 'owner' ? 'owner' : 'member';
 const bootstrapWorkspace = {
   pages: {
     home: { id: 'home', parentId: null, title: 'UI Reliability Test', blocks: [{ id: 'intro', type: 'text', text: '' }] },
@@ -203,7 +204,7 @@ async function shutdown(exitCode = 0) {
 authSession = await createSyntheticSession();
 await adminRequest(`access/${uid}`, 'PUT', {
   email,
-  role: 'member',
+  role: testRole,
   approvedAt: new Date().toISOString(),
 });
 const bootstrapTime = new Date().toISOString();
@@ -253,7 +254,7 @@ server.listen(port, '127.0.0.1', () => {
   const address = server.address();
   const actualPort = typeof address === 'object' && address ? address.port : port;
   console.log(`WAULT UI test ready: http://127.0.0.1:${actualPort}/__wault_test_signin`);
-  console.log(`Synthetic member: ${uid}`);
+  console.log(`Synthetic ${testRole}: ${uid}`);
 });
 
 process.on('SIGINT', () => shutdown(0));

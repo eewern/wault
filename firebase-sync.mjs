@@ -90,6 +90,21 @@ export async function initializeFirebaseSync(config) {
     let accessOkCache = null;
 
     const workspaceCatalogPath = (workspaceId) => `workspaceCatalog/${workspaceId}`;
+    const readWithRetry = async (path, label, attempts = 2, timeoutMs = 12000) => {
+      let lastError = null;
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        try {
+          return await Promise.race([
+            get(ref(database, path)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`${label}-timeout`)), timeoutMs)),
+          ]);
+        } catch (error) {
+          lastError = error;
+          if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 350 * attempt));
+        }
+      }
+      throw lastError || new Error(`${label}-failed`);
+    };
     const normalizeVisibility = (visibility) => visibility === 'private' ? 'private' : 'shared';
     const cleanWorkspaceName = (name, fallback = 'Untitled Workspace') => {
       const text = String(name || '').trim();
@@ -271,19 +286,28 @@ export async function initializeFirebaseSync(config) {
       },
 
       // Owner-only: full member list (keyed by uid, value has email/role).
-      // Uses Promise.race with a 6s timeout so a rules-blocked read doesn't hang the UI.
       async getAccessList() {
         try {
-          const snap = await Promise.race([
-            get(ref(database, 'access')),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('access-list-timeout')), 6000)),
-          ]);
+          const snap = await readWithRetry('access', 'access-list');
           if (!snap.exists()) return [];
           return Object.entries(snap.val()).map(([uid, v]) => ({ uid, ...v }));
         } catch (err) {
-          console.warn('⚠️ getAccessList failed:', err.message, '— deploy database.rules.json via Firebase Console to fix.');
-          return [];
+          console.warn('⚠️ getAccessList failed:', err.message);
+          throw err;
         }
+      },
+
+      onAccessListUpdate(callback, onError) {
+        const dbRef = ref(database, 'access');
+        return onValue(dbRef, (snapshot) => {
+          const list = snapshot.exists()
+            ? Object.entries(snapshot.val() || {}).map(([uid, value]) => ({ uid, ...value }))
+            : [];
+          callback(list);
+        }, (error) => {
+          console.warn('⚠️ Access-list listener failed:', error.message);
+          onError?.(error);
+        });
       },
 
       // Owner-only: people who signed in but aren't approved members yet.
@@ -291,35 +315,32 @@ export async function initializeFirebaseSync(config) {
       async getPendingSignins() {
         try {
           const [signinsSnap, accessSnap, blockedSnap] = await Promise.all([
-            Promise.race([get(ref(database, 'signins')), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 6000))]),
-            Promise.race([get(ref(database, 'access')), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 6000))]),
-            Promise.race([get(ref(database, 'blocked')), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 6000))]).catch(() => null),
+            readWithRetry('signins', 'pending-signins'),
+            readWithRetry('access', 'pending-access'),
+            readWithRetry('blocked', 'pending-blocked'),
           ]);
           const signins = signinsSnap.exists() ? signinsSnap.val() : {};
           const access = accessSnap.exists() ? accessSnap.val() : {};
-          const blocked = blockedSnap && blockedSnap.exists() ? blockedSnap.val() : {};
+          const blocked = blockedSnap.exists() ? blockedSnap.val() : {};
           const blockedEmails = new Set(Object.values(blocked).map((b) => (b?.email || '').toLowerCase()));
           return Object.entries(signins)
             .filter(([uid, v]) => !access[uid] && !blocked[uid] && !blockedEmails.has((v?.email || '').toLowerCase()))
             .map(([uid, v]) => ({ uid, ...v }));
         } catch (err) {
           console.warn('⚠️ getPendingSignins failed:', err.message);
-          return [];
+          throw err;
         }
       },
 
       // Owner-only: list of blocked users.
       async getBlockedUsers() {
         try {
-          const snap = await Promise.race([
-            get(ref(database, 'blocked')),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('blocked-list-timeout')), 6000)),
-          ]);
+          const snap = await readWithRetry('blocked', 'blocked-list');
           if (!snap.exists()) return [];
           return Object.entries(snap.val()).map(([uid, v]) => ({ uid, ...v }));
         } catch (err) {
           console.warn('⚠️ getBlockedUsers failed:', err.message);
-          return [];
+          throw err;
         }
       },
 
