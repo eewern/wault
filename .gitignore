@@ -1,6 +1,7 @@
 # Local Netlify folder
 .netlify
 .netlify-publish/
+.vercel/
 .DS_Store
 .claude/
 
