@@ -89,6 +89,28 @@ Evidence exports from this run:
 
 These exports contain private workspace data and must stay outside Git.
 
+## July 21 Cross-Browser Sync Incident
+
+Root cause: localhost `?devpeek=1` could open an editable workspace without a Firebase-authenticated user. Those edits survived refresh in that browser's recovery storage but could not reach Firebase or another device. Shared `currentPageId` navigation and reused tab session IDs could also delay legitimate remote updates.
+
+Release checks completed against one synthetic Firebase member on two isolated browser origins:
+
+- [x] Signed-out localhost, including `?devpeek=1`, shows the Google sign-in gate and cannot edit.
+- [x] A Firebase edit appeared in the second browser in real time.
+- [x] The second browser received the edit while viewing a different page.
+- [x] Page navigation created no Firebase revision, version, or backup.
+- [x] A fresh mobile-sized sign-in with cleared app state loaded the Firebase value.
+- [x] Twenty-five rapid edits converged to the same final value in both browsers.
+- [x] Three consecutive reloads retained the final Firebase value.
+- [x] Workspace create and soft-delete appeared and disappeared in the second browser.
+- [x] Focus select-all selected all tasks; authenticated Firebase deletion coverage passed in the 168-assertion suite.
+- [x] The three real workspace records matched the pre-test export byte-for-byte after synthetic cleanup.
+
+Evidence exports:
+
+- Before tests: `firebase-exports/wault-firebase-20260721-172112.json`
+- Verified clean state after tests: `firebase-exports/wault-firebase-20260721-173904.json`
+
 ## If Data Looks Missing
 
 1. Stop typing and do not delete or recreate the workspace.

@@ -119,7 +119,13 @@
 
   function workspaceDataEqual(left, right) {
     if (!left || !right) return left === right;
-    return deepEqual(left, right);
+    // `currentPageId` is private navigation state. Two browsers can look at
+    // different pages without changing the shared workspace document.
+    const leftShared = isObject(left) ? { ...left } : left;
+    const rightShared = isObject(right) ? { ...right } : right;
+    if (isObject(leftShared)) delete leftShared.currentPageId;
+    if (isObject(rightShared)) delete rightShared.currentPageId;
+    return deepEqual(leftShared, rightShared);
   }
 
   function shouldFinalizeAcknowledgedSave(savedData, latestSave, workspaceId) {

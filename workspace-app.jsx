@@ -1984,12 +1984,9 @@ function App() {
   // and the hybrid load are always set up AFTER Firebase is actually ready.
   const lastFirebaseSaveTimeRef = useRef(0);
   const firebaseListenerUnsubRef = useRef(null);
-  // Remote-apply guard: holds the exact `data` object produced by applying a remote
-  // Firebase update. The save effect compares by reference and SKIPS the cloud push for
-  // that object — breaking the A→B→A→B infinite re-save ping-pong. Any subsequent LOCAL
-  // edit creates a new object (≠ this ref) and pushes normally, so no edits are lost.
-  // Also used to detect unsaved local edits: if current data ≠ this ref, the user has
-  // typed since the last confirmed Firebase save (guard against listener overwriting content).
+  // Immutable snapshot of the last Firebase-confirmed document. Shared-content
+  // comparison deliberately ignores currentPageId because navigation is local to
+  // each browser and must not block or create cloud revisions.
   const lastRemoteDataRef = useRef(null);
   const lastRemoteUpdatedAtRef = useRef("");
   const lastRemoteRevisionRef = useRef(0);
@@ -2049,16 +2046,13 @@ function App() {
   const initialContentLoadDoneRef = useRef(false);
   // Live /workspaceCatalog subscription unsubscribe (replaces the 8s Railway poll).
   const catalogueUnsubRef = useRef(null);
-  // Stable per-tab session ID — survives re-renders, used for echo suppression AND presence key.
-  // sessionStorage ensures the same tab reuses the same key after soft reloads.
-  const localSaveIdRef = useRef(
-    sessionStorage.getItem('wn_session_id') ||
-    (() => {
-      const id = 'sess_' + Math.random().toString(36).slice(2);
-      try { sessionStorage.setItem('wn_session_id', id); } catch {}
-      return id;
-    })()
-  );
+  // A fresh ID per page instance keeps duplicated tabs from mistaking each
+  // other's Firebase writes for their own echoes.
+  const localSaveIdRef = useRef(null);
+  if (!localSaveIdRef.current) {
+    const randomPart = globalThis.crypto?.randomUUID?.().replace(/-/g, '') || Math.random().toString(36).slice(2);
+    localSaveIdRef.current = `sess_${randomPart}`;
+  }
   // Expose session ID globally so PageEditor (child) can access it without prop drilling.
   window._wnSessionId = localSaveIdRef.current;
 
@@ -2206,11 +2200,9 @@ function App() {
           : (activeWorkspaceIdRef.current === workspaceId && loadedWorkspaceIdRef.current === workspaceId);
         if (cancelled || !currentContext) return;
 
-        // Skip updates that originated from this browser session (echo prevention)
-        if (remoteRecord.saveId && remoteRecord.saveId === localSaveIdRef.current) {
-          if (remoteRecord.updated_at) lastRemoteUpdatedAtRef.current = remoteRecord.updated_at;
-          lastRemoteRevisionRef.current = Number(remoteRecord.revision || lastRemoteRevisionRef.current || 0);
-          console.log('ℹ️ Skipping own Firebase echo (session ID match)');
+        const incomingRevision = Number(remoteRecord.revision || 0);
+        if (incomingRevision && incomingRevision < lastRemoteRevisionRef.current) {
+          console.log('ℹ️ Skipping older Firebase revision', incomingRevision);
           return;
         }
 
@@ -2273,7 +2265,7 @@ function App() {
           const next = { ...merged, currentPageId: pid };
           // Mark this exact object as remote-applied so the save effect won't re-push it,
           // and so future listener fires can compare against it to detect local edits.
-          lastRemoteDataRef.current = next;
+          lastRemoteDataRef.current = cloneWorkspaceData(next);
           lastRemoteUpdatedAtRef.current = remoteRecord.updated_at || new Date().toISOString();
           lastRemoteRevisionRef.current = Number(remoteRecord.revision || 0);
           cloudPreviewWorkspaceRef.current = null;
@@ -2358,7 +2350,7 @@ function App() {
           loadedWorkspaceIdRef.current = workspaceId;
           lastRemoteUpdatedAtRef.current = remoteUpdatedAt;
           lastRemoteRevisionRef.current = Number(firebaseRecord.revision || 0);
-          lastRemoteDataRef.current = loaded;
+          lastRemoteDataRef.current = cloneWorkspaceData(loaded);
           const rendered = replayPending ? restoreRememberedPage(workspaceId, normalizeWorkspaceData(replayDraft.data)) : loaded;
           setData(rendered);
           try {
@@ -2786,7 +2778,7 @@ function App() {
                 const currentPageId = localLatest.currentPageId;
                 const remoteBase = { ...remote, currentPageId };
                 const merged = { ...mergeWorkspaceConflict(baseData, localLatest, remoteBase), currentPageId };
-                lastRemoteDataRef.current = remoteBase;
+                lastRemoteDataRef.current = cloneWorkspaceData(remoteBase);
                 lastRemoteUpdatedAtRef.current = remoteRecord.updated_at || new Date().toISOString();
                 lastRemoteRevisionRef.current = Number(remoteRecord.revision || 0);
                 cloudPreviewWorkspaceRef.current = null;
@@ -2808,7 +2800,7 @@ function App() {
             if (stillViewingSavedWorkspace && Number(saved.revision || 0) >= lastRemoteRevisionRef.current) {
               // Only the exact snapshot acknowledged by Firebase becomes the remote
               // base. A newer render must remain pending and receive its own save.
-              lastRemoteDataRef.current = savedSnapshot;
+              lastRemoteDataRef.current = cloneWorkspaceData(savedSnapshot);
               lastRemoteUpdatedAtRef.current = saved.updated_at || new Date().toISOString();
               lastRemoteRevisionRef.current = Number(saved.revision || 0);
               cloudPreviewWorkspaceRef.current = null;
@@ -2922,7 +2914,7 @@ function App() {
           finishCloudSave();
           catchUpSaveInFlight = false;
           if (firebaseSaveSucceeded(ok) && !cancelled) {
-            lastRemoteDataRef.current = cur;
+            lastRemoteDataRef.current = cloneWorkspaceData(cur);
             lastRemoteUpdatedAtRef.current = ok.updated_at || new Date().toISOString();
             lastRemoteRevisionRef.current = Number(ok.revision || 0);
             cloudPreviewWorkspaceRef.current = null;
@@ -2943,7 +2935,7 @@ function App() {
             const currentPageId = localLatest.currentPageId;
             const remoteBase = { ...remote, currentPageId };
             const merged = { ...mergeWorkspaceConflict(baseData, localLatest, remoteBase), currentPageId };
-            lastRemoteDataRef.current = remoteBase;
+            lastRemoteDataRef.current = cloneWorkspaceData(remoteBase);
             lastRemoteUpdatedAtRef.current = ok.remote.updated_at || new Date().toISOString();
             lastRemoteRevisionRef.current = Number(ok.remote.revision || 0);
             writePendingWorkspaceDraft(activeLocalWorkspaceId, merged, lastRemoteUpdatedAtRef.current, lastRemoteRevisionRef.current);
@@ -2965,13 +2957,12 @@ function App() {
       try {
         const rec = await fb.loadWorkspace(activeLocalWorkspaceId);
         if (cancelled || !rec?.workspace) return;
-        if (rec.saveId && rec.saveId === localSaveIdRef.current) return; // our own latest write
         const remote = normalizeWorkspaceData(rec.workspace);
         setData((current) => {
           if (!workspaceDataEqual(current, lastRemoteDataRef.current)) return current; // a local edit started — abort
           const next = { ...remote, currentPageId: current.currentPageId };
           if (JSON.stringify(next) === JSON.stringify(current)) return current; // nothing new
-          lastRemoteDataRef.current = next;
+          lastRemoteDataRef.current = cloneWorkspaceData(next);
           lastRemoteUpdatedAtRef.current = rec.updated_at || new Date().toISOString();
           lastRemoteRevisionRef.current = Number(rec.revision || 0);
           cloudPreviewWorkspaceRef.current = null;
@@ -3035,7 +3026,7 @@ function App() {
         const rec = await window.WorkspaceFirebaseSync.loadWorkspace(activeLocalWorkspaceId);
         if (rec?.workspace) {
           const next = restoreRememberedPage(activeLocalWorkspaceId, normalizeWorkspaceData(rec.workspace));
-          lastRemoteDataRef.current = next;
+          lastRemoteDataRef.current = cloneWorkspaceData(next);
           lastRemoteUpdatedAtRef.current = rec.updated_at || new Date().toISOString();
           setData(next);
           persistWorkspaceLocallyNow(activeLocalWorkspaceId, next, "restored-version", lastRemoteUpdatedAtRef.current, lastRemoteRevisionRef.current);
@@ -3112,7 +3103,7 @@ function App() {
         finishCloudSave();
         deleteSaveInFlight = false;
         if (firebaseSaveSucceeded(saved)) {
-          lastRemoteDataRef.current = nextData;
+          lastRemoteDataRef.current = cloneWorkspaceData(nextData);
           lastRemoteUpdatedAtRef.current = saved.updated_at || new Date().toISOString();
           lastRemoteRevisionRef.current = Number(saved.revision || 0);
           cloudPreviewWorkspaceRef.current = null;
@@ -3140,7 +3131,7 @@ function App() {
         baseData = remoteBase;
         baseUpdatedAt = saved.remote.updated_at || new Date().toISOString();
         baseRevision = Number(saved.remote.revision || 0);
-        lastRemoteDataRef.current = remoteBase;
+        lastRemoteDataRef.current = cloneWorkspaceData(remoteBase);
         lastRemoteUpdatedAtRef.current = baseUpdatedAt;
         lastRemoteRevisionRef.current = baseRevision;
         writePendingWorkspaceDraft(activeLocalWorkspaceId, nextData, baseUpdatedAt, baseRevision);
@@ -3532,7 +3523,7 @@ function App() {
         localStorage.setItem(LOCAL_ACTIVE_WORKSPACE_KEY, id);
         localStorage.setItem(localWorkspaceDataKey(id), JSON.stringify(defaultData));
         skipPersistenceWorkspaceRef.current = null;
-        lastRemoteDataRef.current = defaultData;
+        lastRemoteDataRef.current = cloneWorkspaceData(defaultData);
         lastRemoteUpdatedAtRef.current = saved.updated_at || nowIso;
         lastRemoteRevisionRef.current = Number(saved.revision || 0);
         cloudPreviewWorkspaceRef.current = null;
@@ -3916,22 +3907,15 @@ function App() {
   };
 
   const firebaseConfigured = !!(window.SUPABASE_CONFIG?.firebaseApiKey);
-  // TEMP DEV PEEK — localhost-only auth bypass (inert on the live site). REMOVE
-  // before the next production deploy. [[wault-dev-peek-localhost-bypass]]
-  const DEV_PEEK = (() => {
-    try {
-      const h = window.location.hostname;
-      const isLocal = h === "localhost" || h === "127.0.0.1" || h === "[::1]";
-      return isLocal && new URLSearchParams(window.location.search).has("devpeek");
-    } catch { return false; }
-  })();
   const configured = window.WorkspaceStore?.isConfigured();
   const activeWorkspaceMeta = (localWorkspaces || []).find((workspace) => workspace.id === activeLocalWorkspaceId) || {};
   const cloudWorkspaceAllowed = !!(authUser?.uid && userAccess && !firebaseAccessDenied);
-  const canCreateWorkspace = DEV_PEEK || cloudWorkspaceAllowed || (!configured || syncState.role === "owner" || syncState.role === "admin");
-  const canManageActiveWorkspace = DEV_PEEK || (cloudWorkspaceAllowed
-    ? (userAccess.role === "owner" || !activeWorkspaceMeta.ownerUid || activeWorkspaceMeta.ownerUid === authUser.uid)
-    : (!configured || syncState.role === "owner" || syncState.role === "admin"));
+  const canCreateWorkspace = firebaseConfigured
+    ? cloudWorkspaceAllowed
+    : (!configured || syncState.role === "owner" || syncState.role === "admin");
+  const canManageActiveWorkspace = firebaseConfigured
+    ? !!(cloudWorkspaceAllowed && (userAccess.role === "owner" || !activeWorkspaceMeta.ownerUid || activeWorkspaceMeta.ownerUid === authUser.uid))
+    : (!configured || syncState.role === "owner" || syncState.role === "admin");
   // Temporarily disabled for local testing
   // if (configured && !syncState.user) { ... }
 
@@ -3954,7 +3938,7 @@ function App() {
   }
 
   // ── Firebase Google Auth gates ─────────────────────────────────────────────
-  if (!DEV_PEEK && firebaseConfigured && authLoading) {
+  if (firebaseConfigured && authLoading) {
     return (
       <main className="auth-gate">
         <section className="auth-card">
@@ -3966,7 +3950,7 @@ function App() {
     );
   }
 
-  if (!DEV_PEEK && firebaseConfigured && !authUser) {
+  if (firebaseConfigured && !authUser) {
     return (
       <GoogleSignInScreen
         busy={googleSignInBusy}
@@ -3976,7 +3960,7 @@ function App() {
     );
   }
 
-  if (!DEV_PEEK && firebaseConfigured && authUser && firebaseAccessDenied) {
+  if (firebaseConfigured && authUser && firebaseAccessDenied) {
     return (
       <FirebaseAccessDeniedScreen
         email={authUser.email}
@@ -4611,7 +4595,7 @@ function SyncPanel({ syncState }) {
   const firebaseStatus = syncState.firebaseStatus || '';
   const lower = firebaseStatus.toLowerCase();
   const isSaving = lower.includes('saving') || lower.includes('restoring');
-  const isSynced = firebaseStatus.includes('✓') || lower.includes('connected') || lower.includes('saved');
+  const isSynced = firebaseStatus.includes('✓') || lower.includes('synced') || lower.includes('saved');
   const isFailed = lower.includes('failed') || lower.includes('offline') || lower.includes('blocked') || lower.includes('rejected') || lower.includes('skipped');
   if (!firebaseStatus) return null;
   return (

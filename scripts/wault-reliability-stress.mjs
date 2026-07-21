@@ -1,4 +1,5 @@
 import '../reliability-core.js';
+import { readFileSync } from 'node:fs';
 
 const R = globalThis.WaultReliability;
 let assertions = 0;
@@ -44,6 +45,7 @@ const laterTime = "2026-07-15T00:00:01.000Z";
 const earlierTime = "2026-07-14T23:59:59.000Z";
 const draftData = workspace({ p: page('p', [textBlock('draft', 'draft')]) });
 check(R.workspaceDataEqual(draftData, JSON.parse(JSON.stringify(draftData))), 'equal workspace snapshots were treated as an edit');
+check(R.workspaceDataEqual(draftData, { ...draftData, currentPageId: 'another-local-page' }), 'local page navigation was treated as a shared edit');
 check(!R.workspaceDataEqual(draftData, workspace({ p: page('p', [textBlock('draft', 'changed')]) })), 'changed workspace snapshot was treated as a no-op');
 check(R.shouldReplayDraft({ data: draftData, savedAt: laterTime, baseUpdatedAt: remoteTime, baseRevision: 7 }, remoteTime, 7), 'matching-revision crash draft was not replayed');
 check(!R.shouldReplayDraft({ data: draftData, savedAt: laterTime, baseUpdatedAt: remoteTime, baseRevision: 6 }, remoteTime, 7), 'stale-revision draft was replayed');
@@ -79,5 +81,10 @@ check(!Object.values(moved.pages).some((entry) => entry.blocks?.some((block) => 
 
 check(!R.firebaseSaveSucceeded({ ok: false, blocked: true, reason: 'stale_revision' }), 'blocked save was treated as success');
 check(R.firebaseSaveSucceeded({ ok: true, revision: 42 }), 'confirmed save was rejected');
+
+const workspaceAppSource = readFileSync(new URL('../workspace-app.jsx', import.meta.url), 'utf8');
+check(!workspaceAppSource.includes('DEV_PEEK'), 'localhost auth bypass is still present');
+check(!workspaceAppSource.includes("sessionStorage.getItem('wn_session_id')"), 'browser tabs can still share a save-session id');
+check(!/lower\.includes\(['"]connected['"]\)/.test(workspaceAppSource), 'connection state is still displayed as a confirmed save');
 
 console.log(`WAULT reliability stress passed: ${assertions} assertions`);
