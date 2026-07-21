@@ -1,6 +1,6 @@
 # WAULT Reliability Runbook
 
-Production: `https://waults.netlify.app`
+Production: `https://waults.vercel.app`
 
 ## Before Risky Work
 
@@ -24,7 +24,7 @@ WAULT keeps the exact pending edit in a Firebase per-user draft and browser reco
 ## Recovery Order
 
 1. Stop editing the affected workspace.
-2. Confirm the URL is `https://waults.netlify.app` and the expected Google account is signed in.
+2. Confirm the URL is `https://waults.vercel.app` and the expected Google account is signed in.
 3. Run `npm run backup:firebase` before restoring anything.
 4. Inspect the current record at `workspaces/{workspaceId}`.
 5. Inspect recovery sources in this order:
