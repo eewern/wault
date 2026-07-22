@@ -117,6 +117,88 @@
     return result === true || result?.ok === true;
   }
 
+  function normalizeEmail(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function dedupeTeamMembers(list = [], currentUser = {}) {
+    const currentUid = String(currentUser?.uid || "");
+    const currentEmail = normalizeEmail(currentUser?.email);
+    const seen = new Map();
+
+    (Array.isArray(list) ? list : []).forEach((member) => {
+      if (!member) return;
+      const email = normalizeEmail(member.email);
+      const uid = String(member.uid || "");
+      const key = email || uid.toLowerCase();
+      if (!key) return;
+      const candidate = { ...member, uid, email };
+      const existing = seen.get(key);
+      if (!existing) {
+        seen.set(key, candidate);
+        return;
+      }
+
+      const candidateIsCurrent = !!currentUid && uid === currentUid;
+      const existingIsCurrent = !!currentUid && existing.uid === currentUid;
+      if (candidateIsCurrent && !existingIsCurrent) {
+        seen.set(key, candidate);
+        return;
+      }
+      if (existingIsCurrent) return;
+
+      const candidateMatchesEmail = !!currentEmail && email === currentEmail;
+      const existingMatchesEmail = !!currentEmail && normalizeEmail(existing.email) === currentEmail;
+      if (candidateMatchesEmail && !existingMatchesEmail) {
+        seen.set(key, candidate);
+        return;
+      }
+
+      const candidateTime = Date.parse(candidate.addedAt || "") || 0;
+      const existingTime = Date.parse(existing.addedAt || "") || 0;
+      if (candidateTime > existingTime) seen.set(key, candidate);
+    });
+
+    return [...seen.values()];
+  }
+
+  function classifySyncStatus(value) {
+    const text = String(value || "").trim();
+    if (!text) return null;
+    const lower = text.toLowerCase();
+    const failed = [
+      "failed",
+      "offline",
+      "blocked",
+      "rejected",
+      "skipped",
+      "missing",
+      "unavailable",
+      "denied",
+      "timeout",
+      "stale",
+      "cache",
+      "preview",
+      "not configured",
+      "not authenticated",
+      "not approved",
+      "delayed",
+    ].some((marker) => lower.includes(marker));
+    if (failed) return { label: "Failed", tone: "failed", detail: text };
+
+    const saving = ["saving", "restoring", "merging", "newer changes", "pending retry"]
+      .some((marker) => lower.includes(marker));
+    if (saving) return { label: "Saving", tone: "saving", detail: text };
+
+    const confirmed = (
+      (lower.includes("synced to cloud") && text.includes("✓"))
+      || (lower.includes("saved") && text.includes("✓"))
+    );
+    if (confirmed) return { label: "Saved", tone: "saved", detail: text };
+
+    return { label: "Not synced", tone: "pending", detail: text };
+  }
+
   function workspaceDataEqual(left, right) {
     if (!left || !right) return left === right;
     // `currentPageId` is private navigation state. Two browsers can look at
@@ -201,7 +283,9 @@
   }
 
   root.WaultReliability = {
+    classifySyncStatus,
     deepEqual,
+    dedupeTeamMembers,
     firebaseSaveSucceeded,
     mergeWorkspaceConflict,
     normalizeParentSubpageLinks,

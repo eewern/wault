@@ -82,9 +82,26 @@ check(!Object.values(moved.pages).some((entry) => entry.blocks?.some((block) => 
 check(!R.firebaseSaveSucceeded({ ok: false, blocked: true, reason: 'stale_revision' }), 'blocked save was treated as success');
 check(R.firebaseSaveSucceeded({ ok: true, revision: 42 }), 'confirmed save was rejected');
 
+const canonicalOwner = { uid: 'firebase-owner-uid', email: 'eewern21@gmail.com', role: 'owner', addedAt: '2026-07-22T00:00:00.000Z' };
+const legacyOwner = { uid: 'eewern21_at_gmail_dot_com', email: 'eewern21@gmail.com', role: 'owner', addedAt: '2026-05-26T00:00:00.000Z' };
+const teammate = { uid: 'member-uid', email: 'member@example.com', role: 'member' };
+const dedupedMembers = R.dedupeTeamMembers([legacyOwner, teammate, canonicalOwner], canonicalOwner);
+check(dedupedMembers.length === 2, 'team member email deduplication failed');
+check(dedupedMembers.find((member) => member.email === canonicalOwner.email)?.uid === canonicalOwner.uid, 'legacy owner key replaced the real Firebase owner UID');
+check(R.classifySyncStatus('Synced to cloud ✓')?.label === 'Saved', 'confirmed cloud sync was not labelled Saved');
+check(R.classifySyncStatus('Saving to cloud…')?.label === 'Saving', 'active cloud save was not labelled Saving');
+check(R.classifySyncStatus('Cloud refresh failed — not saving cache')?.label === 'Failed', 'cloud failure was not labelled Failed');
+check(R.classifySyncStatus('Connected to cloud')?.label === 'Not synced', 'connection-only state was mislabelled as synced');
+check(R.classifySyncStatus('Team catalogue loaded')?.label === 'Not synced', 'catalogue-only state was mislabelled as synced');
+
 const workspaceAppSource = readFileSync(new URL('../workspace-app.jsx', import.meta.url), 'utf8');
+const firebaseSyncSource = readFileSync(new URL('../firebase-sync.mjs', import.meta.url), 'utf8');
+const databaseRulesSource = readFileSync(new URL('../database.rules.json', import.meta.url), 'utf8');
 check(!workspaceAppSource.includes('DEV_PEEK'), 'localhost auth bypass is still present');
 check(!workspaceAppSource.includes("sessionStorage.getItem('wn_session_id')"), 'browser tabs can still share a save-session id');
 check(!/lower\.includes\(['"]connected['"]\)/.test(workspaceAppSource), 'connection state is still displayed as a confirmed save');
+check(!firebaseSyncSource.includes('wernahhh@gmail.com'), 'retired owner email remains in Firebase client access control');
+check(!databaseRulesSource.includes('wernahhh@gmail.com'), 'retired owner email remains in Firebase database rules');
+check(databaseRulesSource.includes("auth.token.email === 'eewern21@gmail.com'"), 'owner-only Firebase rules are not tied to the canonical owner email');
 
 console.log(`WAULT reliability stress passed: ${assertions} assertions`);

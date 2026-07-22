@@ -1,8 +1,8 @@
 // Firebase Realtime Database + Auth Integration for Notion Workspace
 // Handles cloud backup, multi-device sync, Google Sign-In, and invite-based access control.
 
-const OWNER_EMAILS = ['wernahhh@gmail.com', 'eewern21@gmail.com'];
-const isOwnerEmail = (email = '') => OWNER_EMAILS.includes(String(email || '').toLowerCase());
+const OWNER_EMAIL = 'eewern21@gmail.com';
+const isOwnerEmail = (email = '') => String(email || '').trim().toLowerCase() === OWNER_EMAIL;
 
 export async function initializeFirebaseSync(config) {
   try {
@@ -57,11 +57,12 @@ export async function initializeFirebaseSync(config) {
 
     async function seedOwnerAccess(uid, email) {
       const snap = await get(ref(database, `access/${uid}`));
-      if (!snap.exists()) {
+      const existing = snap.exists() ? (snap.val() || {}) : null;
+      if (!existing || existing.role !== 'owner' || String(existing.email || '').toLowerCase() !== OWNER_EMAIL) {
         await set(ref(database, `access/${uid}`), {
-          email: email.toLowerCase(),
+          email: OWNER_EMAIL,
           role: 'owner',
-          addedAt: new Date().toISOString(),
+          addedAt: existing?.addedAt || new Date().toISOString(),
         });
         console.log('✅ Owner access seeded');
       }
@@ -278,7 +279,14 @@ export async function initializeFirebaseSync(config) {
 
         try {
           const snap = await withTimeout(get(ref(database, `access/${uid}`)), 3000, 'access');
-          return snap.exists() ? { uid, ...snap.val() } : null;
+          if (!snap.exists()) return null;
+          const access = snap.val() || {};
+          return {
+            uid,
+            ...access,
+            email: String(access.email || email).toLowerCase(),
+            role: isOwnerEmail(email) && access.role === 'owner' ? 'owner' : 'member',
+          };
         } catch (err) {
           console.warn('⚠️ Access read failed:', err.message);
           return null; // treat as "not approved yet" rather than hang
@@ -290,7 +298,12 @@ export async function initializeFirebaseSync(config) {
         try {
           const snap = await readWithRetry('access', 'access-list');
           if (!snap.exists()) return [];
-          return Object.entries(snap.val()).map(([uid, v]) => ({ uid, ...v }));
+          return Object.entries(snap.val()).map(([uid, v]) => ({
+            uid,
+            ...v,
+            email: String(v?.email || '').toLowerCase(),
+            role: isOwnerEmail(v?.email) ? 'owner' : 'member',
+          }));
         } catch (err) {
           console.warn('⚠️ getAccessList failed:', err.message);
           throw err;
@@ -301,7 +314,12 @@ export async function initializeFirebaseSync(config) {
         const dbRef = ref(database, 'access');
         return onValue(dbRef, (snapshot) => {
           const list = snapshot.exists()
-            ? Object.entries(snapshot.val() || {}).map(([uid, value]) => ({ uid, ...value }))
+            ? Object.entries(snapshot.val() || {}).map(([uid, value]) => ({
+                uid,
+                ...value,
+                email: String(value?.email || '').toLowerCase(),
+                role: isOwnerEmail(value?.email) ? 'owner' : 'member',
+              }))
             : [];
           callback(list);
         }, (error) => {
@@ -348,12 +366,12 @@ export async function initializeFirebaseSync(config) {
       async grantAccess(uid, email, role = 'member') {
         await set(ref(database, `access/${uid}`), {
           email: (email || '').toLowerCase(),
-          role: role === 'owner' ? 'owner' : 'member',
+          role: 'member',
           addedAt: new Date().toISOString(),
         });
         // Clear their pending signin so the request disappears from the queue.
         try { await remove(ref(database, `signins/${uid}`)); } catch {}
-        console.log(`✅ Granted ${role} access to ${email}`);
+        console.log(`✅ Granted member access to ${email}`);
       },
 
       // Owner-only: revoke a member (keyed by uid).

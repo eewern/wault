@@ -1071,12 +1071,22 @@ function TeamAvatar({ email, name, photoURL, size }) {
   return <span style={circleStyle}>{letter}</span>;
 }
 
-function dedupeTeamMembers(list = []) {
+function dedupeTeamMembers(list = [], currentUser = {}) {
+  if (window.WaultReliability?.dedupeTeamMembers) {
+    return window.WaultReliability.dedupeTeamMembers(list, currentUser);
+  }
+  const currentUid = String(currentUser?.uid || '');
+  const currentEmail = String(currentUser?.email || '').trim().toLowerCase();
   const seen = new Map();
-  list.forEach((member) => {
-    const key = String(member?.email || member?.uid || '').toLowerCase();
+  (Array.isArray(list) ? list : []).forEach((member) => {
+    const email = String(member?.email || '').trim().toLowerCase();
+    const uid = String(member?.uid || '');
+    const key = email || uid.toLowerCase();
     if (!key) return;
-    if (!seen.has(key) || member?.role === 'owner') seen.set(key, member);
+    const existing = seen.get(key);
+    if (!existing || uid === currentUid || (!existing.uid && uid) || (email === currentEmail && existing.email !== currentEmail)) {
+      seen.set(key, { ...member, uid, email });
+    }
   });
   return [...seen.values()];
 }
@@ -1170,7 +1180,7 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
     setListRefreshing(true); setListErr('');
     try {
       const list = await sync.getAccessList();
-      setMembers(dedupeTeamMembers(list));
+      setMembers(dedupeTeamMembers(list, authUser));
       setListLoaded(true);
       const [pendingResult, blockedResult] = await Promise.allSettled([
         sync.getPendingSignins ? sync.getPendingSignins() : Promise.resolve([]),
@@ -1187,7 +1197,7 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
     } finally {
       setListRefreshing(false);
     }
-  }, [isOwner]);
+  }, [isOwner, authUser?.uid, authUser?.email]);
 
   // Refresh whenever the modal opens
   React.useEffect(() => { if (showModal && isOwner) refresh(); }, [showModal, refresh, isOwner]);
@@ -1196,7 +1206,7 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
     const sync = window.WorkspaceFirebaseSync;
     if (!showModal || !isOwner || !sync?.onAccessListUpdate) return undefined;
     return sync.onAccessListUpdate((list) => {
-      setMembers(dedupeTeamMembers(list));
+      setMembers(dedupeTeamMembers(list, authUser));
       setListLoaded(true);
       setListRefreshing(false);
       setListErr('');
@@ -1205,7 +1215,7 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
       setListRefreshing(false);
       setListErr('Could not keep the teammate list connected to Firebase. The saved access records were not deleted.');
     });
-  }, [showModal, isOwner]);
+  }, [showModal, isOwner, authUser?.uid, authUser?.email]);
 
   const grant = async (uid, email) => {
     if (!uid || !window.WorkspaceFirebaseSync?.grantAccess) return;
@@ -1287,7 +1297,11 @@ function TeamPanel({ authUser, userAccess, onSignOut, activeWorkspaceId, exportD
     </div>
   );
   const browserApiUrl = (window.WORKSPACE_API_URL || window.location.origin || window.location.href.split(/[?#]/)[0].replace(/\/[^/]*$/, "")).replace(/\/$/, "");
-  const visibleMembers = members.filter((member) => member?.uid !== authUser?.uid);
+  const activeEmail = String(authUser?.email || '').trim().toLowerCase();
+  const visibleMembers = members.filter((member) => (
+    member?.uid !== authUser?.uid
+    && String(member?.email || '').trim().toLowerCase() !== activeEmail
+  ));
 
   return (
     <>
@@ -4593,16 +4607,15 @@ function Sidebar({
 
 function SyncPanel({ syncState }) {
   const firebaseStatus = syncState.firebaseStatus || '';
-  const lower = firebaseStatus.toLowerCase();
-  const isSaving = lower.includes('saving') || lower.includes('restoring');
-  const isSynced = firebaseStatus.includes('✓') || lower.includes('synced') || lower.includes('saved');
-  const isFailed = lower.includes('failed') || lower.includes('offline') || lower.includes('blocked') || lower.includes('rejected') || lower.includes('skipped');
-  if (!firebaseStatus) return null;
+  const classified = window.WaultReliability?.classifySyncStatus?.(firebaseStatus);
+  if (!classified) return null;
+  const isSynced = classified.tone === 'saved';
+  const isFailed = classified.tone === 'failed';
   return (
-    <div style={{ display:'flex', alignItems:'center', gap:5, padding:'2px 0' }}>
+    <div title={classified.detail} style={{ display:'flex', alignItems:'center', gap:5, padding:'2px 0' }}>
       <span style={{ width:6, height:6, borderRadius:'50%', flexShrink:0, background: isSynced ? '#3dd68c' : isFailed ? '#f07070' : '#e8c460', boxShadow: isSynced ? '0 0 4px rgba(61,214,140,0.5)' : 'none' }} />
       <span style={{ fontSize:10, color:'var(--text-muted)', letterSpacing:'0.02em' }}>
-        {isSynced ? 'Saved' : isFailed ? 'Failed' : isSaving ? 'Saving' : 'Checking'}
+        {classified.label}
       </span>
     </div>
   );

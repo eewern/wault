@@ -90,27 +90,27 @@
     },
 
     "signins": {
-      ".read": "auth != null && root.child('access').child(auth.uid).child('role').val() === 'owner'",
+      ".read": "auth != null && auth.token.email === 'eewern21@gmail.com' && root.child('access').child(auth.uid).child('role').val() === 'owner'",
       "$uid": {
-        ".write": "auth != null && (auth.uid === $uid || root.child('access').child(auth.uid).child('role').val() === 'owner')",
+        ".write": "auth != null && (auth.uid === $uid || (auth.token.email === 'eewern21@gmail.com' && root.child('access').child(auth.uid).child('role').val() === 'owner'))",
         ".validate": "!newData.exists() || newData.hasChildren(['email'])"
       }
     },
 
     "blocked": {
-      ".read": "auth != null && root.child('access').child(auth.uid).child('role').val() === 'owner'",
+      ".read": "auth != null && auth.token.email === 'eewern21@gmail.com' && root.child('access').child(auth.uid).child('role').val() === 'owner'",
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && root.child('access').child(auth.uid).child('role').val() === 'owner'",
+        ".write": "auth != null && auth.token.email === 'eewern21@gmail.com' && root.child('access').child(auth.uid).child('role').val() === 'owner'",
         ".validate": "!newData.exists() || (newData.hasChildren(['email', 'blockedAt']) && newData.child('email').isString() && newData.child('blockedAt').isString())"
       }
     },
 
     "access": {
-      ".read": "auth != null && root.child('access').child(auth.uid).child('role').val() === 'owner'",
+      ".read": "auth != null && auth.token.email === 'eewern21@gmail.com' && root.child('access').child(auth.uid).child('role').val() === 'owner'",
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && (root.child('access').child(auth.uid).child('role').val() === 'owner' || (auth.uid === $uid && (auth.token.email === 'wernahhh@gmail.com' || auth.token.email === 'eewern21@gmail.com') && !data.exists()))",
+        ".write": "auth != null && ((auth.token.email === 'eewern21@gmail.com' && root.child('access').child(auth.uid).child('role').val() === 'owner') || (auth.uid === $uid && auth.token.email === 'eewern21@gmail.com' && !data.exists()))",
         ".validate": "newData.hasChildren(['email', 'role']) && (newData.child('role').val() === 'owner' || newData.child('role').val() === 'member')"
       }
     },
@@ -125,7 +125,7 @@
     },
 
     "feedback": {
-      ".read": "auth != null && root.child('access').child(auth.uid).child('role').val() === 'owner'",
+      ".read": "auth != null && auth.token.email === 'eewern21@gmail.com' && root.child('access').child(auth.uid).child('role').val() === 'owner'",
       "$uid": {
         ".write": "auth != null && auth.uid === $uid",
         "$feedbackId": {

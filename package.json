@@ -12,6 +12,7 @@
     "backup:firebase": "node scripts/wault-firebase-backup.mjs firebase-exports/wault-firebase-$(date +%Y%m%d-%H%M%S).json",
     "test:reliability": "node scripts/wault-reliability-stress.mjs",
     "test:firebase-reliability": "node scripts/wault-firebase-stress.mjs",
+    "test:team-sync": "node scripts/wault-team-sync-stress.mjs",
     "test:ui-server": "node scripts/wault-ui-test-server.mjs"
   },
   "engines": {

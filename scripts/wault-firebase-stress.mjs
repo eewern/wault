@@ -188,11 +188,10 @@ try {
     method: 'PUT',
     authToken: await token(),
     body: { email: `${testUid}@wault.test`, role: 'owner', approvedAt: now() },
-  }), 'synthetic owner promotion');
-  const ownerDirectoryRead = await requireOk(request('access'), 'owner access directory read');
-  check(ownerDirectoryRead.data?.[testUid]?.role === 'owner', 'owner could not read the approved member directory');
-  check((await requireOk(request('signins'), 'owner sign-in directory read')).ok, 'owner could not read sign-in requests');
-  check((await requireOk(request('blocked'), 'owner blocked directory read')).ok, 'owner could not read blocked accounts');
+  }), 'stale synthetic owner record');
+  check(!(await request('access')).ok, 'non-canonical owner record bypassed the owner email guard');
+  check(!(await request('signins')).ok, 'non-canonical owner record could read sign-in requests');
+  check(!(await request('blocked')).ok, 'non-canonical owner record could read blocked accounts');
   await requireOk(request(`access/${testUid}`, {
     method: 'PUT',
     authToken: await token(),
