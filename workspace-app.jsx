@@ -2972,6 +2972,22 @@ function App() {
         const rec = await fb.loadWorkspace(activeLocalWorkspaceId);
         if (cancelled || !rec?.workspace) return;
         const remote = normalizeWorkspaceData(rec.workspace);
+        const latest = latestSaveRef.current;
+        if (
+          latest?.ws === activeLocalWorkspaceId
+          && workspaceDataEqual(latest.data, remote)
+        ) {
+          const confirmed = { ...remote, currentPageId: latest.data.currentPageId };
+          lastRemoteDataRef.current = cloneWorkspaceData(confirmed);
+          lastRemoteUpdatedAtRef.current = rec.updated_at || new Date().toISOString();
+          lastRemoteRevisionRef.current = Number(rec.revision || 0);
+          cloudPreviewWorkspaceRef.current = null;
+          cloudPreviewDataRef.current = null;
+          clearPendingWorkspaceDraft(activeLocalWorkspaceId);
+          fb.clearWorkspaceDraft?.(activeLocalWorkspaceId);
+          setSyncState((state) => ({ ...state, error: "", firebaseStatus: "Synced to cloud ✓" }));
+          return;
+        }
         setData((current) => {
           if (!workspaceDataEqual(current, lastRemoteDataRef.current)) return current; // a local edit started — abort
           const next = { ...remote, currentPageId: current.currentPageId };
@@ -4794,7 +4810,11 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
         case "heading": { const lvl = Math.min(3, Math.max(1, Number(block.level) || 1)); bodyHtml += `<h${lvl} style="margin:1em 0 0.3em">${richText(block.text)}</h${lvl}>\n`; break; }
         case "text": bodyHtml += `<p style="margin:0.4em 0 0.4em ${textIndentLevel(block) * 24}px">${richText(block.text) || "&nbsp;"}</p>\n`; break;
         case "bullets": bodyHtml += `<ul>${renderListItems(block.items, bulletStyle)}</ul>\n`; break;
-        case "numbers": bodyHtml += `<ol>${renderListItems(block.items, numberStyle)}</ol>\n`; break;
+        case "numbers": {
+          const start = window.WaultReliability?.normalizeNumberListStart?.(block.start) || 1;
+          bodyHtml += `<ol${start > 1 ? ` start="${start}"` : ""}>${renderListItems(block.items, numberStyle)}</ol>\n`;
+          break;
+        }
         case "checklist": bodyHtml += `<ul style="list-style:none;padding:0">${(block.items||[]).map(i=>`<li>${i.done?"☑":"☐"} ${stripHtml(i.text||"")}</li>`).join("")}</ul>\n`; break;
         case "callout": bodyHtml += `<blockquote style="background:#f8f8f0;border-left:4px solid #e0c97f;padding:10px 16px;margin:12px 0;border-radius:4px">${esc(block.icon||"💡")} ${richText(block.text)}</blockquote>\n`; break;
         case "divider": bodyHtml += `<hr style="border:none;border-top:1px solid #eee;margin:16px 0"/>\n`; break;
@@ -6317,7 +6337,13 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
                   replaceBlock(block.id, { id: block.id, type:"bullets", items:[{ id: window.nid(), text:remainingHtml }] });
                 }
                 if (type === "numbers") {
-                  replaceBlock(block.id, { id: block.id, type:"numbers", items:[{ id: window.nid(), text:remainingHtml }] });
+                  const start = window.WaultReliability?.normalizeNumberListStart?.(shortcut?.start) || 1;
+                  replaceBlock(block.id, {
+                    id: block.id,
+                    type:"numbers",
+                    items:[{ id: window.nid(), text:remainingHtml }],
+                    ...(start > 1 ? { start } : {}),
+                  });
                 }
                 if (type === "checklist") {
                   replaceBlock(block.id, { id: block.id, type:"checklist", items:[{ id: window.nid(), text:"", done:false, dueDate:"" }] });

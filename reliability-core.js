@@ -117,6 +117,75 @@
     return result === true || result?.ok === true;
   }
 
+  function normalizeNumberListStart(value) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return 1;
+    return Math.max(1, Math.min(999999, parsed));
+  }
+
+  function parseListPrefixShortcut(plainText, caretOffset, spaceAlreadyInserted = false) {
+    const text = String(plainText || "").replace(/\u200B/g, "");
+    const offset = Math.max(0, Math.min(text.length, Number(caretOffset) || 0));
+    const prefix = text.slice(0, offset);
+    const optionalSpace = spaceAlreadyInserted ? "[ \\u00a0]" : "";
+    const numberMatch = prefix.match(new RegExp(`^(\\d{1,6})[.)]${optionalSpace}$`));
+    if (numberMatch) {
+      return {
+        type: "numbers",
+        start: normalizeNumberListStart(numberMatch[1]),
+      };
+    }
+    if (new RegExp(`^[-*\\u2022]${optionalSpace}$`).test(prefix)) {
+      return { type: "bullets" };
+    }
+    return null;
+  }
+
+  function splitListBlockForShortcut(block, itemId, shortcut, makeId) {
+    const items = Array.isArray(block?.items) ? block.items : [];
+    const index = items.findIndex((item) => item?.id === itemId);
+    const type = shortcut?.type;
+    if (index < 0 || (type !== "bullets" && type !== "numbers") || typeof makeId !== "function") return null;
+
+    const beforeItems = items.slice(0, index);
+    const afterItems = items.slice(index + 1);
+    const convertedId = beforeItems.length ? makeId() : block.id;
+    const convertedItem = {
+      id: makeId(),
+      text: String(shortcut.remainingHtml || ""),
+    };
+    const start = normalizeNumberListStart(shortcut.start);
+    const converted = {
+      id: convertedId,
+      type,
+      items: [convertedItem],
+      ...(type === "numbers" && start > 1 ? { start } : {}),
+    };
+
+    const blocks = [];
+    if (beforeItems.length) blocks.push({ ...block, items: beforeItems });
+    blocks.push(converted);
+
+    if (afterItems.length) {
+      let afterBlock = { ...block, id: makeId(), items: afterItems };
+      if (block.type === "numbers") {
+        const consumedTopLevel = beforeItems.filter((item) => {
+          const level = Number(item?.level ?? (item?.indent ? 1 : 0)) || 0;
+          return level <= 0;
+        }).length;
+        const nextStart = normalizeNumberListStart(block.start) + consumedTopLevel;
+        if (nextStart > 1) afterBlock = { ...afterBlock, start: nextStart };
+        else {
+          const { start: _start, ...withoutStart } = afterBlock;
+          afterBlock = withoutStart;
+        }
+      }
+      blocks.push(afterBlock);
+    }
+
+    return { blocks, focusId: convertedId, focusItemId: convertedItem.id };
+  }
+
   function normalizeEmail(value) {
     return String(value || "").trim().toLowerCase();
   }
@@ -288,9 +357,12 @@
     dedupeTeamMembers,
     firebaseSaveSucceeded,
     mergeWorkspaceConflict,
+    normalizeNumberListStart,
     normalizeParentSubpageLinks,
+    parseListPrefixShortcut,
     shouldFinalizeAcknowledgedSave,
     shouldReplayDraft,
+    splitListBlockForShortcut,
     workspaceDataEqual,
     workspaceContextMatches,
   };

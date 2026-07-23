@@ -376,7 +376,8 @@ function parseHtmlBlocks(html = "") {
       if (items.some(i => "done" in i) || isToDoList) {
         blocks.push({ id: nid(), type:"checklist", items: items.map(i => ({ id: i.id, text: i.text, done: !!i.done, dueDate: i.dueDate || "" })) });
       } else if (tag === "OL") {
-        blocks.push({ id: nid(), type:"numbers", items });
+        const start = window.WaultReliability?.normalizeNumberListStart?.(node.getAttribute("start")) || 1;
+        blocks.push({ id: nid(), type:"numbers", items, ...(start > 1 ? { start } : {}) });
       } else {
         blocks.push({ id: nid(), type:"bullets", items });
       }
@@ -477,7 +478,7 @@ window.parseHtmlBlocks = parseHtmlBlocks;
 // Build properly NESTED <ul>/<ol> HTML from a flat item list that carries `level`
 // (0-based depth). This preserves nested bullet/number structure on copy so that
 // pasting back (or into Notion/Docs/Word) keeps the indentation and per-level numbering.
-function itemsToNestedListHtml(items, tag) {
+function itemsToNestedListHtml(items, tag, start = 1) {
   const list = (items || []).filter(Boolean);
   if (!list.length) return `<${tag}></${tag}>`;
   const s = (t) => t || "";
@@ -497,7 +498,10 @@ function itemsToNestedListHtml(items, tag) {
   norm.forEach((it) => {
     if (it.level > prevLevel) {
       // Open one new nested list per level we descend (nested INSIDE the open <li>).
-      for (let d = prevLevel; d < it.level; d++) html += `<${tag}>`;
+      for (let d = prevLevel; d < it.level; d++) {
+        const startAttr = tag === "ol" && d === -1 && Number(start) > 1 ? ` start="${Number(start)}"` : "";
+        html += `<${tag}${startAttr}>`;
+      }
     } else if (it.level < prevLevel) {
       html += `</li>`; // close current item
       for (let d = prevLevel; d > it.level; d--) html += `</${tag}></li>`;
@@ -531,7 +535,7 @@ function serializeBlockToHtml(block) {
     case "bullets":
       return itemsToNestedListHtml(block.items, "ul");
     case "numbers":
-      return itemsToNestedListHtml(block.items, "ol");
+      return itemsToNestedListHtml(block.items, "ol", block.start);
     case "checklist":
       // Real checkbox <input> so pasting BACK into WAULT is detected as a checklist
       // (extractListItems looks for input[type=checkbox]); external editors render a box too.
@@ -583,7 +587,7 @@ function serializeBlockToText(block) {
       // identical to WAULT and paste back into the right levels.
       const list = (block.items||[]).filter(Boolean);
       const base = list.length ? Math.min(...list.map(i=>Math.max(0,i.level||0))) : 0;
-      const counters = {};
+      const counters = { 0: (window.WaultReliability?.normalizeNumberListStart?.(block.start) || 1) - 1 };
       return list.map(i=>{
         const lvl = Math.max(0,(i.level||0)-base);
         Object.keys(counters).forEach(k=>{ if (+k > lvl) delete counters[k]; });
@@ -982,7 +986,13 @@ function parseMarkdownishBlocks(text = "") {
       const indent = indentLevel(raw);
       // Indentation wins when present; otherwise the marker style sets the level.
       const level = indent > 0 ? indent : style;
-      numberItems.push({ id: nid(), text: parseInlineMd(cls.text.trim()), level });
+      numberItems.push({
+        id: nid(),
+        text: parseInlineMd(cls.text.trim()),
+        level,
+        markerStyle: style,
+        markerOrdinal: cls.ord,
+      });
       prevStyle = style;
       if (style === 1) prevAlphaOrd = cls.ord;
       j++;
@@ -990,8 +1000,14 @@ function parseMarkdownishBlocks(text = "") {
     if (numberItems.length) {
       flushParagraph();
       const base = Math.min(...numberItems.map(it => it.level || 0));
-      numberItems.forEach(it => { it.level = Math.max(0, (it.level || 0) - base); });
-      blocks.push({ id: nid(), type:"numbers", items: numberItems });
+      const firstRootNumber = numberItems.find((item) => item.level === base && item.markerStyle === 0);
+      const start = window.WaultReliability?.normalizeNumberListStart?.(firstRootNumber?.markerOrdinal) || 1;
+      numberItems.forEach((item) => {
+        item.level = Math.max(0, (item.level || 0) - base);
+        delete item.markerStyle;
+        delete item.markerOrdinal;
+      });
+      blocks.push({ id: nid(), type:"numbers", items: numberItems, ...(start > 1 ? { start } : {}) });
       i = j - 1;
       continue;
     }
@@ -1254,17 +1270,11 @@ function EditableText({
 
     const plainText = (ref.current.innerText || "").replace(/\u200B/g, "");
     const caretOffset = getCaretOffset(ref.current);
-    const prefix = spaceAlreadyInserted
-      ? (plainText.startsWith("1. ") && caretOffset === 3
-          ? { type:"numbers" }
-          : plainText.startsWith("- ") && caretOffset === 2
-            ? { type:"bullets" }
-            : null)
-      : (plainText.startsWith("1.") && caretOffset === 2
-          ? { type:"numbers" }
-          : plainText.startsWith("-") && caretOffset === 1
-            ? { type:"bullets" }
-            : null);
+    const prefix = window.WaultReliability?.parseListPrefixShortcut?.(
+      plainText,
+      caretOffset,
+      spaceAlreadyInserted
+    ) || null;
     if (!prefix) return false;
 
     // The caret is immediately after the command (and its Space for the input
@@ -1272,6 +1282,7 @@ function EditableText({
     const split = splitHtmlAtCaret(ref.current);
     onMarkdownShortcut({
       type: prefix.type,
+      start: prefix.start,
       remainingHtml: sanitizeHtml(split?.after || ""),
     });
     return true;
@@ -1929,6 +1940,41 @@ const itemWithLevel = (item) => {
 };
 const textIndentLevel = (block) => Math.max(0, Math.min(MAX_LIST_LEVEL, Number(block?.textIndentLevel) || 0));
 
+function useListItemFocusController() {
+  const listRef = useRef(null);
+  const [focusRequest, setFocusRequest] = useState({ itemId: null, atStart: false, key: 0 });
+  const requestFocus = (itemId, atStart = false) => {
+    setFocusRequest((current) => ({
+      itemId,
+      atStart,
+      key: current.key + 1,
+    }));
+  };
+  const findEditable = (itemId) => {
+    const rows = Array.from(listRef.current?.querySelectorAll("[data-item-id]") || []);
+    const row = rows.find((candidate) => candidate.getAttribute("data-item-id") === itemId);
+    return row?.querySelector(".editable") || null;
+  };
+  const preFocus = (itemId, atStart = false) => {
+    const editable = findEditable(itemId);
+    if (!editable) return;
+    editable.focus({ preventScroll: true });
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(editable);
+      range.collapse(atStart);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } catch (_) {}
+  };
+  return { listRef, focusRequest, requestFocus, preFocus };
+}
+
+function replaceListItemFromShortcut(block, itemId, shortcut) {
+  return window.WaultReliability?.splitListBlockForShortcut?.(block, itemId, shortcut, nid) || null;
+}
+
 function localDateValue(date = new Date()) {
   const d = new Date(date);
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
@@ -2411,29 +2457,12 @@ function CalloutBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
 
 // ====== BULLETS ======
 function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, patchBlock, onDeleteEmpty, onConvertToText, onReplaceBlock, onAddBlockAfter, onExitBlock, autoFocus, focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock, onMergeNextBlock }) {
-  const [focusItemId, setFocusItemId] = useState(null);
-  const [focusKey, setFocusKey] = useState(0);
-  // Pre-focus an item BEFORE the DOM mutation so focus is never lost when
-  // the current element is removed from the tree.
-  const preFocusEl = (itemId, atStart = false) => {
-    const row = document.querySelector(`[data-item-id="${itemId}"]`);
-    const el = row?.querySelector('.editable');
-    if (!el) return;
-    el.focus();
-    try {
-      const r = document.createRange();
-      r.selectNodeContents(el);
-      r.collapse(atStart);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(r);
-    } catch (_) {}
-  };
+  const { listRef, focusRequest, requestFocus, preFocus } = useListItemFocusController();
   const upd = (id, patch) => updateBlock({ ...block, items: block.items.map(i => i.id === id ? itemWithLevel({ ...i, ...(typeof patch === "string" ? { text:patch } : patch) }) : itemWithLevel(i)) });
   const addAfter = (id, level = 0) => {
     const newItem = itemWithLevel({ id: nid(), text:"", level });
     updateBlock({ ...block, items: withItemInserted(block.items, id, newItem) });
-    setFocusItemId(newItem.id);
+    requestFocus(newItem.id, true);
   };
   const addBefore = (id) => {
     const idx = block.items.findIndex(i => i.id === id);
@@ -2449,21 +2478,7 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
     // Insert at current index (pushes current item down)
     next.splice(Math.max(0, idx), 0, newItem);
     updateBlock({ ...block, items: next.map(itemWithLevel) });
-    setFocusItemId(newItem.id);
-    // Force focus to new item at start of text
-    setTimeout(() => {
-      const row = document.querySelector(`[data-item-id="${newItem.id}"]`);
-      const el = row?.querySelector('.editable');
-      if (el) {
-        el.focus();
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        range.collapse(true);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-      }
-    }, 0);
+    requestFocus(newItem.id, true);
   };
   const exitList = (id) => {
     const next = block.items.filter(i => i.id !== id && !isBlankText(i.text));
@@ -2487,7 +2502,7 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
   return (
     <div className="block-wrap">
       <BlockHandle blockId={blockId} onDragBlockStart={onDragBlockStart} onDragBlockEnd={onDragBlockEnd} />
-      <div className="list-block">
+      <div ref={listRef} className="list-block">
         {(block.items || []).map((item, index) => {
           const level = listLevel(item);
           const isFirst = index === 0;
@@ -2495,28 +2510,12 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
           // Arrow up: first item → go to previous block; other items → go to previous item in list
           const handleMoveToPrev = isFirst ? onMoveToPreviousBlock : () => {
             const prevItem = block.items[index - 1];
-            setFocusItemId(prevItem.id);
-            setFocusKey(k => k + 1);
-            setTimeout(() => {
-              const row = document.querySelector(`[data-item-id="${prevItem.id}"]`);
-              const el = row?.querySelector('.editable');
-              if (!el) return;
-              el.focus();
-              try { const r = document.createRange(); r.selectNodeContents(el); r.collapse(false); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r); } catch(_) {}
-            }, 0);
+            requestFocus(prevItem.id);
           };
           // Arrow down: last item → go to next block; other items → go to next item in list
           const handleMoveToNext = isLast ? onMoveToNextBlock : () => {
             const nextItem = block.items[index + 1];
-            setFocusItemId(nextItem.id);
-            setFocusKey(k => k + 1);
-            setTimeout(() => {
-              const row = document.querySelector(`[data-item-id="${nextItem.id}"]`);
-              const el = row?.querySelector('.editable');
-              if (!el) return;
-              el.focus();
-              try { const r = document.createRange(); r.selectNodeContents(el); r.collapse(true); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r); } catch(_) {}
-            }, 0);
+            requestFocus(nextItem.id);
           };
           return (
           <div key={item.id} data-item-id={item.id} className={`list-row list-level-${level}`}>
@@ -2526,9 +2525,9 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
               onChange={(v) => upd(item.id, v)}
               placeholder="List item"
               multiline
-              autoFocus={focusItemId === item.id || (autoFocus && index === 0)}
-              focusAtStart={autoFocus && index === 0 && focusAtStart}
-              focusKey={focusItemId === item.id ? focusKey : 0}
+              autoFocus={focusRequest.itemId === item.id || (!focusRequest.itemId && autoFocus && index === 0)}
+              focusAtStart={focusRequest.itemId === item.id ? focusRequest.atStart : (!focusRequest.itemId && autoFocus && index === 0 && focusAtStart)}
+              focusKey={focusRequest.itemId === item.id ? focusRequest.key : 0}
               onEnter={(_, caretPos, split) => {
                 if (isBlankText(item.text)) {
                   if (level > 0) { upd(item.id, { level: level - 1 }); return; }
@@ -2546,17 +2545,23 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
                   i.id === item.id ? itemWithLevel({ ...i, text: headHtml }) : itemWithLevel(i)
                 );
                 updateBlock({ ...block, items: withItemInserted(updatedItems, item.id, newItem) });
-                window._pendingCaretOffset = 0; // caret at START of the new line (like text blocks)
-                setFocusItemId(newItemId);
-                setFocusKey(k => k + 1);
+                requestFocus(newItemId, true);
               }}
+              onMarkdownShortcut={level === 0 ? (shortcut) => {
+                if (shortcut.type === "bullets") {
+                  upd(item.id, shortcut.remainingHtml || "");
+                  return;
+                }
+                const replacement = replaceListItemFromShortcut(block, item.id, shortcut);
+                if (replacement) onReplaceBlock?.(replacement.blocks, replacement.focusId);
+              } : undefined}
               onTab={() => upd(item.id, { level: Math.min(MAX_LIST_LEVEL, level + 1) })}
               onShiftTab={() => upd(item.id, { level: Math.max(0, level - 1) })}
               onBackspaceEmpty={() => {
                 if (level > 0) { upd(item.id, { level: level - 1 }); return; }
                 if (index > 0) {
                   const prevItem = block.items[index - 1];
-                  preFocusEl(prevItem.id, false);
+                  preFocus(prevItem.id, false);
                   patchBlock(block.id, b => ({ ...b, items: b.items.filter(i => i.id !== item.id) }));
                   return;
                 }
@@ -2567,7 +2572,7 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
                 if (level > 0) { upd(item.id, { level: level - 1 }); return; }
                 if (index > 0) {
                   const prevItem = block.items[index - 1];
-                  preFocusEl(prevItem.id, false);
+                  preFocus(prevItem.id, false);
                   patchBlock(block.id, b => {
                     const latestPrev = b.items.find(i => i.id === prevItem.id);
                     const latestCurr = b.items.find(i => i.id === item.id);
@@ -2603,7 +2608,7 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
                   const idx = block.items.findIndex(i => i.id === item.id);
                   const merged = [...block.items.slice(0, idx + 1), ...newItems, ...block.items.slice(idx + 1)];
                   updateBlock({ ...block, items: merged });
-                  if (newItems.length) { setFocusItemId(newItems[0].id); setFocusKey(k => k + 1); }
+                  if (newItems.length) requestFocus(newItems[0].id, true);
                   return;
                 }
                 // Safety net: plain-text pastes become new list items at current level.
@@ -2613,7 +2618,7 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
                   const idx = block.items.findIndex(i => i.id === item.id);
                   const merged = [...block.items.slice(0, idx + 1), ...newItems, ...block.items.slice(idx + 1)];
                   updateBlock({ ...block, items: merged });
-                  if (newItems.length) { setFocusItemId(newItems[0].id); setFocusKey(k => k + 1); }
+                  if (newItems.length) requestFocus(newItems[0].id, true);
                   return;
                 }
                 onReplaceBlock?.(pastedBlocks, focusId || pastedBlocks[0]?.id);
@@ -2631,28 +2636,12 @@ function BulletsBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
 
 // ====== NUMBERED LIST ======
 function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, patchBlock, onDeleteEmpty, onConvertToText, onReplaceBlock, onAddBlockAfter, onExitBlock, autoFocus, focusAtStart = false, onMoveToPreviousBlock, onMoveToNextBlock, onMergeNextBlock }) {
-  const [focusItemId, setFocusItemId] = useState(null);
-  const [focusKey, setFocusKey] = useState(0);
-  const preFocusEl = (itemId, atStart = false) => {
-    const row = document.querySelector(`[data-item-id="${itemId}"]`);
-    const el = row?.querySelector('.editable');
-    if (!el) return;
-    el.focus();
-    try {
-      const r = document.createRange();
-      r.selectNodeContents(el);
-      r.collapse(atStart);
-      const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(r);
-    } catch (_) {}
-  };
+  const { listRef, focusRequest, requestFocus, preFocus } = useListItemFocusController();
   const upd = (id, patch) => updateBlock({ ...block, items: block.items.map(i => i.id === id ? itemWithLevel({ ...i, ...(typeof patch === "string" ? { text:patch } : patch) }) : itemWithLevel(i)) });
   const addAfter = (id, level = 0) => {
     const newItem = itemWithLevel({ id: nid(), text:"", level });
     updateBlock({ ...block, items: withItemInserted(block.items, id, newItem) });
-    setFocusItemId(newItem.id);
-    setFocusKey((key) => key + 1);
+    requestFocus(newItem.id, true);
   };
   const addBefore = (id) => {
     const idx = block.items.findIndex(i => i.id === id);
@@ -2668,22 +2657,7 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
     // Insert at current index (pushes current item down)
     next.splice(Math.max(0, idx), 0, newItem);
     updateBlock({ ...block, items: next.map(itemWithLevel) });
-    setFocusItemId(newItem.id);
-    setFocusKey((key) => key + 1);
-    // Force focus to new item at start of text
-    setTimeout(() => {
-      const row = document.querySelector(`[data-item-id="${newItem.id}"]`);
-      const el = row?.querySelector('.editable');
-      if (el) {
-        el.focus();
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        range.collapse(true);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-      }
-    }, 0);
+    requestFocus(newItem.id, true);
   };
   const exitList = (id) => {
     const next = block.items.filter(i => i.id !== id && !isBlankText(i.text));
@@ -2705,8 +2679,7 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
     updateBlock({ ...block, items: itemsToSave });
     const focusTarget = itemsToSave[Math.max(0, idx - 1)] || itemsToSave[0];
     if (focusTarget) {
-      setFocusItemId(focusTarget.id);
-      setFocusKey((key) => key + 1);
+      requestFocus(focusTarget.id);
     }
   };
   // Compute ordinals: count consecutive siblings at the same level under the same parent.
@@ -2716,6 +2689,7 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
     // parentId[l] = the flat index of the most recent item at level l-1 (i.e. the parent of items at level l).
     // counter[l] = running count of items at level l under the current parent.
     const counter = new Array(MAX_LIST_LEVEL + 1).fill(0);
+    counter[0] = (window.WaultReliability?.normalizeNumberListStart?.(block.start) || 1) - 1;
     const parentIdx = new Array(MAX_LIST_LEVEL + 1).fill(-1); // index of the most-recent item at level l-1
     return block.items.map((item, idx) => {
       const lv = listLevel(item);
@@ -2741,34 +2715,18 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
   return (
     <div className="block-wrap">
       <BlockHandle blockId={blockId} onDragBlockStart={onDragBlockStart} onDragBlockEnd={onDragBlockEnd} />
-      <div className="list-block">
+      <div ref={listRef} className="list-block">
         {(block.items || []).map((item, idx) => {
           const level = listLevel(item);
           const isFirst = idx === 0;
           const isLast = idx === block.items.length - 1;
           const handleMoveToPrev = isFirst ? onMoveToPreviousBlock : () => {
             const prevItem = block.items[idx - 1];
-            setFocusItemId(prevItem.id);
-            setFocusKey(k => k + 1);
-            setTimeout(() => {
-              const row = document.querySelector(`[data-item-id="${prevItem.id}"]`);
-              const el = row?.querySelector('.editable');
-              if (!el) return;
-              el.focus();
-              try { const r = document.createRange(); r.selectNodeContents(el); r.collapse(false); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r); } catch(_) {}
-            }, 0);
+            requestFocus(prevItem.id);
           };
           const handleMoveToNext = isLast ? onMoveToNextBlock : () => {
             const nextItem = block.items[idx + 1];
-            setFocusItemId(nextItem.id);
-            setFocusKey(k => k + 1);
-            setTimeout(() => {
-              const row = document.querySelector(`[data-item-id="${nextItem.id}"]`);
-              const el = row?.querySelector('.editable');
-              if (!el) return;
-              el.focus();
-              try { const r = document.createRange(); r.selectNodeContents(el); r.collapse(true); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r); } catch(_) {}
-            }, 0);
+            requestFocus(nextItem.id);
           };
           return (
           <div key={item.id} data-item-id={item.id} className={`list-row list-level-${level}`}>
@@ -2780,9 +2738,9 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
               onChange={(v) => upd(item.id, v)}
               placeholder={level ? "Sub-item" : "Numbered item"}
               multiline
-              autoFocus={focusItemId === item.id || (autoFocus && idx === 0)}
-              focusAtStart={autoFocus && idx === 0 && focusAtStart}
-              focusKey={focusItemId === item.id ? focusKey : 0}
+              autoFocus={focusRequest.itemId === item.id || (!focusRequest.itemId && autoFocus && idx === 0)}
+              focusAtStart={focusRequest.itemId === item.id ? focusRequest.atStart : (!focusRequest.itemId && autoFocus && idx === 0 && focusAtStart)}
+              focusKey={focusRequest.itemId === item.id ? focusRequest.key : 0}
               onEnter={(_, caretPos, split) => {
                 if (isBlankText(item.text)) {
                   if (level > 0) { upd(item.id, { level: level - 1 }); return; }
@@ -2800,17 +2758,19 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
                   i.id === item.id ? itemWithLevel({ ...i, text: headHtml }) : itemWithLevel(i)
                 );
                 updateBlock({ ...block, items: withItemInserted(updatedItems, item.id, newItem) });
-                window._pendingCaretOffset = 0; // caret at START of the new line (like text blocks)
-                setFocusItemId(newItemId);
-                setFocusKey(k => k + 1);
+                requestFocus(newItemId, true);
               }}
+              onMarkdownShortcut={level === 0 ? (shortcut) => {
+                const replacement = replaceListItemFromShortcut(block, item.id, shortcut);
+                if (replacement) onReplaceBlock?.(replacement.blocks, replacement.focusId);
+              } : undefined}
               onTab={() => upd(item.id, { level: Math.min(MAX_LIST_LEVEL, level + 1) })}
               onShiftTab={() => upd(item.id, { level: Math.max(0, level - 1) })}
               onBackspaceEmpty={() => {
                 if (level > 0) { upd(item.id, { level: level - 1 }); return; }
                 if (idx > 0) {
                   const prevItem = block.items[idx - 1];
-                  preFocusEl(prevItem.id, false);
+                  preFocus(prevItem.id, false);
                   patchBlock(block.id, b => ({ ...b, items: b.items.filter(i => i.id !== item.id) }));
                   return;
                 }
@@ -2821,7 +2781,7 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
                 if (level > 0) { upd(item.id, { level: level - 1 }); return; }
                 if (idx > 0) {
                   const prevItem = block.items[idx - 1];
-                  preFocusEl(prevItem.id, false);
+                  preFocus(prevItem.id, false);
                   patchBlock(block.id, b => {
                     const latestPrev = b.items.find(i => i.id === prevItem.id);
                     const latestCurr = b.items.find(i => i.id === item.id);
@@ -2855,7 +2815,7 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
                   const insertIdx = block.items.findIndex(i => i.id === item.id);
                   const merged = [...block.items.slice(0, insertIdx + 1), ...newItems, ...block.items.slice(insertIdx + 1)];
                   updateBlock({ ...block, items: merged });
-                  if (newItems.length) { setFocusItemId(newItems[0].id); setFocusKey(k => k + 1); }
+                  if (newItems.length) requestFocus(newItems[0].id, true);
                   return;
                 }
                 // Safety net: if everything pasted is plain text, insert as new list
@@ -2865,7 +2825,7 @@ function NumbersBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, update
                   const insertIdx = block.items.findIndex(i => i.id === item.id);
                   const merged = [...block.items.slice(0, insertIdx + 1), ...newItems, ...block.items.slice(insertIdx + 1)];
                   updateBlock({ ...block, items: merged });
-                  if (newItems.length) { setFocusItemId(newItems[0].id); setFocusKey(k => k + 1); }
+                  if (newItems.length) requestFocus(newItems[0].id, true);
                   return;
                 }
                 onReplaceBlock?.(pastedBlocks, focusId || pastedBlocks[0]?.id);

@@ -94,12 +94,69 @@ check(R.classifySyncStatus('Cloud refresh failed — not saving cache')?.label =
 check(R.classifySyncStatus('Connected to cloud')?.label === 'Not synced', 'connection-only state was mislabelled as synced');
 check(R.classifySyncStatus('Team catalogue loaded')?.label === 'Not synced', 'catalogue-only state was mislabelled as synced');
 
+check(R.parseListPrefixShortcut('3.', 2)?.start === 3, 'explicit numbered-list start was not recognized');
+check(R.parseListPrefixShortcut('10)', 3)?.start === 10, 'multi-digit numbered-list shortcut was not recognized');
+check(R.parseListPrefixShortcut('- ', 2, true)?.type === 'bullets', 'bullet shortcut with inserted space was not recognized');
+check(!R.parseListPrefixShortcut('item 3.', 7), 'number marker in normal text was misread as a list shortcut');
+
+let listIdCounter = 0;
+const makeListId = () => `list_${++listIdCounter}`;
+const mixedNumberBlock = {
+  id: 'numbers',
+  type: 'numbers',
+  items: [
+    { id: 'one', text: 'One' },
+    { id: 'two', text: 'Two' },
+    { id: 'convert', text: '-' },
+    { id: 'after', text: 'After' },
+  ],
+};
+const bulletSplit = R.splitListBlockForShortcut(
+  mixedNumberBlock,
+  'convert',
+  { type: 'bullets', remainingHtml: '' },
+  makeListId
+);
+check(bulletSplit.blocks.map((block) => block.type).join(',') === 'numbers,bullets,numbers', 'mixed number/bullet blocks were not split in document order');
+check(bulletSplit.blocks[0].items.map((item) => item.text).join(',') === 'One,Two', 'numbered rows before a bullet conversion changed');
+check(bulletSplit.blocks[2].start === 3, 'numbering did not continue at 3 after an inserted bullet');
+check(bulletSplit.blocks[2].items[0].text === 'After', 'numbered rows after a bullet conversion changed');
+
+const resumedNumbers = R.splitListBlockForShortcut(
+  {
+    id: 'bullets',
+    type: 'bullets',
+    items: [
+      { id: 'bullet-one', text: 'Bullet one' },
+      { id: 'resume', text: '3.' },
+    ],
+  },
+  'resume',
+  { type: 'numbers', start: 3, remainingHtml: '' },
+  makeListId
+);
+check(resumedNumbers.blocks.map((block) => block.type).join(',') === 'bullets,numbers', 'bullet-to-number continuation changed document order');
+check(resumedNumbers.blocks[1].start === 3, 'numbered list did not resume at the explicit marker');
+
+for (let index = 1; index <= 2000; index += 1) {
+  const shortcut = R.parseListPrefixShortcut(`${index}.`, String(index).length + 1);
+  check(shortcut?.type === 'numbers' && shortcut.start === index, `numbered shortcut failed at ${index}`);
+}
+
 const workspaceAppSource = readFileSync(new URL('../workspace-app.jsx', import.meta.url), 'utf8');
+const workspaceBlocksSource = readFileSync(new URL('../workspace-blocks.jsx', import.meta.url), 'utf8');
+const bulletAndNumberSource = workspaceBlocksSource.slice(
+  workspaceBlocksSource.indexOf('function BulletsBlock'),
+  workspaceBlocksSource.indexOf('function ChecklistBlock')
+);
 const firebaseSyncSource = readFileSync(new URL('../firebase-sync.mjs', import.meta.url), 'utf8');
 const databaseRulesSource = readFileSync(new URL('../database.rules.json', import.meta.url), 'utf8');
 check(!workspaceAppSource.includes('DEV_PEEK'), 'localhost auth bypass is still present');
 check(!workspaceAppSource.includes("sessionStorage.getItem('wn_session_id')"), 'browser tabs can still share a save-session id');
 check(!/lower\.includes\(['"]connected['"]\)/.test(workspaceAppSource), 'connection state is still displayed as a confirmed save');
+check(workspaceAppSource.includes('workspaceDataEqual(latest.data, remote)'), 'verified equal Firebase reads do not settle the save indicator');
+check(!bulletAndNumberSource.includes('document.querySelector(`[data-item-id='), 'bullet/number caret targeting still uses a page-global row lookup');
+check(workspaceBlocksSource.includes('replaceListItemFromShortcut'), 'mixed-list row conversion is not wired into the editor');
 check(!firebaseSyncSource.includes('wernahhh@gmail.com'), 'retired owner email remains in Firebase client access control');
 check(!databaseRulesSource.includes('wernahhh@gmail.com'), 'retired owner email remains in Firebase database rules');
 check(databaseRulesSource.includes("auth.token.email === 'eewern21@gmail.com'"), 'owner-only Firebase rules are not tied to the canonical owner email');
