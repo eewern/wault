@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Invoice Generator — XALT / Churns Tech</title>
+<style>
+  :root{
+    --accent:#EE3A2B;
+    --accent-soft:#fdecea;
+    --ink:#1a1a1a;
+    --muted:#8a8f98;
+    --line:#e7e8ec;
+    --sheet:#ffffff;
+    --bg:#f2f3f5;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased;
+  }
+
+  /* ---------- Toolbar ---------- */
+  .toolbar{
+    position:sticky;top:0;z-index:50;display:flex;flex-wrap:wrap;gap:10px;align-items:center;
+    padding:12px 18px;background:#fff;border-bottom:1px solid var(--line);box-shadow:0 1px 6px rgba(0,0,0,.04);
+  }
+  .toolbar .group{display:flex;gap:8px;align-items:center}
+  .toolbar .spacer{flex:1}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .seg button{border:0;background:#fff;padding:9px 16px;font-size:13px;font-weight:600;cursor:pointer;color:var(--muted)}
+  .seg button.active{background:var(--accent);color:#fff}
+  .btn{border:1px solid var(--line);background:#fff;color:var(--ink);padding:9px 14px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:7px}
+  .btn:hover{border-color:#c9ccd2}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.primary:hover{filter:brightness(.94)}
+  .chk{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;color:var(--ink);cursor:pointer}
+
+  /* ---------- Sheet ---------- */
+  .stage{padding:26px 16px 60px;display:flex;flex-direction:column;align-items:center;gap:22px}
+  .sheet{
+    background:var(--sheet);width:210mm;min-height:297mm;padding:22mm 18mm 24mm;
+    box-shadow:0 8px 30px rgba(0,0,0,.10);border-radius:2px;position:relative;
+  }
+
+  .f{
+    border:1px solid transparent;border-radius:5px;background:transparent;font:inherit;color:inherit;
+    padding:2px 4px;margin:-2px -4px;width:100%;transition:background .12s,border-color .12s;
+  }
+  .f:hover{background:#f7f8fa}
+  .f:focus{outline:none;background:#fff;border-color:var(--accent)}
+  textarea.f{resize:none;overflow:hidden;line-height:1.5}
+  .f::placeholder{color:#c2c6cd}
+
+  /* ---------- Header ---------- */
+  .head{display:flex;justify-content:space-between;align-items:flex-start;gap:24px}
+  .logo-wrap{position:relative;width:210px;max-width:46%}
+  .logo-box{width:100%;min-height:70px;border-radius:12px;overflow:hidden;display:flex;align-items:center;justify-content:flex-start;cursor:pointer;position:relative}
+  .logo-box img{max-width:100%;max-height:96px;display:block}
+  .logo-fallback{display:flex;align-items:center;justify-content:center;width:100%;height:88px;border-radius:12px;background:var(--accent);color:#fff;font-weight:800;letter-spacing:.5px;font-size:40px;font-family:"Trebuchet MS",Verdana,sans-serif}
+  .logo-hint{position:absolute;bottom:-18px;left:2px;font-size:11px;color:var(--muted);opacity:0;transition:opacity .15s;white-space:nowrap}
+  .logo-wrap:hover .logo-hint{opacity:1}
+
+  .title-col{text-align:right;min-width:250px}
+  .doc-title{font-size:40px;font-weight:800;letter-spacing:-1px;margin:0 0 14px;text-align:right;color:var(--ink)}
+  .meta{display:inline-grid;grid-template-columns:auto 130px;gap:6px 14px;text-align:right;font-size:13px}
+  .meta .lbl{color:var(--muted)}
+  .meta .val input{text-align:right;font-weight:600}
+
+  /* ---------- Parties ---------- */
+  .parties{display:grid;grid-template-columns:1fr 1fr;gap:30px;margin-top:34px}
+  .party .cap{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+  .party.right{text-align:right}
+  .party .name{font-size:19px;font-weight:800;margin-bottom:4px}
+  .party .line{font-size:13px;color:#4a4f57;line-height:1.55}
+  .shipto{margin-top:20px}
+
+  /* ---------- Items ---------- */
+  table.items{width:100%;border-collapse:collapse;margin-top:30px;font-size:13px}
+  table.items thead th{background:var(--accent);color:#fff;font-weight:700;text-align:left;padding:11px 12px;font-size:11px;letter-spacing:.6px;text-transform:uppercase}
+  table.items thead th.num{text-align:right}
+  table.items tbody td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  table.items tbody tr:nth-child(even){background:#fafbfc}
+  td.num{text-align:right;white-space:nowrap}
+  td.num input{text-align:right}
+  .item-desc{font-weight:600}
+  .item-sub{font-size:12px;color:var(--muted);margin-top:2px}
+  .rowdel{position:absolute;left:-30px;top:8px;border:0;background:transparent;color:#c9ccd2;cursor:pointer;font-size:18px;line-height:1}
+  tr.item{position:relative}
+  .rowdel:hover{color:var(--accent)}
+  .addrow{margin-top:10px}
+
+  /* ---------- Footer (page 1) ---------- */
+  .foot{display:grid;grid-template-columns:1.15fr .85fr;gap:36px;margin-top:30px}
+  .paybox{background:var(--accent-soft);border-radius:12px;padding:16px 18px;border:1px solid color-mix(in srgb,var(--accent) 18%,transparent)}
+  .paybox h4,.notes h4{margin:0 0 8px;font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:var(--accent)}
+  .paybox .prow{display:flex;gap:8px;font-size:13px;line-height:1.7}
+  .paybox .prow .k{color:var(--muted);min-width:96px}
+  .paybox .prow .v{font-weight:600}
+  .paynote{margin-top:10px;font-size:12px;color:#4a4f57;font-style:italic;line-height:1.5}
+  .notes{margin-top:18px}
+  .notes h4{color:var(--muted)}
+  .notes .body{font-size:12.5px;color:#4a4f57;line-height:1.6}
+
+  .totals{font-size:13.5px}
+  .totals .trow{display:flex;justify-content:space-between;padding:8px 2px;border-bottom:1px solid var(--line)}
+  .totals .trow .k{color:var(--muted)}
+  .totals .trow .v{font-weight:600}
+  .totals .trow.sst .k{display:flex;align-items:center;gap:6px}
+  .sst-pct{width:52px;text-align:right}
+  .totals .grand{display:flex;justify-content:space-between;align-items:center;background:var(--accent);color:#fff;border-radius:10px;padding:14px 16px;margin-top:12px;font-size:16px;font-weight:800}
+  .totals .grand .v{font-size:19px}
+  .money-in{width:120px;text-align:right}
+  .curr{color:var(--muted);font-weight:600;margin-right:2px}
+
+  .sign{display:flex;justify-content:flex-end;margin-top:40px}
+  .sign-box{text-align:center;width:220px}
+  .sign-img{min-height:60px;display:flex;align-items:flex-end;justify-content:center;cursor:pointer}
+  .sign-img img{max-height:70px;max-width:200px}
+  .sign-line{border-top:1px solid var(--ink);margin-top:6px;padding-top:6px;font-size:12px;color:var(--muted)}
+
+  .page-footer{position:absolute;left:18mm;right:18mm;bottom:10mm;text-align:center;font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:6px}
+
+  /* ---------- Page 2 : Scope, Deliverables & Terms ---------- */
+  .sheet.page2{page-break-before:always}
+  .p2-title{font-size:26px;font-weight:800;letter-spacing:-.5px;margin:0 0 4px}
+  .p2-sub{font-size:12px;color:var(--muted);margin-bottom:24px}
+  .p2-sec{margin-bottom:26px}
+  .p2-sec h3{font-size:12px;letter-spacing:1.2px;text-transform:uppercase;color:var(--accent);margin:0 0 10px;border-bottom:2px solid var(--accent-soft);padding-bottom:6px}
+  ul.editlist{margin:0;padding-left:22px;font-size:13.5px;line-height:1.7;color:#333}
+  ul.editlist:focus{outline:none}
+  ul.editlist li{margin-bottom:4px}
+  ul.editlist:hover{background:#f7f8fa;border-radius:6px}
+  table.timeline{width:100%;border-collapse:collapse;font-size:13px}
+  table.timeline thead th{text-align:left;font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--muted);border-bottom:2px solid var(--line);padding:8px 10px}
+  table.timeline tbody td{border-bottom:1px solid var(--line);padding:6px 10px;vertical-align:top}
+  table.timeline tbody tr{position:relative}
+  table.timeline .phase input{font-weight:700}
+  .tldel{position:absolute;left:-26px;top:8px;border:0;background:transparent;color:#c9ccd2;cursor:pointer;font-size:16px}
+  .tldel:hover{color:var(--accent)}
+
+  /* ---------- Print ---------- */
+  @media print{
+    @page{size:A4;margin:0}
+    body{background:#fff}
+    .toolbar,.no-print,.rowdel,.tldel,.logo-hint,.addrow{display:none !important}
+    .stage{padding:0;gap:0}
+    .sheet{box-shadow:none;width:auto;min-height:auto;border-radius:0;margin:0;height:297mm}
+    .f,ul.editlist{border-color:transparent !important;background:transparent !important}
+    .f:hover,ul.editlist:hover{background:transparent !important}
+    table.items tbody tr:nth-child(even){background:#fafbfc !important}
+    table.items tbody tr:nth-child(even),table.items thead th,.totals .grand,.logo-fallback,.paybox,.p2-sec h3{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  }
+
+  @media (max-width:900px){
+    .sheet{width:100%;padding:24px 18px}
+    .parties,.foot{grid-template-columns:1fr;gap:20px}
+    .title-col,.doc-title,.meta,.party.right{text-align:left}
+    .page-footer{position:static;margin-top:24px}
+  }
+</style>
+</head>
+<body>
+
+<!-- ================= TOOLBAR ================= -->
+<div class="toolbar no-print">
+  <div class="group">
+    <div class="seg" id="companySeg">
+      <button data-co="XALT" class="active">XALT</button>
+      <button data-co="CHURNS">Churns Tech</button>
+      <button data-co="NEW">New</button>
+    </div>
+  </div>
+  <div class="group">
+    <label class="chk"><input type="checkbox" id="shipToggle"> Ship-to</label>
+    <label class="chk"><input type="checkbox" id="sstToggle"> SST</label>
+    <label class="chk"><input type="checkbox" id="termsToggle"> Terms page</label>
+  </div>
+  <div class="spacer"></div>
+  <div class="group">
+    <button class="btn" id="newBtn">+ New</button>
+    <button class="btn" id="saveBtn">Save JSON</button>
+    <button class="btn" id="loadBtn">Load JSON</button>
+    <button class="btn primary" id="pdfBtn">⬇ Download PDF</button>
+  </div>
+</div>
+
+<div class="stage">
+
+  <!-- ============ PAGE 1 : INVOICE ============ -->
+  <div class="sheet" id="page1">
+    <div class="head">
+      <div class="logo-wrap">
+        <div class="logo-box" id="logoBox" title="Click to upload logo"></div>
+        <div class="logo-hint">Click logo to upload / replace</div>
+      </div>
+      <div class="title-col">
+        <input class="f doc-title" data-field="docTitle" value="INVOICE" />
+        <div class="meta">
+          <div class="lbl">Invoice no.</div>
+          <div class="val"><input class="f" data-field="invNo" /></div>
+          <div class="lbl">Invoice date</div>
+          <div class="val"><input class="f" data-field="invDate" /></div>
+          <div class="lbl">Due date</div>
+          <div class="val"><input class="f" data-field="dueDate" /></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="parties">
+      <div class="party left">
+        <div class="cap">From</div>
+        <input class="f name" data-field="fromName" />
+        <textarea class="f line" data-field="fromDetails" rows="5"></textarea>
+      </div>
+      <div class="party right">
+        <div class="cap">Bill to</div>
+        <input class="f name" data-field="toName" placeholder="Client name" style="text-align:right" />
+        <textarea class="f line" data-field="toDetails" rows="4" placeholder="Client email&#10;Phone&#10;Address" style="text-align:right"></textarea>
+        <div class="shipto" id="shipToBlock" style="display:none">
+          <div class="cap">Ship to</div>
+          <textarea class="f line" data-field="shipDetails" rows="3" placeholder="Shipping address&#10;Tracking #" style="text-align:right"></textarea>
+        </div>
+      </div>
+    </div>
+
+    <table class="items">
+      <thead>
+        <tr>
+          <th style="width:34px" class="num">#</th>
+          <th>Description</th>
+          <th style="width:70px" class="num">Qty</th>
+          <th style="width:120px" class="num">Unit Price</th>
+          <th style="width:130px" class="num">Amount</th>
+        </tr>
+      </thead>
+      <tbody id="itemsBody"></tbody>
+    </table>
+    <button class="btn addrow no-print" id="addRowBtn">+ Add line item</button>
+
+    <div class="foot">
+      <div class="footleft">
+        <div class="paybox">
+          <h4>Payment Instructions</h4>
+          <div class="prow"><span class="k">Bank</span><input class="f v" data-field="payBank" /></div>
+          <div class="prow"><span class="k">Account name</span><input class="f v" data-field="payAccName" /></div>
+          <div class="prow"><span class="k">Account no.</span><input class="f v" data-field="payAccNo" /></div>
+          <textarea class="f paynote" data-field="payNote" rows="2"></textarea>
+        </div>
+        <div class="notes">
+          <h4>Notes</h4>
+          <textarea class="f body" data-field="notes" rows="3"></textarea>
+        </div>
+      </div>
+
+      <div class="totals">
+        <div class="trow"><span class="k">Subtotal</span><span class="v"><span class="curr">RM</span><span id="tSubtotal">0.00</span></span></div>
+        <div class="trow"><span class="k">Discount</span><span class="v"><span class="curr">RM</span><input class="f money-in" data-field="discount" value="0.00" /></span></div>
+        <div class="trow" id="shipCostRow" style="display:none"><span class="k">Shipping</span><span class="v"><span class="curr">RM</span><input class="f money-in" data-field="shipping" value="0.00" /></span></div>
+        <div class="trow sst" id="sstRow" style="display:none">
+          <span class="k">SST <input class="f sst-pct" data-field="sstPct" value="8" />%</span>
+          <span class="v"><span class="curr">RM</span><span id="tSst">0.00</span></span>
+        </div>
+        <div class="trow"><span class="k">Amount paid</span><span class="v"><span class="curr">RM</span><input class="f money-in" data-field="paid" value="0.00" /></span></div>
+        <div class="grand"><span>Balance Due</span><span class="v"><span class="curr" style="color:#fff;opacity:.85">RM</span><span id="tBalance">0.00</span></span></div>
+      </div>
+    </div>
+
+    <div class="sign">
+      <div class="sign-box">
+        <div class="sign-img" id="signBox" title="Click to upload signature"></div>
+        <div class="sign-line">Authorised signature</div>
+      </div>
+    </div>
+
+    <div class="page-footer" id="footer1">Page 1 of 1</div>
+  </div>
+
+  <!-- ============ PAGE 2 : SCOPE / DELIVERABLES / TERMS ============ -->
+  <div class="sheet page2" id="page2" style="display:none">
+    <h2 class="p2-title" data-field="p2Title">Scope, Deliverables &amp; Terms</h2>
+    <div class="p2-sub"><span data-mirror="fromName"></span> · <span data-mirror="invNo"></span></div>
+
+    <div class="p2-sec">
+      <h3>Scope of Work</h3>
+      <ul class="editlist" contenteditable="true" data-html="scopeHtml"></ul>
+    </div>
+
+    <div class="p2-sec">
+      <h3>Deliverables Timeline</h3>
+      <table class="timeline">
+        <thead><tr><th style="width:32%">Phase</th><th>Deliverables</th><th style="width:22%">Timeline</th></tr></thead>
+        <tbody id="tlBody"></tbody>
+      </table>
+      <button class="btn addrow no-print" id="addTlBtn">+ Add timeline row</button>
+    </div>
+
+    <div class="p2-sec">
+      <h3>Terms &amp; Conditions</h3>
+      <ul class="editlist" contenteditable="true" data-html="termsHtml"></ul>
+    </div>
+
+    <div class="page-footer">Page 2 of 2</div>
+  </div>
+
+</div>
+
+<input type="file" id="logoFile" accept="image/*" hidden />
+<input type="file" id="signFile" accept="image/*" hidden />
+<input type="file" id="jsonFile" accept="application/json,.json" hidden />
+
+<script>
+(function(){
+  "use strict";
+
+  var DEF_SCOPE =
+    "<li>Discovery workshop and requirements gathering</li>"+
+    "<li>AI agent design and solution architecture</li>"+
+    "<li>Development, integration and deployment</li>"+
+    "<li>Testing, handover and documentation</li>";
+  var DEF_TERMS =
+    "<li>50% deposit to commence work, 50% upon delivery.</li>"+
+    "<li>Payment due within 14 days of the invoice date.</li>"+
+    "<li>Two rounds of revisions included; additional scope quoted separately.</li>"+
+    "<li>Intellectual property transfers to the client upon full payment.</li>";
+  var DEF_TIMELINE = [
+    {phase:"Phase 1 — Discovery", deliverable:"Requirements, scope & architecture", when:"Week 1"},
+    {phase:"Phase 2 — Build", deliverable:"Development & integration", when:"Week 2–4"},
+    {phase:"Phase 3 — Delivery", deliverable:"Testing, deployment & handover", when:"Week 5"},
+    {phase:"Support", deliverable:"Post-launch support", when:"14 days"}
+  ];
+  var PAY_NOTE = "Please send a screenshot of the receipt once payment is completed.";
+
+  var COMPANIES = {
+    XALT: {
+      accent:"#EE3A2B", accentSoft:"#fdecea",
+      fromName:"XALT",
+      fromDetails:"Functional Hydration\nhello@drinkxalt.com\nJalan Cemara, Taman Bukit Serdang\n43300 Seri Kembangan, Selangor",
+      logoText:"xalt", invPrefix:"XLT-", docTitle:"INVOICE",
+      notes:"Thank you for your order. Goods sold are not returnable. Please make payment within 14 days of the invoice date.",
+      payBank:"Maybank", payAccName:"Xalt Food", payAccNo:"512987156115", payNote:PAY_NOTE,
+      shipDefault:true, termsDefault:false
+    },
+    CHURNS: {
+      accent:"#1800ad", accentSoft:"#e9e6fb",
+      fromName:"Churns Tech",
+      fromDetails:"AI Agents & Software\neewern21@gmail.com\nJalan Cemara, Taman Bukit Serdang\n43300 Seri Kembangan, Selangor",
+      logoText:"churns", invPrefix:"CHT-", docTitle:"INVOICE",
+      notes:"Thank you for working with Churns Tech. Full scope, deliverables and terms are set out on the following page.",
+      payBank:"Maybank", payAccName:"Churns Tech", payAccNo:"5629 82057779", payNote:PAY_NOTE,
+      shipDefault:false, termsDefault:true
+    },
+    NEW: {
+      accent:"#111111", accentSoft:"#f0f1f3",
+      fromName:"Company Name",
+      fromDetails:"Tagline / description\nemail@company.com\nAddress line 1\nAddress line 2",
+      logoText:"logo", invPrefix:"INV-", docTitle:"INVOICE",
+      notes:"Thank you for your business. Please make payment within 14 days of the invoice date.",
+      payBank:"Maybank", payAccName:"Company Name", payAccNo:"", payNote:PAY_NOTE,
+      shipDefault:false, termsDefault:false
+    }
+  };
+
+  var LS_KEY = "wault_invoice_state_v2";
+  var state = null;
+
+  function $(s){return document.querySelector(s);}
+  function $all(s){return Array.prototype.slice.call(document.querySelectorAll(s));}
+  function fmt(n){ n=isFinite(n)?n:0; return n.toLocaleString("en-MY",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+  function num(v){ var n=parseFloat(String(v==null?"":v).replace(/[^0-9.\-]/g,"")); return isFinite(n)?n:0; }
+  function dISO(off){ var d=new Date(); if(off) d.setDate(d.getDate()+off); return d.toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}); }
+
+  function freshState(co){
+    var c = COMPANIES[co];
+    return {
+      company:co, docTitle:c.docTitle,
+      invNo:c.invPrefix+"0001", invDate:dISO(0), dueDate:dISO(14),
+      fromName:c.fromName, fromDetails:c.fromDetails,
+      toName:"", toDetails:"",
+      shipOn:c.shipDefault, shipDetails:"",
+      items:[{desc:"",sub:"",qty:1,price:0}],
+      payBank:c.payBank, payAccName:c.payAccName, payAccNo:c.payAccNo, payNote:c.payNote,
+      notes:c.notes, discount:0, shipping:0, sstOn:false, sstPct:8, paid:0,
+      termsOn:c.termsDefault, p2Title:"Scope, Deliverables & Terms",
+      scopeHtml:DEF_SCOPE, termsHtml:DEF_TERMS, timeline:DEF_TIMELINE.map(function(r){return {phase:r.phase,deliverable:r.deliverable,when:r.when};}),
+      logo:null, sign:null
+    };
+  }
+
+  function applyTheme(co){
+    var c = COMPANIES[co];
+    document.documentElement.style.setProperty("--accent", c.accent);
+    document.documentElement.style.setProperty("--accent-soft", c.accentSoft);
+    $all("#companySeg button").forEach(function(b){ b.classList.toggle("active", b.dataset.co===co); });
+  }
+
+  function renderLogo(){
+    var box=$("#logoBox");
+    if(state.logo){ box.innerHTML='<img src="'+state.logo+'" alt="logo" />'; }
+    else { box.innerHTML='<div class="logo-fallback">'+COMPANIES[state.company].logoText+'</div>'; }
+  }
+  function renderSign(){ $("#signBox").innerHTML = state.sign?'<img src="'+state.sign+'" alt="signature" />':''; }
+
+  function renderItems(){
+    var body=$("#itemsBody"); body.innerHTML="";
+    state.items.forEach(function(it,i){
+      var tr=document.createElement("tr"); tr.className="item";
+      tr.innerHTML=
+        '<td class="num">'+(i+1)+'<button class="rowdel no-print" data-del="'+i+'" title="Remove line">×</button></td>'+
+        '<td>'+
+          '<textarea class="f item-desc" data-item="'+i+'" data-k="desc" rows="1" placeholder="Item / service"></textarea>'+
+          '<textarea class="f item-sub" data-item="'+i+'" data-k="sub" rows="1" placeholder="Description (Shift+Enter for new line)"></textarea>'+
+        '</td>'+
+        '<td class="num"><input class="f" data-item="'+i+'" data-k="qty" /></td>'+
+        '<td class="num"><input class="f" data-item="'+i+'" data-k="price" /></td>'+
+        '<td class="num"><span class="curr">RM</span><span data-amt="'+i+'">0.00</span></td>';
+      body.appendChild(tr);
+      tr.querySelector('[data-k="desc"]').value=it.desc||"";
+      tr.querySelector('[data-k="sub"]').value=it.sub||"";
+      tr.querySelector('[data-k="qty"]').value=it.qty;
+      tr.querySelector('[data-k="price"]').value=fmt(it.price);
+    });
+    computeTotals(); autosizeAll();
+  }
+
+  function renderTimeline(){
+    var body=$("#tlBody"); body.innerHTML="";
+    (state.timeline||[]).forEach(function(r,i){
+      var tr=document.createElement("tr");
+      tr.innerHTML=
+        '<td class="phase"><input class="f" data-tl="'+i+'" data-k="phase" />'+
+          '<button class="tldel no-print" data-tldel="'+i+'" title="Remove row">×</button></td>'+
+        '<td><textarea class="f" data-tl="'+i+'" data-k="deliverable" rows="1"></textarea></td>'+
+        '<td><input class="f" data-tl="'+i+'" data-k="when" /></td>';
+      body.appendChild(tr);
+      tr.querySelector('[data-k="phase"]').value=r.phase||"";
+      tr.querySelector('[data-k="deliverable"]').value=r.deliverable||"";
+      tr.querySelector('[data-k="when"]').value=r.when||"";
+    });
+    autosizeAll();
+  }
+
+  function computeTotals(){
+    var subtotal=0;
+    state.items.forEach(function(it,i){
+      var amt=num(it.qty)*num(it.price); subtotal+=amt;
+      var span=document.querySelector('[data-amt="'+i+'"]'); if(span) span.textContent=fmt(amt);
+    });
+    var discount=num(state.discount);
+    var shipping=state.shipOn?num(state.shipping):0;
+    var taxable=Math.max(0,subtotal-discount);
+    var sst=state.sstOn?taxable*num(state.sstPct)/100:0;
+    var total=taxable+shipping+sst;
+    $("#tSubtotal").textContent=fmt(subtotal);
+    $("#tSst").textContent=fmt(sst);
+    $("#tBalance").textContent=fmt(total-num(state.paid));
+  }
+
+  function updatePageMeta(){
+    var total = state.termsOn?2:1;
+    $("#page2").style.display = state.termsOn?"":"none";
+    $("#footer1").textContent = "Page 1 of "+total;
+    $all("[data-mirror]").forEach(function(el){ var k=el.dataset.mirror; el.textContent = state[k]||""; });
+  }
+
+  function fillSheet(){
+    $all("[data-field]").forEach(function(el){ var k=el.dataset.field; if(k in state) el.value=state[k]; });
+    $all("[data-html]").forEach(function(el){ var k=el.dataset.html; if(k in state && state[k]!=null) el.innerHTML=state[k]; });
+    $("#shipToggle").checked=state.shipOn;
+    $("#sstToggle").checked=state.sstOn;
+    $("#termsToggle").checked=state.termsOn;
+    $("#shipToBlock").style.display=state.shipOn?"":"none";
+    $("#shipCostRow").style.display=state.shipOn?"":"none";
+    $("#sstRow").style.display=state.sstOn?"":"none";
+    applyTheme(state.company);
+    renderLogo(); renderSign(); renderItems(); renderTimeline(); updatePageMeta();
+    autosizeAll();
+  }
+
+  function autosize(el){ if(el.tagName==="TEXTAREA"){ el.style.height="auto"; el.style.height=el.scrollHeight+"px"; } }
+  function autosizeAll(){ $all("textarea.f").forEach(autosize); }
+
+  function save(){ try{ localStorage.setItem(LS_KEY,JSON.stringify(state)); }catch(e){} }
+  function load(){ try{ var r=localStorage.getItem(LS_KEY); if(r) return JSON.parse(r); }catch(e){} return null; }
+
+  function switchCompany(co){
+    var c=COMPANIES[co], prev=COMPANIES[state.company];
+    state.company=co;
+    state.fromName=c.fromName; state.fromDetails=c.fromDetails;
+    state.payBank=c.payBank; state.payAccName=c.payAccName; state.payAccNo=c.payAccNo;
+    if(!state.payNote || state.payNote===prev.payNote) state.payNote=c.payNote;
+    var isTpl=Object.keys(COMPANIES).some(function(k){return state.notes===COMPANIES[k].notes;});
+    if(isTpl||!state.notes) state.notes=c.notes;
+    state.shipOn=c.shipDefault; state.termsOn=c.termsDefault;
+    if(/^[A-Z]{3}-\d+$/.test(state.invNo)) state.invNo=c.invPrefix+state.invNo.split("-")[1];
+    state.logo=null;
+    fillSheet(); save();
+  }
+
+  function bind(){
+    $("#page1").addEventListener("input", onInput);
+    $("#page2").addEventListener("input", onInput);
+
+    // reformat money on blur
+    document.addEventListener("blur", function(e){
+      var el=e.target;
+      if(el.dataset && el.dataset.item!=null && el.dataset.k==="price") el.value=fmt(num(el.value));
+      if(el.dataset && (el.dataset.field==="discount"||el.dataset.field==="shipping"||el.dataset.field==="paid")) el.value=fmt(num(el.value));
+    }, true);
+
+    $("#companySeg").addEventListener("click", function(e){ var b=e.target.closest("button"); if(b) switchCompany(b.dataset.co); });
+
+    $("#shipToggle").addEventListener("change", function(){ state.shipOn=this.checked; $("#shipToBlock").style.display=state.shipOn?"":"none"; $("#shipCostRow").style.display=state.shipOn?"":"none"; computeTotals(); save(); });
+    $("#sstToggle").addEventListener("change", function(){ state.sstOn=this.checked; $("#sstRow").style.display=state.sstOn?"":"none"; computeTotals(); save(); });
+    $("#termsToggle").addEventListener("change", function(){ state.termsOn=this.checked; updatePageMeta(); save(); });
+
+    $("#addRowBtn").addEventListener("click", function(){ state.items.push({desc:"",sub:"",qty:1,price:0}); renderItems(); save(); });
+    $("#itemsBody").addEventListener("click", function(e){ var b=e.target.closest("[data-del]"); if(!b) return; var i=+b.dataset.del; if(state.items.length>1){ state.items.splice(i,1); renderItems(); save(); } });
+
+    $("#addTlBtn").addEventListener("click", function(){ state.timeline.push({phase:"",deliverable:"",when:""}); renderTimeline(); save(); });
+    $("#tlBody").addEventListener("click", function(e){ var b=e.target.closest("[data-tldel]"); if(!b) return; var i=+b.dataset.tldel; state.timeline.splice(i,1); renderTimeline(); save(); });
+
+    $("#logoBox").addEventListener("click", function(){ $("#logoFile").click(); });
+    $("#signBox").addEventListener("click", function(){ $("#signFile").click(); });
+    $("#logoFile").addEventListener("change", function(){ readImg(this,function(d){ state.logo=d; renderLogo(); save(); }); });
+    $("#signFile").addEventListener("change", function(){ readImg(this,function(d){ state.sign=d; renderSign(); save(); }); });
+
+    $("#pdfBtn").addEventListener("click", function(){ window.print(); });
+    $("#newBtn").addEventListener("click", function(){ if(confirm("Start a new blank invoice for "+state.company+"?")){ state=freshState(state.company); fillSheet(); save(); } });
+    $("#saveBtn").addEventListener("click", downloadJSON);
+    $("#loadBtn").addEventListener("click", function(){ $("#jsonFile").click(); });
+    $("#jsonFile").addEventListener("change", function(){ var f=this.files[0]; if(!f) return; var r=new FileReader(); r.onload=function(){ try{ state=JSON.parse(r.result); if(!state.timeline) state.timeline=[]; fillSheet(); save(); }catch(err){ alert("Could not read that file."); } }; r.readAsText(f); this.value=""; });
+
+    window.addEventListener("beforeprint", function(){ document.title=(state.invNo||"invoice")+" — "+state.fromName; });
+    window.addEventListener("resize", autosizeAll);
+  }
+
+  function onInput(e){
+    var el=e.target;
+    if(el.dataset && el.dataset.field){ state[el.dataset.field]=el.value; }
+    if(el.dataset && el.dataset.item!=null){ state.items[+el.dataset.item][el.dataset.k]=el.value; }
+    if(el.dataset && el.dataset.tl!=null){ state.timeline[+el.dataset.tl][el.dataset.k]=el.value; }
+    var box = el.closest ? el.closest("[data-html]") : null;
+    if(box){ state[box.dataset.html]=box.innerHTML; }
+    if(el.tagName==="TEXTAREA") autosize(el);
+    computeTotals(); updatePageMeta(); save();
+  }
+
+  function readImg(input,cb){ var f=input.files[0]; if(!f) return; var r=new FileReader(); r.onload=function(){ cb(r.result); }; r.readAsDataURL(f); input.value=""; }
+
+  function downloadJSON(){
+    var blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
+    var a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+    a.download=(state.invNo||"invoice").replace(/[^\w\-]+/g,"_")+".json";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); },1000);
+  }
+
+  var saved=load();
+  state = saved || freshState("XALT");
+  if(!state.timeline) state.timeline=DEF_TIMELINE.slice();
+  bind(); fillSheet();
+})();
+</script>
+</body>
+</html>
