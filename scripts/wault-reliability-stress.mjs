@@ -1,7 +1,9 @@
 import '../reliability-core.js';
+import '../workspace-export.js';
 import { readFileSync } from 'node:fs';
 
 const R = globalThis.WaultReliability;
+const E = globalThis.WaultExport;
 let assertions = 0;
 
 function check(condition, label) {
@@ -143,6 +145,75 @@ for (let index = 1; index <= 2000; index += 1) {
   check(shortcut?.type === 'numbers' && shortcut.start === index, `numbered shortcut failed at ${index}`);
 }
 
+const exportPage = {
+  id: 'export-page',
+  title: 'Readable Export',
+  date: '2026-07-24',
+  blocks: [
+    { id: 'heading', type: 'heading', level: 1, text: 'Plan' },
+    {
+      id: 'numbers',
+      type: 'numbers',
+      start: 3,
+      items: [
+        { id: 'n3', text: 'Third', level: 0 },
+        { id: 'n3a', text: 'Nested A', level: 1 },
+        { id: 'n3b', text: 'Nested B', level: 1 },
+        { id: 'n4', text: 'Fourth', level: 0 },
+      ],
+    },
+    {
+      id: 'bullets',
+      type: 'bullets',
+      items: [
+        { id: 'b1', text: 'Bullet', level: 0 },
+        { id: 'b2', text: 'Nested bullet', level: 1 },
+      ],
+    },
+    {
+      id: 'table',
+      type: 'table',
+      headers: ['Owner', 'Status'],
+      rows: [{ id: 'row', cells: ['Ee Wern', 'Ready'] }],
+    },
+    {
+      id: 'image',
+      type: 'image',
+      src: 'data:image/png;base64,AAAA',
+      alt: 'Chart',
+      caption: 'Company chart',
+    },
+  ],
+};
+const exportBody = E.renderPageBody(exportPage, {});
+check(exportBody.includes('<ol start="3"'), 'PDF/Google export lost the numbered-list starting value');
+check((exportBody.match(/<ol/g) || []).length === 2, 'nested numbered list was flattened during export');
+check((exportBody.match(/<ul/g) || []).length === 2, 'nested bullet list was flattened during export');
+check(exportBody.indexOf('Third') < exportBody.indexOf('Nested A') && exportBody.indexOf('Nested B') < exportBody.indexOf('Fourth'), 'export list order changed');
+check(exportBody.includes('<thead><tr><th>Owner</th><th>Status</th></tr></thead>'), 'export table headers were lost');
+check(exportBody.includes('<tbody><tr><td>Ee Wern</td><td>Ready</td></tr></tbody>'), 'export table rows were lost');
+check(exportBody.includes('<figcaption>Company chart</figcaption>'), 'image caption was lost during export');
+const printHtml = E.buildDocumentHtml(exportPage, { autoPrint: true });
+const docsHtml = E.buildDocumentHtml(exportPage, { autoPrint: false });
+check(printHtml.includes('@page { size: A4; margin: 18mm 17mm 20mm; }'), 'A4 export margins are missing');
+check(printHtml.includes('font-size: 11pt'), 'readable export body font is missing');
+check(printHtml.includes(exportBody) && docsHtml.includes(exportBody), 'PDF and Google Docs do not share the same document body');
+check(printHtml.includes('window.print()') && !docsHtml.includes('window.print()'), 'Google Docs export contains print-only behavior');
+
+for (let index = 1; index <= 1000; index += 1) {
+  const html = E.renderList({
+    type: 'numbers',
+    start: index,
+    items: [
+      { id: `root-${index}`, text: `Root ${index}`, level: 0 },
+      { id: `child-${index}`, text: `Child ${index}`, level: 1 },
+      { id: `next-${index}`, text: `Next ${index}`, level: 0 },
+    ],
+  }, 'ol');
+  check(html.includes(index > 1 ? `start="${index}"` : 'class="document-list'), `export numbering start failed at ${index}`);
+  check((html.match(/<ol/g) || []).length === 2, `export nesting failed at ${index}`);
+}
+
 const workspaceAppSource = readFileSync(new URL('../workspace-app.jsx', import.meta.url), 'utf8');
 const workspaceBlocksSource = readFileSync(new URL('../workspace-blocks.jsx', import.meta.url), 'utf8');
 const bulletAndNumberSource = workspaceBlocksSource.slice(
@@ -157,6 +228,13 @@ check(!/lower\.includes\(['"]connected['"]\)/.test(workspaceAppSource), 'connect
 check(workspaceAppSource.includes('workspaceDataEqual(latest.data, remote)'), 'verified equal Firebase reads do not settle the save indicator');
 check(!bulletAndNumberSource.includes('document.querySelector(`[data-item-id='), 'bullet/number caret targeting still uses a page-global row lookup');
 check(workspaceBlocksSource.includes('replaceListItemFromShortcut'), 'mixed-list row conversion is not wired into the editor');
+check(workspaceBlocksSource.includes('window.fileToDownscaledDataUrl = fileToDownscaledDataUrl'), 'image file dropping cannot use the safe image processor');
+check(workspaceBlocksSource.includes('onPointerDown={startImageBlockDrag}'), 'images cannot be dragged directly between blocks');
+check(workspaceAppSource.includes('onDropCapture={handleImageFileDrop}'), 'page editor does not accept dropped image files');
+check(firebaseSyncSource.includes("driveProvider.addScope('https://www.googleapis.com/auth/drive.file')"), 'Google Docs export requests the wrong Drive permission');
+check(firebaseSyncSource.includes('reauthenticateWithPopup(currentUser, driveProvider)'), 'Google Docs export can switch the signed-in WAULT account');
+check(firebaseSyncSource.includes('uploadType=resumable'), 'large Google Docs exports do not use a resumable upload');
+check(firebaseSyncSource.includes("method: 'PUT'"), 'large Google Docs export does not finish its resumable upload correctly');
 check(!firebaseSyncSource.includes('wernahhh@gmail.com'), 'retired owner email remains in Firebase client access control');
 check(!databaseRulesSource.includes('wernahhh@gmail.com'), 'retired owner email remains in Firebase database rules');
 check(databaseRulesSource.includes("auth.token.email === 'eewern21@gmail.com'"), 'owner-only Firebase rules are not tied to the canonical owner email');

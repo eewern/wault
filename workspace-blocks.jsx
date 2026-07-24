@@ -4317,10 +4317,15 @@ function ContentShootingTableBlock({ block, updateBlock, onDeleteBlock, blockId,
 // MAX_EDGE; PNGs with transparency stay PNG, everything else becomes JPEG.
 const IMG_MAX_EDGE = 1600;
 const IMG_MAX_BYTES = 6 * 1024 * 1024; // refuse originals over ~6MB to avoid jank
+const IMG_MAX_STORED_BYTES = 900 * 1024;
+const dataUrlBytes = (value) => {
+  const data = String(value || "").split(",", 2)[1] || "";
+  return Math.ceil(data.length * 0.75);
+};
 function fileToDownscaledDataUrl(file) {
   return new Promise((resolve, reject) => {
     if (!file || !/^image\//i.test(file.type)) { reject(new Error("Not an image")); return; }
-    if (file.size > IMG_MAX_BYTES * 2) { reject(new Error("Image too large")); return; }
+    if (file.size > IMG_MAX_BYTES) { reject(new Error("Image too large")); return; }
     const reader = new FileReader();
     reader.onerror = () => reject(new Error("Read failed"));
     reader.onload = () => {
@@ -4328,16 +4333,32 @@ function fileToDownscaledDataUrl(file) {
       img.onerror = () => reject(new Error("Decode failed"));
       img.onload = () => {
         try {
-          let { width: w, height: h } = img;
-          const scale = Math.min(1, IMG_MAX_EDGE / Math.max(w, h));
-          w = Math.max(1, Math.round(w * scale));
-          h = Math.max(1, Math.round(h * scale));
+          const scale = Math.min(1, IMG_MAX_EDGE / Math.max(img.width, img.height));
+          let w = Math.max(1, Math.round(img.width * scale));
+          let h = Math.max(1, Math.round(img.height * scale));
           const canvas = document.createElement("canvas");
-          canvas.width = w; canvas.height = h;
-          const ctx = canvas.getContext("2d");
-          ctx.drawImage(img, 0, 0, w, h);
           const isPng = /png/i.test(file.type);
-          const out = isPng ? canvas.toDataURL("image/png") : canvas.toDataURL("image/jpeg", 0.82);
+          let quality = 0.82;
+          let out = "";
+          for (let attempt = 0; attempt < 8; attempt += 1) {
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0, w, h);
+            out = isPng
+              ? canvas.toDataURL("image/png")
+              : canvas.toDataURL("image/jpeg", quality);
+            if (dataUrlBytes(out) <= IMG_MAX_STORED_BYTES) break;
+            if (!isPng && quality > 0.58) quality -= 0.08;
+            else {
+              w = Math.max(320, Math.round(w * 0.82));
+              h = Math.max(240, Math.round(h * 0.82));
+            }
+          }
+          if (dataUrlBytes(out) > IMG_MAX_STORED_BYTES) {
+            reject(new Error("Image remains too large after resizing"));
+            return;
+          }
           resolve(out);
         } catch (err) { reject(err); }
       };
@@ -4346,6 +4367,7 @@ function fileToDownscaledDataUrl(file) {
     reader.readAsDataURL(file);
   });
 }
+window.fileToDownscaledDataUrl = fileToDownscaledDataUrl;
 
 function ImageBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, onDeleteBlock }) {
   const src = safeUrl(block.src, { allowDataImage: true });
@@ -4386,6 +4408,30 @@ function ImageBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
   };
 
   const setCaption = (v) => updateBlock({ ...block, caption: v });
+  const startImageBlockDrag = (e) => {
+    if (e.button != null && e.button !== 0) return;
+    if (e.pointerType === "touch") return;
+    const sourceShell = e.currentTarget.closest(".block-shell[data-block-id]");
+    const pageBody = sourceShell?.closest(".page-body");
+    if (!sourceShell || !pageBody || typeof window.startSmoothDrag !== "function") return;
+    window.startSmoothDrag({
+      pointerEvent: e,
+      axis: "y",
+      sourceEl: sourceShell,
+      scrollEl: pageBody.closest(".page-main") || null,
+      getTargets: () => [...pageBody.querySelectorAll(".block-shell[data-block-id]")]
+        .filter((element) => element.getAttribute("data-block-id") !== blockId)
+        .map((element) => ({ el: element, key: element.getAttribute("data-block-id"), slot: true })),
+      onStart: () => onDragBlockStart?.(blockId),
+      onCommit: (targetId, side) => {
+        if (!targetId || targetId === blockId) return;
+        window.dispatchEvent(new CustomEvent("block-touch-drop", {
+          detail: { draggedId: blockId, targetId, side },
+        }));
+      },
+      onEnd: () => onDragBlockEnd?.(),
+    });
+  };
 
   return (
     <div className="block-wrap">
@@ -4427,7 +4473,10 @@ function ImageBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
             alt={(window.stripHtml ? window.stripHtml(block.alt || "") : (block.alt || "")) || "Image"}
             loading="lazy"
             referrerPolicy="no-referrer"
+            draggable={false}
+            onPointerDown={startImageBlockDrag}
             onError={() => setBroken(true)}
+            title="Drag to move image"
           />
           <button
             className="img-block-edit"
@@ -4550,7 +4599,7 @@ function Block(props) {
   return (
     <div
       data-block-id={block.id}
-      className={`block-shell ${props.dragging ? "dragging" : ""} ${dropSide ? `drop-${dropSide}` : ""} ${isLocked ? "locked" : ""} ${props.multiSelected ? "multi-selected" : ""}`}
+      className={`block-shell ${props.dragging ? "dragging" : ""} ${dropSide ? `drop-${dropSide}` : ""} ${props.fileDropSide ? `image-file-drop-${props.fileDropSide}` : ""} ${isLocked ? "locked" : ""} ${props.multiSelected ? "multi-selected" : ""}`}
       onFocusCapture={() => {
         if (!isLocked) props.onBeginEditing?.();
       }}

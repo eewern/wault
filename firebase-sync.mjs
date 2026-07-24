@@ -14,6 +14,7 @@ export async function initializeFirebaseSync(config) {
       getAuth,
       GoogleAuthProvider,
       signInWithPopup,
+      reauthenticateWithPopup,
       signOut: firebaseSignOut,
       onAuthStateChanged,
       setPersistence,
@@ -222,6 +223,82 @@ export async function initializeFirebaseSync(config) {
       async signInWithGoogle() {
         const result = await signInWithPopup(auth, provider);
         return result.user; // { email, displayName, uid, ... }
+      },
+
+      async createGoogleDocFromHtml({ name, html }) {
+        const currentUser = auth.currentUser;
+        if (!currentUser?.uid) throw new Error('Sign in before exporting to Google Docs.');
+        if (!String(html || '').trim()) throw new Error('There is no document content to export.');
+
+        const driveProvider = new GoogleAuthProvider();
+        driveProvider.addScope('https://www.googleapis.com/auth/drive.file');
+        driveProvider.setCustomParameters({
+          login_hint: currentUser.email || '',
+          include_granted_scopes: 'true',
+        });
+
+        const result = await reauthenticateWithPopup(currentUser, driveProvider);
+        const credential = GoogleAuthProvider.credentialFromResult(result);
+        const accessToken = credential?.accessToken;
+        if (!accessToken) throw new Error('Google Drive permission was not granted.');
+
+        const metadata = {
+          name: String(name || 'Untitled').trim() || 'Untitled',
+          mimeType: 'application/vnd.google-apps.document',
+        };
+        const htmlBlob = new Blob([String(html)], { type: 'text/html; charset=UTF-8' });
+        let response;
+        if (htmlBlob.size <= 5 * 1024 * 1024) {
+          const boundary = `wault_export_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+          const body = new Blob([
+            `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`,
+            JSON.stringify(metadata),
+            `\r\n--${boundary}\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n`,
+            htmlBlob,
+            `\r\n--${boundary}--`,
+          ], { type: `multipart/related; boundary=${boundary}` });
+          response = await fetch(
+            'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,webViewLink',
+            {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${accessToken}` },
+              body,
+            },
+          );
+        } else {
+          const sessionResponse = await fetch(
+            'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,mimeType,webViewLink',
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'Content-Type': 'application/json; charset=UTF-8',
+                'X-Upload-Content-Type': 'text/html; charset=UTF-8',
+                'X-Upload-Content-Length': String(htmlBlob.size),
+              },
+              body: JSON.stringify(metadata),
+            },
+          );
+          const sessionUrl = sessionResponse.headers.get('Location');
+          if (!sessionResponse.ok || !sessionUrl) {
+            const sessionError = await sessionResponse.json().catch(() => ({}));
+            throw new Error(sessionError?.error?.message || `Google Drive returned ${sessionResponse.status}.`);
+          }
+          response = await fetch(sessionUrl, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'text/html; charset=UTF-8' },
+            body: htmlBlob,
+          });
+        }
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload?.id) {
+          const detail = payload?.error?.message || `Google Drive returned ${response.status}.`;
+          throw new Error(detail);
+        }
+        return {
+          ...payload,
+          webViewLink: payload.webViewLink || `https://docs.google.com/document/d/${payload.id}/edit`,
+        };
       },
 
       async signOut() {

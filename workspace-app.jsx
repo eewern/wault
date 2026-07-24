@@ -3413,6 +3413,21 @@ function App() {
       return { ...d, pages: { ...d.pages, [pageId]: nextPage } };
     });
   };
+  const insertBlocksAtAnchor = (pageId, anchorId, side, newBlocks) => {
+    if (!pageId || !Array.isArray(newBlocks) || !newBlocks.length) return;
+    setData((current) => {
+      const page = current.pages?.[pageId];
+      if (!page || page.system) return current;
+      const blocks = [...(page.blocks || [])];
+      const anchorIndex = anchorId ? blocks.findIndex((block) => block.id === anchorId) : -1;
+      const insertAt = anchorIndex === -1
+        ? blocks.length
+        : anchorIndex + (side === "after" ? 1 : 0);
+      blocks.splice(Math.max(0, Math.min(insertAt, blocks.length)), 0, ...newBlocks);
+      const nextPage = { ...page, blocks: ensureTrailingTextBlock(blocks) };
+      return { ...current, pages: { ...current.pages, [pageId]: nextPage } };
+    });
+  };
   const deleteBlock = (blockId) => {
     // Guard: a sub-page LINK can't be removed while the sub-page still exists.
     // (Deleting the link would orphan the page / it would just reappear on next sync.)
@@ -4091,6 +4106,7 @@ function App() {
           addBlockBefore={addBlockBefore}
           replaceBlock={replaceBlock}
           moveBlock={moveBlock}
+          insertBlocksAtAnchor={insertBlocksAtAnchor}
           data={data}
           setCurrentPage={setCurrentPage}
           updateEvents={updateEvents}
@@ -4778,99 +4794,69 @@ function getBuiltinTemplates() {
 }
 
 // ====== PAGE EDITOR ======
-function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, addBlock, addBlockAfter, addBlockBefore, replaceBlock, moveBlock, data, setCurrentPage, updateEvents, addPage, presenceLocks = {}, onWordBoundary, authUser, activeWorkspaceId }) {
+function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, addBlock, addBlockAfter, addBlockBefore, replaceBlock, moveBlock, insertBlocksAtAnchor, data, setCurrentPage, updateEvents, addPage, presenceLocks = {}, onWordBoundary, authUser, activeWorkspaceId }) {
   // Make forceHistoryCommit available globally so EditableText can call it on word boundaries
   useEffect(() => { window.__onWordBoundary = onWordBoundary; }, [onWordBoundary]);
 
+  const [exportState, setExportState] = useState({ status: "idle", message: "", link: "" });
+  useEffect(() => {
+    setExportState({ status: "idle", message: "", link: "" });
+  }, [page?.id]);
+  const pageExportIcon = page?.icon && !(window.isPremiumIconKey && window.isPremiumIconKey(page.icon))
+    ? page.icon
+    : "";
+  const buildExportHtml = (autoPrint) => {
+    if (!window.WaultExport?.buildDocumentHtml) throw new Error("The document exporter is unavailable.");
+    return window.WaultExport.buildDocumentHtml(page, {
+      autoPrint,
+      data,
+      icon: pageExportIcon,
+    });
+  };
+
   const downloadPageAsPdf = () => {
     if (!page) return;
-    const ZW = /​/g;
-    // Rich inline text → run through the SAME allowlist sanitizer the editor uses, so
-    // bold/italic/underline survive in the PDF but any injected <script>/<img onerror>/
-    // event-handler attributes (e.g. content written straight to the API, bypassing the
-    // editor) are stripped before we drop it into the exported document.
-    const richText = (h) => (window.sanitizeHtml ? window.sanitizeHtml(String(h || "")) : String(h || "").replace(/<[^>]*>/g, "")).replace(ZW, "");
-    const stripHtml = (h) => (window.stripHtml ? window.stripHtml(h || "") : String(h || "").replace(/<[^>]*>/g, "")).replace(ZW, "");
-    // Escape for HTML text/attribute context (icons, dates, plain labels).
-    const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-    // Only allow safe image URL schemes — blocks `javascript:` and quote-breakout payloads.
-    const safeUrl = (u) => { const s = String(u || "").trim(); return /^(https?:|data:image\/)/i.test(s) ? s.replace(/"/g, "%22") : ""; };
-    const listLevel = (item) => Math.max(0, Math.min(2, Number(item?.level ?? (item?.indent ? 1 : 0)) || 0));
-    const textIndentLevel = (block) => Math.max(0, Math.min(2, Number(block?.textIndentLevel) || 0));
-    const bulletStyle = ["disc", "circle", "square"];
-    const numberStyle = ["decimal", "lower-alpha", "lower-roman"];
-    const renderListItems = (items, styles) => (items || []).map((item) => {
-      const level = listLevel(item);
-      return `<li style="margin-left:${level * 24}px;list-style-type:${styles[level]}">${richText(item.text)}</li>`;
-    }).join("");
-    const blocks = page.blocks || [];
-    let bodyHtml = "";
-    for (const block of blocks) {
-      switch (block.type) {
-        case "heading": { const lvl = Math.min(3, Math.max(1, Number(block.level) || 1)); bodyHtml += `<h${lvl} style="margin:1em 0 0.3em">${richText(block.text)}</h${lvl}>\n`; break; }
-        case "text": bodyHtml += `<p style="margin:0.4em 0 0.4em ${textIndentLevel(block) * 24}px">${richText(block.text) || "&nbsp;"}</p>\n`; break;
-        case "bullets": bodyHtml += `<ul>${renderListItems(block.items, bulletStyle)}</ul>\n`; break;
-        case "numbers": {
-          const start = window.WaultReliability?.normalizeNumberListStart?.(block.start) || 1;
-          bodyHtml += `<ol${start > 1 ? ` start="${start}"` : ""}>${renderListItems(block.items, numberStyle)}</ol>\n`;
-          break;
-        }
-        case "checklist": bodyHtml += `<ul style="list-style:none;padding:0">${(block.items||[]).map(i=>`<li>${i.done?"☑":"☐"} ${stripHtml(i.text||"")}</li>`).join("")}</ul>\n`; break;
-        case "callout": bodyHtml += `<blockquote style="background:#f8f8f0;border-left:4px solid #e0c97f;padding:10px 16px;margin:12px 0;border-radius:4px">${esc(block.icon||"💡")} ${richText(block.text)}</blockquote>\n`; break;
-        case "divider": bodyHtml += `<hr style="border:none;border-top:1px solid #eee;margin:16px 0"/>\n`; break;
-        case "image": { const u = safeUrl(block.src); bodyHtml += u ? `<img src="${u}" style="max-width:100%;border-radius:6px;margin:8px 0"/>\n` : ""; break; }
-        case "table": {
-          const rows = block.rows || [];
-          bodyHtml += `<table style="border-collapse:collapse;width:100%;margin:12px 0">`;
-          rows.forEach((row, ri) => {
-            bodyHtml += "<tr>";
-            (row||[]).forEach(cell => {
-              const tag = ri === 0 ? "th" : "td";
-              bodyHtml += `<${tag} style="border:1px solid #ddd;padding:6px 10px;${ri===0?"background:#f5f5f5;font-weight:600":"background:#fff"}">${richText(cell)}</${tag}>`;
-            });
-            bodyHtml += "</tr>";
-          });
-          bodyHtml += "</table>\n";
-          break;
-        }
-        case "milestones": bodyHtml += `<ul>${(block.items||[]).map(i=>`<li><b>${stripHtml(i.name||"")}</b> [${i.status||"pending"}]</li>`).join("")}</ul>\n`; break;
-        case "kpis": {
-          const kpiHtml = (block.items||[]).map(item => {
-            const pct = item.target ? Math.round((parseFloat(item.value)||0)/(parseFloat(item.target)||1)*100) : null;
-            return `<div style="display:inline-block;min-width:140px;margin:6px;padding:12px 16px;border:1px solid #ddd;border-radius:8px;vertical-align:top">
-              <div style="font-size:10px;font-weight:700;text-transform:uppercase;color:#666;margin-bottom:4px">${stripHtml(item.label||"Metric")}</div>
-              <div style="font-size:28px;font-weight:800;color:#111">${stripHtml(item.value||"0")}${item.unit||""}</div>
-              ${pct!==null?`<div style="height:4px;background:#eee;border-radius:2px;margin-top:6px"><div style="height:100%;width:${Math.min(100,pct)}%;background:#3dd68c;border-radius:2px"></div></div>`:""}</div>`;
-          }).join("");
-          bodyHtml += `<div style="margin:12px 0">${kpiHtml}</div>\n`;
-          break;
-        }
-        case "progress": {
-          const pct = Math.min(100,Math.round((Number(block.value)||0)/(Math.max(1,Number(block.total)||100))*100));
-          bodyHtml += `<div style="margin:12px 0"><div style="font-size:13px;font-weight:600;margin-bottom:6px">${stripHtml(block.label||"Progress")} — ${pct}%</div><div style="height:8px;background:#eee;border-radius:4px"><div style="height:100%;width:${pct}%;background:#58c4d4;border-radius:4px"></div></div></div>\n`;
-          break;
-        }
-        default: break;
-      }
+    try {
+      const html = buildExportHtml(true);
+      const preview = window.open("", "_blank");
+      if (!preview) throw new Error("Allow pop-ups to open the PDF preview.");
+      preview.opener = null;
+      preview.document.open();
+      preview.document.write(html);
+      preview.document.close();
+      setExportState({ status: "done", message: "PDF preview ready", link: "" });
+    } catch (error) {
+      setExportState({ status: "failed", message: error?.message || "PDF export failed.", link: "" });
     }
-    const pageTitle = stripHtml(page.title || "Untitled");
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(pageTitle)}</title><style>
-      body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:720px;margin:40px auto;padding:0 24px;color:#1a1a1a;line-height:1.6}
-      h1{font-size:2em}h2{font-size:1.5em}h3{font-size:1.2em}
-      p,li{font-size:1em}
-      ul,ol{padding-left:24px}
-      @media print{body{margin:0;padding:16px}}
-    </style></head><body>
-    <h1 style="font-size:2.2em;margin-bottom:0.2em">${page.icon && !(window.isPremiumIconKey && window.isPremiumIconKey(page.icon)) ? esc(page.icon)+" " : ""}${esc(pageTitle)}</h1>
-    ${page.date ? `<p style="color:#888;margin-top:0;font-size:0.9em">${esc(page.date)}</p>` : ""}
-    ${bodyHtml}
-    <script>window.onload=()=>window.print();<\/script>
-    </body></html>`;
-    const blob = new Blob([html], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    const win = window.open(url, "_blank");
-    if (!win) { const a = document.createElement("a"); a.href = url; a.download = pageTitle+".html"; a.click(); }
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
+
+  const exportPageToGoogleDocs = async () => {
+    if (!page || exportState.status === "exporting") return;
+    const sync = window.WorkspaceFirebaseSync;
+    if (!sync?.createGoogleDocFromHtml) {
+      setExportState({ status: "failed", message: "Google Docs export is unavailable. Reload WAULT and try again.", link: "" });
+      return;
+    }
+    setExportState({ status: "exporting", message: "Creating Google Doc...", link: "" });
+    try {
+      const html = buildExportHtml(false);
+      const name = window.WaultExport?.safeFilename?.(page.title) || "Untitled";
+      const result = await sync.createGoogleDocFromHtml({ name, html });
+      setExportState({ status: "done", message: "Google Doc created", link: result.webViewLink });
+      sync.writeAuditLog?.("export_google_doc", activeWorkspaceId, {
+        pageId: page.id,
+        documentId: result.id,
+        documentName: result.name || name,
+      });
+    } catch (error) {
+      const raw = String(error?.message || "Google Docs export failed.");
+      let message = raw;
+      if (/popup-closed|cancelled|canceled/i.test(raw)) message = "Google permission was cancelled.";
+      if (/drive api|accessnotconfigured|has not been used|disabled/i.test(raw)) {
+        message = "Google Drive API is not enabled for WAULT yet.";
+      }
+      setExportState({ status: "failed", message, link: "" });
+    }
   };
 
   const [slash, setSlash] = useState(null); // { query, rect, onPick }
@@ -4882,6 +4868,8 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
   const [marquee, setMarquee] = useState(null);
   const [formatBar, setFormatBar] = useState(null); // { rect, blockId }
   const [blockMenu, setBlockMenu] = useState(null); // { blockId, x, y } — block action menu
+  const [imageDrop, setImageDrop] = useState({ active: false, targetId: null, side: "after", busy: false });
+  const [imageDropMessage, setImageDropMessage] = useState("");
   const [templates, setTemplates] = useState(() => {
     try { return JSON.parse(localStorage.getItem(TEMPLATES_KEY) || "[]"); } catch { return []; }
   });
@@ -4895,6 +4883,76 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
   const cellSelRef = useRef(null);              // { matrix: cellEl[][] } for table cell-range copy
   const multiSelectedIdsRef = useRef(multiSelectedIds); // mirror for the copy handler
   const blocks = page?.blocks || [];
+  const transferHasImageFiles = (transfer) => {
+    if (!transfer) return false;
+    const types = Array.from(transfer.types || []);
+    if (!types.includes("Files")) return false;
+    const fileItems = Array.from(transfer.items || []).filter((item) => item.kind === "file");
+    return !fileItems.length || fileItems.some((item) => /^image\//i.test(item.type || ""));
+  };
+  const imageDropPoint = (event) => {
+    const shell = event.target?.closest?.(".block-shell[data-block-id]");
+    if (!shell) return { targetId: null, side: "after" };
+    const rect = shell.getBoundingClientRect();
+    return {
+      targetId: shell.getAttribute("data-block-id"),
+      side: event.clientY < rect.top + rect.height / 2 ? "before" : "after",
+    };
+  };
+  const handleImageDragOver = (event) => {
+    if (!transferHasImageFiles(event.dataTransfer) || page?.system) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    const point = imageDropPoint(event);
+    setImageDrop((current) => (
+      current.active && current.targetId === point.targetId && current.side === point.side
+        ? current
+        : { active: true, targetId: point.targetId, side: point.side, busy: false }
+    ));
+  };
+  const handleImageDragLeave = (event) => {
+    if (event.currentTarget.contains(event.relatedTarget)) return;
+    setImageDrop((current) => current.busy ? current : { active: false, targetId: null, side: "after", busy: false });
+  };
+  const handleImageFileDrop = async (event) => {
+    if (!transferHasImageFiles(event.dataTransfer) || page?.system) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const files = Array.from(event.dataTransfer.files || []).filter((file) => /^image\//i.test(file.type || ""));
+    if (!files.length) {
+      setImageDrop({ active: false, targetId: null, side: "after", busy: false });
+      setImageDropMessage("Only image files can be dropped here.");
+      return;
+    }
+    const point = imageDropPoint(event);
+    setImageDrop({ active: true, ...point, busy: true });
+    setImageDropMessage(`Preparing ${files.length === 1 ? "image" : `${files.length} images`}...`);
+    try {
+      if (typeof window.fileToDownscaledDataUrl !== "function") throw new Error("Image processing is unavailable.");
+      const imageBlocks = [];
+      for (const file of files) {
+        const src = await window.fileToDownscaledDataUrl(file);
+        imageBlocks.push({
+          id: window.nid(),
+          type: "image",
+          src,
+          alt: String(file.name || "Image").replace(/\.[^.]+$/, "").slice(0, 300),
+          caption: "",
+        });
+      }
+      insertBlocksAtAnchor?.(page.id, point.targetId, point.side, imageBlocks);
+      setImageDropMessage(`${imageBlocks.length} ${imageBlocks.length === 1 ? "image" : "images"} added`);
+      setTimeout(() => setImageDropMessage(""), 2600);
+    } catch (error) {
+      const message = /too large/i.test(String(error?.message || ""))
+        ? "That image is too large to save safely."
+        : "The image could not be added.";
+      setImageDropMessage(message);
+    } finally {
+      setImageDrop({ active: false, targetId: null, side: "after", busy: false });
+    }
+  };
   const focusBlock = (id, atStart = false) => {
     setFocusBlockId(id);
     setFocusAtStart(atStart);
@@ -6271,20 +6329,37 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
             <button
               className="page-pdf-btn"
               type="button"
-              title="Download as PDF"
+              title="Open a print-ready PDF preview"
               onClick={downloadPageAsPdf}
             >
-              ↓ PDF
+              PDF
             </button>
+            <button
+              className="page-docs-btn"
+              type="button"
+              title="Create a Google Doc in your Drive"
+              onClick={exportPageToGoogleDocs}
+              disabled={exportState.status === "exporting"}
+            >
+              {exportState.status === "exporting" ? "Creating..." : "Google Docs"}
+            </button>
+            {exportState.message && (
+              exportState.link
+                ? <a className="page-export-status is-success" href={exportState.link} target="_blank" rel="noopener noreferrer">Open Google Doc</a>
+                : <span className={`page-export-status ${exportState.status === "failed" ? "is-failed" : ""}`}>{exportState.message}</span>
+            )}
           </div>
         </div>
 
         <div
           ref={pageBodyRef}
-          className={`page-body ${marquee ? "selecting-blocks" : ""}`}
+          className={`page-body ${marquee ? "selecting-blocks" : ""} ${imageDrop.active ? "image-drop-active" : ""}`}
           onMouseDownCapture={beginNaturalTextSelection}
           onMouseDown={beginBlockMarquee}
           onPasteCapture={handlePagePaste}
+          onDragOverCapture={handleImageDragOver}
+          onDragLeave={handleImageDragLeave}
+          onDropCapture={handleImageFileDrop}
           onClick={(e) => {
             if (e.target !== e.currentTarget) return;
             const lastBlock = blocks[blocks.length - 1];
@@ -6318,6 +6393,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
               focusAtStart={focusBlockId === block.id && focusAtStart}
               isLast={idx === blocks.length - 1}
               multiSelected={multiSelectedIds.has(block.id)}
+              fileDropSide={imageDrop.active && imageDrop.targetId === block.id ? imageDrop.side : null}
               updateBlock={updateBlock}
               patchBlock={patchBlock}
               data={data}
@@ -6462,6 +6538,11 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
                 height: marquee.height,
               }}
             />
+          )}
+          {(imageDrop.active || imageDropMessage) && (
+            <div className={`page-image-drop-status ${imageDrop.busy ? "is-busy" : ""}`}>
+              {imageDrop.busy ? "Preparing image..." : (imageDropMessage || "Drop image to add")}
+            </div>
           )}
         </div>
 

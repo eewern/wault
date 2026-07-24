@@ -53,6 +53,7 @@ const allowedFiles = new Set([
   'focus-home.jsx',
   'workspace-app.jsx',
   'reliability-core.js',
+  'workspace-export.js',
 ]);
 
 const mime = {
