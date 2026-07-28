@@ -4113,7 +4113,7 @@
 <script type="module">
   // Native ESM Firebase init — runs after workspace-config.js (classic) has set SUPABASE_CONFIG.
   // Exposes window.__firebaseInitPromise which workspace-app.jsx awaits (avoids Babel transforming import()).
-  import init from './firebase-sync.mjs?v=20260728-firebase-reconnect2';
+  import init from './firebase-sync.mjs?v=20260728-vercel-auth2';
   let _fbInitDone = false;
   const _fbInit = init(window.SUPABASE_CONFIG || {}).catch((e) => {
     console.warn('Firebase init failed:', e && e.message);

@@ -14,6 +14,8 @@ export async function initializeFirebaseSync(config) {
       getAuth,
       GoogleAuthProvider,
       signInWithPopup,
+      signInWithRedirect,
+      getRedirectResult,
       reauthenticateWithPopup,
       signOut: firebaseSignOut,
       onAuthStateChanged,
@@ -46,6 +48,13 @@ export async function initializeFirebaseSync(config) {
 
     // Keep the user signed in across page refreshes (survives browser close/reopen)
     await setPersistence(auth, browserLocalPersistence);
+    if (typeof location !== 'undefined' && location.hostname === 'waults.vercel.app') {
+      try {
+        await getRedirectResult(auth);
+      } catch (error) {
+        console.warn(`⚠️ Firebase redirect completion failed: ${error.message}`);
+      }
+    }
 
     console.log('✅ Firebase initialized');
 
@@ -221,6 +230,10 @@ export async function initializeFirebaseSync(config) {
       // ── Auth ────────────────────────────────────────────────────────────────
 
       async signInWithGoogle() {
+        if (typeof location !== 'undefined' && location.hostname === 'waults.vercel.app') {
+          await signInWithRedirect(auth, provider);
+          return null;
+        }
         const result = await signInWithPopup(auth, provider);
         return result.user; // { email, displayName, uid, ... }
       },
