@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Resetting WAULT Connection</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+    }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      box-sizing: border-box;
+    }
+    main {
+      width: min(440px, 100%);
+      text-align: center;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 24px;
+      letter-spacing: 0;
+    }
+    p {
+      margin: 0;
+      color: rgba(230, 237, 243, 0.68);
+      line-height: 1.55;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Resetting WAULT connection</h1>
+    <p id="status">Removing the old login session. Workspace data and recovery copies are not being deleted.</p>
+  </main>
+  <script>
+    const deleteDatabase = (name) => new Promise((resolve) => {
+      if (!window.indexedDB) {
+        resolve();
+        return;
+      }
+      const request = indexedDB.deleteDatabase(name);
+      const finish = () => resolve();
+      request.onsuccess = finish;
+      request.onerror = finish;
+      request.onblocked = finish;
+      setTimeout(finish, 1500);
+    });
+
+    const resetConnection = async () => {
+      try {
+        if ("caches" in window) {
+          const names = await caches.keys();
+          await Promise.all(names.map((name) => caches.delete(name)));
+        }
+      } catch {}
+
+      try {
+        Object.keys(localStorage).forEach((key) => {
+          if (
+            key.startsWith("firebase:authUser:")
+            || key.startsWith("firebase:host:")
+            || key === "firebase:previous_websocket_failure"
+          ) {
+            localStorage.removeItem(key);
+          }
+        });
+      } catch {}
+
+      await deleteDatabase("firebaseLocalStorageDb");
+      location.replace(`/?connection_reset=${Date.now()}`);
+    };
+
+    resetConnection();
+  </script>
+</body>
+</html>

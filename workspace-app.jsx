@@ -6375,6 +6375,9 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
               <button type="button" className="cloud-preview-retry" onClick={() => window.dispatchEvent(new Event("wault-cloud-reauth"))}>
                 Reconnect Google
               </button>
+              <button type="button" className="cloud-preview-retry" onClick={() => window.location.assign("/connection-reset.html")}>
+                Reset connection
+              </button>
             </div>
           </div>
         )}
