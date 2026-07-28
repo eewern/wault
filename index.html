@@ -4102,7 +4102,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <!-- Data: load XALT Bible content first, then workspace defaults -->
-<script src="workspace-config.js?v=20260728-vercel-auth1"></script>
+<script src="workspace-config.js?v=20260728-vercel-bridge1"></script>
 <script src="workspace-localStorage-sync.js?v=20260525-fix-data-loss"></script>
 <script src="xalt-bible-data.js?v=20260515-workspaces1"></script>
 <script src="workspace-data.js?v=20260612-cmdcentre1"></script>
@@ -4113,7 +4113,7 @@
 <script type="module">
   // Native ESM Firebase init — runs after workspace-config.js (classic) has set SUPABASE_CONFIG.
   // Exposes window.__firebaseInitPromise which workspace-app.jsx awaits (avoids Babel transforming import()).
-  import init from './firebase-sync.mjs?v=20260728-vercel-auth2';
+  import init from './firebase-sync.mjs?v=20260728-vercel-bridge1';
   let _fbInitDone = false;
   const _fbInit = init(window.SUPABASE_CONFIG || {}).catch((e) => {
     console.warn('Firebase init failed:', e && e.message);

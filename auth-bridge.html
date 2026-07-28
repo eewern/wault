@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WAULT Google Sign-In</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+    }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      box-sizing: border-box;
+    }
+    main {
+      width: min(360px, 100%);
+      text-align: center;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 24px;
+      letter-spacing: 0;
+    }
+    p {
+      margin: 0;
+      color: rgba(230, 237, 243, 0.65);
+      line-height: 1.55;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Signing in to WAULT</h1>
+    <p id="status">Connecting securely to Google...</p>
+  </main>
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js';
+    import {
+      getAuth,
+      GoogleAuthProvider,
+      getRedirectResult,
+      signInWithRedirect,
+    } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js';
+
+    const ALLOWED_RETURN_ORIGIN = 'https://waults.vercel.app';
+    const status = document.getElementById('status');
+    const requestedOrigin = new URLSearchParams(location.search).get('returnOrigin');
+    const returnOrigin = requestedOrigin === ALLOWED_RETURN_ORIGIN ? requestedOrigin : '';
+
+    const showError = (message) => {
+      status.textContent = message;
+      if (returnOrigin && window.opener) {
+        window.opener.postMessage({
+          type: 'wault-google-auth-error',
+          message,
+        }, returnOrigin);
+      }
+    };
+
+    if (!returnOrigin || !window.opener) {
+      showError('This sign-in window must be opened from WAULT on Vercel.');
+    } else {
+      try {
+        const app = initializeApp({
+          apiKey: 'AIzaSyDfXPu4ZdQTHYPmF5qUdaI-O7wttjD7qoQ',
+          authDomain: 'wernotion.firebaseapp.com',
+          projectId: 'wernotion',
+        });
+        const auth = getAuth(app);
+        const result = await getRedirectResult(auth);
+
+        if (!result) {
+          status.textContent = 'Opening Google sign-in...';
+          await signInWithRedirect(auth, new GoogleAuthProvider());
+        } else {
+          const credential = GoogleAuthProvider.credentialFromResult(result);
+          const serialized = credential?.toJSON?.() || {};
+          const idToken = credential?.idToken || serialized.oauthIdToken || serialized.idToken || '';
+          const accessToken = credential?.accessToken || serialized.oauthAccessToken || serialized.accessToken || '';
+          if (!idToken && !accessToken) {
+            throw new Error('Google did not return a usable sign-in credential.');
+          }
+          status.textContent = 'Signed in. Returning to WAULT...';
+          window.opener.postMessage({
+            type: 'wault-google-auth-credential',
+            idToken,
+            accessToken,
+          }, returnOrigin);
+          setTimeout(() => window.close(), 250);
+        }
+      } catch (error) {
+        showError(error?.message || 'Google sign-in failed.');
+      }
+    }
+  </script>
+</body>
+</html>

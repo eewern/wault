@@ -257,7 +257,12 @@ check(firebaseSyncSource.includes('uploadType=resumable'), 'large Google Docs ex
 check(firebaseSyncSource.includes("method: 'PUT'"), 'large Google Docs export does not finish its resumable upload correctly');
 check(firebaseSyncSource.includes('async refreshAuthSession()'), 'stale Firebase browser sessions cannot be repaired');
 check(firebaseSyncSource.includes('async reconnectGoogleSession()'), 'broken Google browser sessions cannot be explicitly reauthenticated');
-check(firebaseSyncSource.includes('signInWithRedirect(auth, provider)'), 'Vercel authentication does not use the same-origin redirect flow');
+check(firebaseSyncSource.includes("'https://wernotion.firebaseapp.com'"), 'Vercel authentication bridge does not target the Firebase origin');
+check(firebaseSyncSource.includes('signInWithCredential(auth, credential)'), 'Vercel authentication bridge cannot complete Firebase sign-in');
+check(firebaseSyncSource.includes("event.origin !== bridgeOrigin"), 'Vercel authentication bridge does not validate the message origin');
+const authBridgeSource = readFileSync(new URL('../auth-bridge.html', import.meta.url), 'utf8');
+check(authBridgeSource.includes("requestedOrigin === ALLOWED_RETURN_ORIGIN"), 'Firebase authentication bridge accepts an untrusted return origin');
+check(authBridgeSource.includes('GoogleAuthProvider.credentialFromResult(result)'), 'Firebase authentication bridge does not return the Google credential');
 check(firebaseSyncSource.includes("currentUser.getIdToken(true)"), 'failed Firebase reads do not force-refresh the auth token');
 check(firebaseSyncSource.includes("'Firebase workspace read'"), 'Firebase workspace reads can hang without a bounded timeout');
 check(workspaceAppSource.includes('wault-cloud-retry'), 'the protected cached view has no immediate reconnect action');

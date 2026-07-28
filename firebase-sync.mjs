@@ -14,8 +14,7 @@ export async function initializeFirebaseSync(config) {
       getAuth,
       GoogleAuthProvider,
       signInWithPopup,
-      signInWithRedirect,
-      getRedirectResult,
+      signInWithCredential,
       reauthenticateWithPopup,
       signOut: firebaseSignOut,
       onAuthStateChanged,
@@ -48,14 +47,6 @@ export async function initializeFirebaseSync(config) {
 
     // Keep the user signed in across page refreshes (survives browser close/reopen)
     await setPersistence(auth, browserLocalPersistence);
-    if (typeof location !== 'undefined' && location.hostname === 'waults.vercel.app') {
-      try {
-        await getRedirectResult(auth);
-      } catch (error) {
-        console.warn(`⚠️ Firebase redirect completion failed: ${error.message}`);
-      }
-    }
-
     console.log('✅ Firebase initialized');
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -231,8 +222,60 @@ export async function initializeFirebaseSync(config) {
 
       async signInWithGoogle() {
         if (typeof location !== 'undefined' && location.hostname === 'waults.vercel.app') {
-          await signInWithRedirect(auth, provider);
-          return null;
+          const bridgeOrigin = 'https://wernotion.firebaseapp.com';
+          const bridgeUrl = `${bridgeOrigin}/auth-bridge.html?returnOrigin=${encodeURIComponent(location.origin)}`;
+          const authWindow = window.open(
+            bridgeUrl,
+            'wault-google-sign-in',
+            'popup=yes,width=520,height=720,resizable=yes,scrollbars=yes'
+          );
+          if (!authWindow) {
+            throw new Error('Google sign-in was blocked. Allow pop-ups for waults.vercel.app and try again.');
+          }
+
+          return await new Promise((resolve, reject) => {
+            let settled = false;
+            let closedTimer = null;
+            let timeoutTimer = null;
+            const finish = (error, user = null) => {
+              if (settled) return;
+              settled = true;
+              window.removeEventListener('message', handleMessage);
+              clearInterval(closedTimer);
+              clearTimeout(timeoutTimer);
+              try { authWindow.close(); } catch {}
+              if (error) reject(error);
+              else resolve(user);
+            };
+            const handleMessage = async (event) => {
+              if (event.origin !== bridgeOrigin || event.source !== authWindow) return;
+              const message = event.data || {};
+              if (message.type === 'wault-google-auth-error') {
+                finish(new Error(message.message || 'Google sign-in failed.'));
+                return;
+              }
+              if (message.type !== 'wault-google-auth-credential') return;
+              try {
+                const credential = GoogleAuthProvider.credential(
+                  message.idToken || null,
+                  message.accessToken || null
+                );
+                const result = await signInWithCredential(auth, credential);
+                finish(null, result.user);
+              } catch (error) {
+                finish(error);
+              }
+            };
+            window.addEventListener('message', handleMessage);
+            closedTimer = setInterval(() => {
+              if (authWindow.closed) {
+                finish(new Error('Google sign-in was closed before it finished.'));
+              }
+            }, 400);
+            timeoutTimer = setTimeout(() => {
+              finish(new Error('Google sign-in timed out. Please try again.'));
+            }, 120000);
+          });
         }
         const result = await signInWithPopup(auth, provider);
         return result.user; // { email, displayName, uid, ... }

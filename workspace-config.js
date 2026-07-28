@@ -2,9 +2,6 @@
 // Default = the Railway-hosted API (works on the live site with the laptop off);
 // add ?local to the URL to hit a local `npm run start:api` server during dev.
 const LOCAL_ONLY_PREVIEW = new URLSearchParams(window.location.search).has("local");
-const WAULT_FIREBASE_AUTH_DOMAIN = window.location.hostname === "waults.vercel.app"
-  ? "waults.vercel.app"
-  : "wernotion.firebaseapp.com";
 window.WORKSPACE_API_URL = LOCAL_ONLY_PREVIEW
   ? "http://127.0.0.1:3334"
   : "https://wault-api-production.up.railway.app";
@@ -26,7 +23,7 @@ window.SUPABASE_CONFIG = LOCAL_ONLY_PREVIEW ? {
   ownerEmail: "eewern21@gmail.com",
   // Firebase config - fully configured ✅
   firebaseApiKey: "AIzaSyDfXPu4ZdQTHYPmF5qUdaI-O7wttjD7qoQ",
-  firebaseAuthDomain: WAULT_FIREBASE_AUTH_DOMAIN,
+  firebaseAuthDomain: "wernotion.firebaseapp.com",
   firebaseProjectId: "wernotion",
   firebaseDatabaseURL: "https://wernotion-default-rtdb.asia-southeast1.firebasedatabase.app",
 };
