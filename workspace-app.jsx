@@ -2620,9 +2620,26 @@ function App() {
     };
     window.addEventListener("wault-cloud-retry", retryCloudNow);
 
+    const reconnectGoogleNow = async () => {
+      const firebaseSync = window.WorkspaceFirebaseSync;
+      if (!firebaseSync || !activeWorkspaceIdRef.current || cancelled) return;
+      setSyncState((s) => ({ ...s, error: "", status: "Reconnecting Google account", firebaseStatus: "Reconnecting Google account" }));
+      try {
+        await firebaseSync.reconnectGoogleSession?.();
+        if (!cancelled) loadFirebaseWorkspaceAndListen(firebaseSync, activeWorkspaceIdRef.current);
+      } catch (err) {
+        if (!cancelled) {
+          const message = String(err?.code || err?.message || "Google reconnection failed").replace(/^Firebase:\s*/i, "");
+          setSyncState((s) => ({ ...s, error: message, status: "Google reconnection failed", firebaseStatus: `Google reconnection failed — ${message}` }));
+        }
+      }
+    };
+    window.addEventListener("wault-cloud-reauth", reconnectGoogleNow);
+
     return () => {
       cancelled = true;
       window.removeEventListener("wault-cloud-retry", retryCloudNow);
+      window.removeEventListener("wault-cloud-reauth", reconnectGoogleNow);
       if (cloudLoadRetryTimerRef.current) {
         clearTimeout(cloudLoadRetryTimerRef.current);
         cloudLoadRetryTimerRef.current = null;
@@ -6351,9 +6368,14 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
               Reconnecting to Firebase. This cached view is protected until the live workspace is confirmed.
               {cloudReadOnlyReason ? ` Error: ${cloudReadOnlyReason}` : ""}
             </span>
-            <button type="button" className="cloud-preview-retry" onClick={() => window.dispatchEvent(new Event("wault-cloud-retry"))}>
-              Retry now
-            </button>
+            <div className="cloud-preview-actions">
+              <button type="button" className="cloud-preview-retry" onClick={() => window.dispatchEvent(new Event("wault-cloud-retry"))}>
+                Retry now
+              </button>
+              <button type="button" className="cloud-preview-retry" onClick={() => window.dispatchEvent(new Event("wault-cloud-reauth"))}>
+                Reconnect Google
+              </button>
+            </div>
           </div>
         )}
         <div className="page-header">

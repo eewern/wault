@@ -418,6 +418,19 @@ export async function initializeFirebaseSync(config) {
         return true;
       },
 
+      async reconnectGoogleSession() {
+        const user = auth.currentUser;
+        if (!user?.uid) {
+          const result = await signInWithPopup(auth, provider);
+          return result.user;
+        }
+        const reconnectProvider = new GoogleAuthProvider();
+        reconnectProvider.setCustomParameters({ login_hint: user.email || '' });
+        const result = await reauthenticateWithPopup(user, reconnectProvider);
+        await result.user.getIdToken(true);
+        return result.user;
+      },
+
       onAuthStateChange(callback) {
         return onAuthStateChanged(auth, callback);
       },
