@@ -30,7 +30,7 @@
 <body>
   <main>
     <h1>WAULT Draft Recovery</h1>
-    <p>This page reads only WAULT drafts stored by this Vercel browser. It does not connect to Firebase and cannot overwrite or delete cloud data.</p>
+    <p>This page reads only WAULT drafts stored by this browser at this WAULT address. It does not connect to Firebase and cannot overwrite or delete cloud data.</p>
     <div class="status" id="status">Scanning this browser for recoverable workspace drafts...</div>
     <div class="actions">
       <button class="primary" id="downloadAll" disabled>Download all recovery data</button>
@@ -43,6 +43,8 @@
       const DATA_PREFIX = "workspace_v4_data_";
       const PENDING_PREFIX = "workspace_v4_pending_";
       const BACKUPS_PREFIX = "workspace_v4_backups_";
+      const LEGACY_WORKSPACE_KEY = "workspace_v4_dark";
+      const LEGACY_CROSS_TAB_KEY = "workspace_v4_current_data";
       const LIST_KEY = "workspace_v4_workspaces";
       const ACTIVE_KEY = "workspace_v4_active_workspace";
       const INDEXED_DB = "wault_workspace_safety_v1";
@@ -113,6 +115,7 @@
 
         const catalog = parse(localStorage.getItem(LIST_KEY), []) || [];
         const meta = new Map(catalog.filter((row) => row?.id).map((row) => [row.id, row]));
+        const activeWorkspaceId = localStorage.getItem(ACTIVE_KEY) || "legacy_workspace";
         const byWorkspace = new Map();
         const add = (workspaceId, source, value) => {
           const data = candidateData(value);
@@ -139,6 +142,12 @@
             backups.forEach((backup) => add(workspaceId, "Browser safety backup", backup));
           }
         }
+
+        // Older WAULT builds stored the active workspace in these single-key
+        // locations. Keep them in recovery scans so a failed cloud save from an
+        // older tab is still exportable before any restoration is attempted.
+        add(activeWorkspaceId, "Legacy active workspace copy", parse(localStorage.getItem(LEGACY_WORKSPACE_KEY)));
+        add(activeWorkspaceId, "Legacy cross-tab workspace copy", parse(localStorage.getItem(LEGACY_CROSS_TAB_KEY)));
 
         const indexed = await readIndexed();
         indexed.forEach((snapshot) => add(snapshot?.workspaceId, "IndexedDB safety snapshot", snapshot));

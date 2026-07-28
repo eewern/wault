@@ -276,6 +276,10 @@ check(workspaceAppSource.includes('/connection-reset.html'), 'the protected cach
 check(connectionResetSource.includes('firebaseLocalStorageDb'), 'connection reset does not clear stale Firebase authentication state');
 check(!connectionResetSource.includes('localStorage.clear'), 'connection reset can erase workspace recovery data');
 check(connectionResetSource.includes('Workspace data and recovery copies are not being deleted'), 'connection reset does not explain its data-safe scope');
+const recoverySource = readFileSync(new URL('../recovery.html', import.meta.url), 'utf8');
+check(recoverySource.includes('workspace_v4_dark'), 'recovery misses the legacy active workspace copy');
+check(recoverySource.includes('workspace_v4_current_data'), 'recovery misses the legacy cross-tab workspace copy');
+check(recoverySource.includes('does not connect to Firebase'), 'recovery page can write to Firebase');
 check(workspaceAppSource.includes('cloudPreviewWorkspaceRef.current === activeLocalWorkspaceId'), 'unconfirmed cached workspace data is not protected from cloud writes');
 check(!firebaseSyncSource.includes('wernahhh@gmail.com'), 'retired owner email remains in Firebase client access control');
 check(!databaseRulesSource.includes('wernahhh@gmail.com'), 'retired owner email remains in Firebase database rules');
