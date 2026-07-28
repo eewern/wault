@@ -411,6 +411,13 @@ export async function initializeFirebaseSync(config) {
         return auth.currentUser;
       },
 
+      async refreshAuthSession() {
+        const user = auth.currentUser;
+        if (!user?.uid) throw new Error('Firebase authentication is not ready');
+        await user.getIdToken(true);
+        return true;
+      },
+
       onAuthStateChange(callback) {
         return onAuthStateChanged(auth, callback);
       },
@@ -957,20 +964,31 @@ export async function initializeFirebaseSync(config) {
           throw new Error('Firebase authentication is not ready');
         }
         // Lightweight gate (the DB rules are the real enforcement).
-        const accessSnap = await get(ref(database, `access/${currentUser.uid}`));
-        if (!accessSnap.exists() && !isOwnerEmail(currentUser.email)) {
-          throw new Error('This account is not approved for Firebase access');
-        }
+        const withReadTimeout = (promise, label) => Promise.race([
+          promise,
+          new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), 10000)),
+        ]);
+        try {
+          const accessSnap = await withReadTimeout(get(ref(database, `access/${currentUser.uid}`)), 'Firebase access check');
+          if (!accessSnap.exists() && !isOwnerEmail(currentUser.email)) {
+            throw new Error('This account is not approved for Firebase access');
+          }
 
-        const dbRef = ref(database, `workspaces/${workspaceId}`);
-        const snapshot = await get(dbRef);
-        if (snapshot.exists()) {
-          const record = snapshot.val();
-          console.log(`✅ Loaded workspace from Firebase: ${workspaceId}`);
-          return record; // { workspace: {...}, updated_at, source }
+          const dbRef = ref(database, `workspaces/${workspaceId}`);
+          const snapshot = await withReadTimeout(get(dbRef), 'Firebase workspace read');
+          if (snapshot.exists()) {
+            const record = snapshot.val();
+            console.log(`✅ Loaded workspace from Firebase: ${workspaceId}`);
+            return record; // { workspace: {...}, updated_at, source }
+          }
+          console.log(`ℹ️ No Firebase data for: ${workspaceId}`);
+          return null;
+        } catch (error) {
+          // Repair stale browser auth before the app's protected retry. This does
+          // not write workspace data; it only renews the signed-in Firebase token.
+          try { await currentUser.getIdToken(true); } catch {}
+          throw error;
         }
-        console.log(`ℹ️ No Firebase data for: ${workspaceId}`);
-        return null;
       },
 
       async loadWorkspaceCatalogEntry(workspaceId) {

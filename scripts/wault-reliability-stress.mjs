@@ -255,6 +255,11 @@ check(firebaseSyncSource.includes("driveProvider.addScope('https://www.googleapi
 check(firebaseSyncSource.includes('reauthenticateWithPopup(currentUser, driveProvider)'), 'Google Docs export can switch the signed-in WAULT account');
 check(firebaseSyncSource.includes('uploadType=resumable'), 'large Google Docs exports do not use a resumable upload');
 check(firebaseSyncSource.includes("method: 'PUT'"), 'large Google Docs export does not finish its resumable upload correctly');
+check(firebaseSyncSource.includes('async refreshAuthSession()'), 'stale Firebase browser sessions cannot be repaired');
+check(firebaseSyncSource.includes("currentUser.getIdToken(true)"), 'failed Firebase reads do not force-refresh the auth token');
+check(firebaseSyncSource.includes("'Firebase workspace read'"), 'Firebase workspace reads can hang without a bounded timeout');
+check(workspaceAppSource.includes('wault-cloud-retry'), 'the protected cached view has no immediate reconnect action');
+check(workspaceAppSource.includes('cloudPreviewWorkspaceRef.current === activeLocalWorkspaceId'), 'unconfirmed cached workspace data is not protected from cloud writes');
 check(!firebaseSyncSource.includes('wernahhh@gmail.com'), 'retired owner email remains in Firebase client access control');
 check(!databaseRulesSource.includes('wernahhh@gmail.com'), 'retired owner email remains in Firebase database rules');
 check(databaseRulesSource.includes("auth.token.email === 'eewern21@gmail.com'"), 'owner-only Firebase rules are not tied to the canonical owner email');

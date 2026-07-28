@@ -2445,6 +2445,7 @@ function App() {
         return false;
       } catch (err) {
         console.warn('⚠️ Firebase workspace load failed:', err.message);
+        const readFailure = String(err?.code || err?.message || "Firebase read failed").replace(/^Firebase:\s*/i, "");
         if (haveCache) {
           cloudPreviewWorkspaceRef.current = workspaceId;
           loadedWorkspaceIdRef.current = null;
@@ -2461,9 +2462,9 @@ function App() {
         }
         setSyncState((s) => ({
           ...s,
-          error: haveCache ? "" : (err.message || "Workspace load failed"),
+          error: haveCache ? readFailure : (err.message || "Workspace load failed"),
           status: haveCache ? "Reconnecting to Firebase" : "Workspace load failed",
-          firebaseStatus: haveCache ? "Reconnecting to Firebase — cached view protected" : "Workspace load failed",
+          firebaseStatus: haveCache ? `Reconnecting to Firebase — ${readFailure}` : "Workspace load failed",
         }));
         return false;
       } finally {
@@ -2606,8 +2607,22 @@ function App() {
 
     run();
 
+    const retryCloudNow = async () => {
+      const firebaseSync = window.WorkspaceFirebaseSync;
+      if (!firebaseSync || !activeWorkspaceIdRef.current || cancelled) return;
+      if (cloudLoadRetryTimerRef.current) {
+        clearTimeout(cloudLoadRetryTimerRef.current);
+        cloudLoadRetryTimerRef.current = null;
+      }
+      setSyncState((s) => ({ ...s, error: "", status: "Reconnecting to Firebase", firebaseStatus: "Reconnecting to Firebase" }));
+      try { await firebaseSync.refreshAuthSession?.(); } catch {}
+      if (!cancelled) loadFirebaseWorkspaceAndListen(firebaseSync, activeWorkspaceIdRef.current);
+    };
+    window.addEventListener("wault-cloud-retry", retryCloudNow);
+
     return () => {
       cancelled = true;
+      window.removeEventListener("wault-cloud-retry", retryCloudNow);
       if (cloudLoadRetryTimerRef.current) {
         clearTimeout(cloudLoadRetryTimerRef.current);
         cloudLoadRetryTimerRef.current = null;
@@ -4143,6 +4158,7 @@ function App() {
               || loadedWorkspaceIdRef.current !== activeLocalWorkspaceId
             )
           )}
+          cloudReadOnlyReason={syncState.error || ""}
         />
       )}
       {currentPage?.id !== HOME_PAGE_ID && (
@@ -4822,7 +4838,7 @@ function getBuiltinTemplates() {
 }
 
 // ====== PAGE EDITOR ======
-function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, addBlock, addBlockAfter, addBlockBefore, replaceBlock, moveBlock, insertBlocksAtAnchor, data, setCurrentPage, updateEvents, addPage, presenceLocks = {}, onWordBoundary, authUser, activeWorkspaceId, cloudReadOnly = false }) {
+function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, addBlock, addBlockAfter, addBlockBefore, replaceBlock, moveBlock, insertBlocksAtAnchor, data, setCurrentPage, updateEvents, addPage, presenceLocks = {}, onWordBoundary, authUser, activeWorkspaceId, cloudReadOnly = false, cloudReadOnlyReason = "" }) {
   // Make forceHistoryCommit available globally so EditableText can call it on word boundaries
   useEffect(() => { window.__onWordBoundary = onWordBoundary; }, [onWordBoundary]);
 
@@ -6331,7 +6347,13 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       <div className={`page-container${cloudReadOnly ? " cloud-preview-locked" : ""}`} key={page.id}>
         {cloudReadOnly && (
           <div className="cloud-preview-notice" role="status">
-            Reconnecting to Firebase. This cached view is protected from edits until the live workspace is confirmed. WAULT will retry automatically.
+            <span>
+              Reconnecting to Firebase. This cached view is protected until the live workspace is confirmed.
+              {cloudReadOnlyReason ? ` Error: ${cloudReadOnlyReason}` : ""}
+            </span>
+            <button type="button" className="cloud-preview-retry" onClick={() => window.dispatchEvent(new Event("wault-cloud-retry"))}>
+              Retry now
+            </button>
           </div>
         )}
         <div className="page-header">

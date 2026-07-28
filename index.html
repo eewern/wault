@@ -1044,6 +1044,22 @@
     color: var(--text);
     font-size: 12px;
     line-height: 1.45;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .cloud-preview-retry {
+    flex: 0 0 auto;
+    border: 1px solid var(--border);
+    background: var(--panel-hover);
+    color: var(--text);
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .cloud-preview-retry:hover {
+    border-color: var(--accent);
   }
   @keyframes pageFadeIn {
     from { opacity: 0; transform: translateY(4px); }
