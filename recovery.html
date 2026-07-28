@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WAULT Draft Recovery</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #0d1117; color: #e6edf3; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px 18px 80px; }
+    main { width: min(880px, 100%); margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: 26px; letter-spacing: 0; }
+    p { color: #9da7b3; line-height: 1.55; }
+    .status { margin: 22px 0; padding: 12px 14px; border-left: 3px solid #57c5d8; background: #151b23; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 28px; }
+    button { border: 1px solid #33404d; background: #1b2530; color: #e6edf3; padding: 9px 12px; cursor: pointer; font: inherit; }
+    button.primary { background: #57c5d8; border-color: #57c5d8; color: #071014; font-weight: 700; }
+    button:disabled { opacity: .45; cursor: default; }
+    .workspace { border-top: 1px solid #26313c; padding: 18px 0; }
+    .workspace h2 { margin: 0 0 6px; font-size: 17px; letter-spacing: 0; }
+    .meta { color: #9da7b3; font-size: 13px; margin-bottom: 10px; }
+    .candidate { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 0; }
+    .candidate + .candidate { border-top: 1px solid #1c2630; }
+    .candidate strong { display: block; font-size: 13px; }
+    .candidate span { color: #8d98a5; font-size: 12px; }
+    .empty { padding: 28px 0; color: #f2b8b5; }
+    code { color: #c9d1d9; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>WAULT Draft Recovery</h1>
+    <p>This page reads only WAULT drafts stored by this Vercel browser. It does not connect to Firebase and cannot overwrite or delete cloud data.</p>
+    <div class="status" id="status">Scanning this browser for recoverable workspace drafts...</div>
+    <div class="actions">
+      <button class="primary" id="downloadAll" disabled>Download all recovery data</button>
+      <button id="rescan">Rescan browser</button>
+    </div>
+    <section id="results"></section>
+  </main>
+  <script>
+    (() => {
+      const DATA_PREFIX = "workspace_v4_data_";
+      const PENDING_PREFIX = "workspace_v4_pending_";
+      const BACKUPS_PREFIX = "workspace_v4_backups_";
+      const LIST_KEY = "workspace_v4_workspaces";
+      const ACTIVE_KEY = "workspace_v4_active_workspace";
+      const INDEXED_DB = "wault_workspace_safety_v1";
+      const INDEXED_STORE = "snapshots";
+      let recoveryPackage = null;
+
+      const parse = (value, fallback = null) => {
+        try { return JSON.parse(value); } catch { return fallback; }
+      };
+      const clean = (value) => String(value || "").replace(/<[^>]*>/g, "").trim();
+      const summarize = (data) => {
+        const pages = Object.values(data?.pages || {});
+        const blocks = pages.flatMap((page) => Array.isArray(page?.blocks) ? page.blocks : []);
+        return {
+          pages: pages.length,
+          blocks: blocks.length,
+          characters: JSON.stringify(data || {}).length,
+        };
+      };
+      const candidateData = (candidate) => candidate?.data?.pages ? candidate.data
+        : candidate?.workspace?.pages ? candidate.workspace
+        : candidate?.pages ? candidate
+        : null;
+      const candidateTime = (candidate) => String(
+        candidate?.savedAt || candidate?.saved_at || candidate?.createdAt || candidate?.created_at || ""
+      );
+      const download = (filename, value) => {
+        const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      };
+      const readIndexed = () => new Promise((resolve) => {
+        if (!window.indexedDB) return resolve([]);
+        const request = indexedDB.open(INDEXED_DB);
+        request.onerror = () => resolve([]);
+        request.onupgradeneeded = () => {
+          request.transaction?.abort();
+          resolve([]);
+        };
+        request.onsuccess = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(INDEXED_STORE)) {
+            db.close();
+            resolve([]);
+            return;
+          }
+          const transaction = db.transaction(INDEXED_STORE, "readonly");
+          const allRequest = transaction.objectStore(INDEXED_STORE).getAll();
+          allRequest.onerror = () => resolve([]);
+          allRequest.onsuccess = () => {
+            db.close();
+            resolve(Array.isArray(allRequest.result) ? allRequest.result : []);
+          };
+        };
+      });
+
+      async function scan() {
+        const status = document.getElementById("status");
+        const results = document.getElementById("results");
+        const downloadAll = document.getElementById("downloadAll");
+        status.textContent = "Scanning this browser for recoverable workspace drafts...";
+        results.innerHTML = "";
+        downloadAll.disabled = true;
+
+        const catalog = parse(localStorage.getItem(LIST_KEY), []) || [];
+        const meta = new Map(catalog.filter((row) => row?.id).map((row) => [row.id, row]));
+        const byWorkspace = new Map();
+        const add = (workspaceId, source, value) => {
+          const data = candidateData(value);
+          if (!workspaceId || !data?.pages) return;
+          if (!byWorkspace.has(workspaceId)) byWorkspace.set(workspaceId, []);
+          byWorkspace.get(workspaceId).push({
+            source,
+            savedAt: candidateTime(value),
+            data,
+            summary: summarize(data),
+          });
+        };
+
+        for (let index = 0; index < localStorage.length; index += 1) {
+          const key = localStorage.key(index);
+          if (!key) continue;
+          if (key.startsWith(DATA_PREFIX)) {
+            add(key.slice(DATA_PREFIX.length), "Vercel local workspace", parse(localStorage.getItem(key)));
+          } else if (key.startsWith(PENDING_PREFIX)) {
+            add(key.slice(PENDING_PREFIX.length), "Pending Firebase draft", parse(localStorage.getItem(key)));
+          } else if (key.startsWith(BACKUPS_PREFIX)) {
+            const workspaceId = key.slice(BACKUPS_PREFIX.length);
+            const backups = parse(localStorage.getItem(key), []) || [];
+            backups.forEach((backup) => add(workspaceId, "Browser safety backup", backup));
+          }
+        }
+
+        const indexed = await readIndexed();
+        indexed.forEach((snapshot) => add(snapshot?.workspaceId, "IndexedDB safety snapshot", snapshot));
+
+        const workspaces = [...byWorkspace.entries()].map(([id, candidates]) => {
+          candidates.sort((left, right) => (
+            (Date.parse(right.savedAt) || 0) - (Date.parse(left.savedAt) || 0)
+            || right.summary.characters - left.summary.characters
+          ));
+          const row = meta.get(id) || {};
+          const newest = candidates[0];
+          const name = clean(row.name || newest?.data?.settings?.workspaceName || newest?.data?.pages?.[newest?.data?.currentPageId]?.title || id) || id;
+          return { id, name, candidates };
+        }).sort((left, right) => left.name.localeCompare(right.name));
+
+        recoveryPackage = {
+          format: "wault-origin-recovery-v1",
+          capturedAt: new Date().toISOString(),
+          origin: location.origin,
+          activeWorkspaceId: localStorage.getItem(ACTIVE_KEY) || "",
+          workspaces,
+        };
+
+        if (!workspaces.length) {
+          status.textContent = "No WAULT workspace drafts were found in this Vercel browser.";
+          results.innerHTML = '<div class="empty">No recoverable workspace data was found for this browser profile.</div>';
+          return;
+        }
+
+        const count = workspaces.reduce((total, workspace) => total + workspace.candidates.length, 0);
+        status.textContent = `Found ${workspaces.length} workspace${workspaces.length === 1 ? "" : "s"} with ${count} recoverable copy${count === 1 ? "" : "ies"}.`;
+        downloadAll.disabled = false;
+
+        workspaces.forEach((workspace) => {
+          const section = document.createElement("article");
+          section.className = "workspace";
+          const heading = document.createElement("h2");
+          heading.textContent = workspace.name;
+          section.appendChild(heading);
+          const metaLine = document.createElement("div");
+          metaLine.className = "meta";
+          metaLine.textContent = `${workspace.id} · ${workspace.candidates.length} recoverable copy${workspace.candidates.length === 1 ? "" : "ies"}`;
+          section.appendChild(metaLine);
+
+          workspace.candidates.slice(0, 12).forEach((candidate, index) => {
+            const row = document.createElement("div");
+            row.className = "candidate";
+            const info = document.createElement("div");
+            const source = document.createElement("strong");
+            source.textContent = `${index === 0 ? "Newest: " : ""}${candidate.source}`;
+            const details = document.createElement("span");
+            details.textContent = `${candidate.savedAt || "timestamp unavailable"} · ${candidate.summary.pages} pages · ${candidate.summary.blocks} blocks`;
+            info.append(source, details);
+            const button = document.createElement("button");
+            button.textContent = "Download";
+            button.addEventListener("click", () => download(
+              `wault-recovery-${workspace.id}-${index + 1}.json`,
+              { name: workspace.name, workspaceName: workspace.name, workspaceId: workspace.id, recoveredAt: new Date().toISOString(), source: candidate.source, data: candidate.data }
+            ));
+            row.append(info, button);
+            section.appendChild(row);
+          });
+          results.appendChild(section);
+        });
+      }
+
+      document.getElementById("downloadAll").addEventListener("click", () => {
+        if (recoveryPackage) download(`wault-vercel-recovery-${new Date().toISOString().replace(/[:.]/g, "-")}.json`, recoveryPackage);
+      });
+      document.getElementById("rescan").addEventListener("click", scan);
+      scan();
+    })();
+  </script>
+</body>
+</html>

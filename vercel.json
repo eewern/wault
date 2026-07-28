@@ -3,13 +3,6 @@
   "buildCommand": "npm run build:netlify",
   "outputDirectory": ".netlify-publish",
   "framework": null,
-  "redirects": [
-    {
-      "source": "/(.*)",
-      "destination": "https://wernotion.firebaseapp.com/$1",
-      "permanent": false
-    }
-  ],
   "headers": [
     {
       "source": "/(.*)",

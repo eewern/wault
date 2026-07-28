@@ -9,6 +9,7 @@ const out = resolve(root, ".netlify-publish");
 // documentation, uploads, dependencies, and dotfiles can never enter the deploy.
 const publicFiles = [
   "index.html",
+  "recovery.html",
   "workspace-config.js",
   "workspace-localStorage-sync.js",
   "xalt-bible-data.js",
