@@ -2,6 +2,7 @@
 .netlify
 .netlify-publish/
 .vercel/
+.firebase/
 .DS_Store
 .claude/
 
