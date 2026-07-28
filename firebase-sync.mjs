@@ -16,6 +16,7 @@ export async function initializeFirebaseSync(config) {
       signInWithPopup,
       signInWithCredential,
       reauthenticateWithPopup,
+      reauthenticateWithCredential,
       signOut: firebaseSignOut,
       onAuthStateChanged,
       setPersistence,
@@ -92,7 +93,39 @@ export async function initializeFirebaseSync(config) {
     let accessOkCache = null;
 
     const workspaceCatalogPath = (workspaceId) => `workspaceCatalog/${workspaceId}`;
-    const readWithRetry = async (path, label, attempts = 2, timeoutMs = 12000) => {
+    const firebaseDatabaseUrl = String(config.firebaseDatabaseURL || '').replace(/\/$/, '');
+    const restReadSnapshot = async (path, label, forceRefresh = false) => {
+      const user = auth.currentUser;
+      if (!user?.uid || !firebaseDatabaseUrl) {
+        throw new Error(`${label}-rest-unavailable`);
+      }
+      const token = await user.getIdToken(forceRefresh);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch(
+          `${firebaseDatabaseUrl}/${String(path).replace(/^\/+/, '')}.json?auth=${encodeURIComponent(token)}`,
+          { cache: 'no-store', signal: controller.signal }
+        );
+        if (response.status === 401 && !forceRefresh) {
+          return restReadSnapshot(path, label, true);
+        }
+        if (!response.ok) {
+          throw new Error(`${label}-rest-${response.status}`);
+        }
+        const value = await response.json();
+        return {
+          exists: () => value !== null,
+          val: () => value,
+        };
+      } catch (error) {
+        if (error?.name === 'AbortError') throw new Error(`${label}-rest-timeout`);
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const readWithRetry = async (path, label, attempts = 1, timeoutMs = 6000) => {
       let lastError = null;
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
         try {
@@ -105,7 +138,12 @@ export async function initializeFirebaseSync(config) {
           if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 350 * attempt));
         }
       }
-      throw lastError || new Error(`${label}-failed`);
+      console.warn(`⚠️ ${label} Firebase SDK read stalled; trying authenticated REST fallback`);
+      try {
+        return await restReadSnapshot(path, label);
+      } catch (fallbackError) {
+        throw fallbackError || lastError || new Error(`${label}-failed`);
+      }
     };
     const normalizeVisibility = (visibility) => visibility === 'private' ? 'private' : 'shared';
     const cleanWorkspaceName = (name, fallback = 'Untitled Workspace') => {
@@ -170,7 +208,7 @@ export async function initializeFirebaseSync(config) {
 
     async function loadWorkspaceCatalogEntry(workspaceId) {
       if (!workspaceId) return null;
-      const snap = await get(ref(database, workspaceCatalogPath(workspaceId)));
+      const snap = await readWithRetry(workspaceCatalogPath(workspaceId), 'workspace-catalog-entry', 1, 5000);
       if (!snap.exists()) return null;
       const meta = snap.val() || {};
       return {
@@ -210,6 +248,61 @@ export async function initializeFirebaseSync(config) {
       return next;
     }
 
+    const getVercelGoogleCredential = async () => {
+      const bridgeOrigin = 'https://wernotion.firebaseapp.com';
+      const bridgeUrl = `${bridgeOrigin}/auth-bridge.html?returnOrigin=${encodeURIComponent(location.origin)}`;
+      const authWindow = window.open(
+        bridgeUrl,
+        'wault-google-sign-in',
+        'popup=yes,width=520,height=720,resizable=yes,scrollbars=yes'
+      );
+      if (!authWindow) {
+        throw new Error('Google sign-in was blocked. Allow pop-ups for waults.vercel.app and try again.');
+      }
+
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+        let closedTimer = null;
+        let timeoutTimer = null;
+        const finish = (error, credential = null) => {
+          if (settled) return;
+          settled = true;
+          window.removeEventListener('message', handleMessage);
+          clearInterval(closedTimer);
+          clearTimeout(timeoutTimer);
+          try { authWindow.close(); } catch {}
+          if (error) reject(error);
+          else resolve(credential);
+        };
+        const handleMessage = (event) => {
+          if (event.origin !== bridgeOrigin || event.source !== authWindow) return;
+          const message = event.data || {};
+          if (message.type === 'wault-google-auth-error') {
+            finish(new Error(message.message || 'Google sign-in failed.'));
+            return;
+          }
+          if (message.type !== 'wault-google-auth-credential') return;
+          try {
+            finish(null, GoogleAuthProvider.credential(
+              message.idToken || null,
+              message.accessToken || null
+            ));
+          } catch (error) {
+            finish(error);
+          }
+        };
+        window.addEventListener('message', handleMessage);
+        closedTimer = setInterval(() => {
+          if (authWindow.closed) {
+            finish(new Error('Google sign-in was closed before it finished.'));
+          }
+        }, 400);
+        timeoutTimer = setTimeout(() => {
+          finish(new Error('Google sign-in timed out. Please try again.'));
+        }, 120000);
+      });
+    };
+
     // ── Public API ─────────────────────────────────────────────────────────────
     return {
       database,
@@ -222,60 +315,9 @@ export async function initializeFirebaseSync(config) {
 
       async signInWithGoogle() {
         if (typeof location !== 'undefined' && location.hostname === 'waults.vercel.app') {
-          const bridgeOrigin = 'https://wernotion.firebaseapp.com';
-          const bridgeUrl = `${bridgeOrigin}/auth-bridge.html?returnOrigin=${encodeURIComponent(location.origin)}`;
-          const authWindow = window.open(
-            bridgeUrl,
-            'wault-google-sign-in',
-            'popup=yes,width=520,height=720,resizable=yes,scrollbars=yes'
-          );
-          if (!authWindow) {
-            throw new Error('Google sign-in was blocked. Allow pop-ups for waults.vercel.app and try again.');
-          }
-
-          return await new Promise((resolve, reject) => {
-            let settled = false;
-            let closedTimer = null;
-            let timeoutTimer = null;
-            const finish = (error, user = null) => {
-              if (settled) return;
-              settled = true;
-              window.removeEventListener('message', handleMessage);
-              clearInterval(closedTimer);
-              clearTimeout(timeoutTimer);
-              try { authWindow.close(); } catch {}
-              if (error) reject(error);
-              else resolve(user);
-            };
-            const handleMessage = async (event) => {
-              if (event.origin !== bridgeOrigin || event.source !== authWindow) return;
-              const message = event.data || {};
-              if (message.type === 'wault-google-auth-error') {
-                finish(new Error(message.message || 'Google sign-in failed.'));
-                return;
-              }
-              if (message.type !== 'wault-google-auth-credential') return;
-              try {
-                const credential = GoogleAuthProvider.credential(
-                  message.idToken || null,
-                  message.accessToken || null
-                );
-                const result = await signInWithCredential(auth, credential);
-                finish(null, result.user);
-              } catch (error) {
-                finish(error);
-              }
-            };
-            window.addEventListener('message', handleMessage);
-            closedTimer = setInterval(() => {
-              if (authWindow.closed) {
-                finish(new Error('Google sign-in was closed before it finished.'));
-              }
-            }, 400);
-            timeoutTimer = setTimeout(() => {
-              finish(new Error('Google sign-in timed out. Please try again.'));
-            }, 120000);
-          });
+          const credential = await getVercelGoogleCredential();
+          const result = await signInWithCredential(auth, credential);
+          return result.user;
         }
         const result = await signInWithPopup(auth, provider);
         return result.user; // { email, displayName, uid, ... }
@@ -477,7 +519,12 @@ export async function initializeFirebaseSync(config) {
       async reconnectGoogleSession() {
         const user = auth.currentUser;
         if (!user?.uid) {
-          const result = await signInWithPopup(auth, provider);
+          return this.signInWithGoogle();
+        }
+        if (typeof location !== 'undefined' && location.hostname === 'waults.vercel.app') {
+          const credential = await getVercelGoogleCredential();
+          const result = await reauthenticateWithCredential(user, credential);
+          await result.user.getIdToken(true);
           return result.user;
         }
         const reconnectProvider = new GoogleAuthProvider();
@@ -505,26 +552,28 @@ export async function initializeFirebaseSync(config) {
         const email = (typeof user === 'string' ? user : user?.email || '').toLowerCase();
         if (!uid) return null; // can't gate without a uid
 
-        // A DB read that can't reach the server must never hang the sign-in gate.
-        // Race every access read against a timeout so the UI always resolves.
-        const withTimeout = (promise, ms, label) =>
-          Promise.race([
-            promise,
-            new Promise((_, rej) => setTimeout(() => rej(new Error(label + '-timeout')), ms)),
-          ]);
+        if (accessOkCacheUid !== uid) {
+          accessOkCacheUid = uid;
+          accessOkCache = null;
+        }
 
         // Owner self-bootstrap (rules allow only the hardcoded owner email to do this).
-        // The seed is bookkeeping only — fire-and-forget so a stalled RTDB write can
-        // never block the owner from entering their own workspace.
+        // The owner is already authorized directly by Firebase rules, so never block
+        // startup on a redundant /access read. Delay bookkeeping until the primary
+        // workspace read has had a chance to establish the Firebase connection.
         if (isOwnerEmail(email)) {
-          seedOwnerAccess(uid, email).catch((e) => console.warn('⚠️ Owner seed failed (non-fatal):', e.message));
+          accessOkCache = true;
+          setTimeout(() => {
+            seedOwnerAccess(uid, email).catch((e) => console.warn('⚠️ Owner seed failed (non-fatal):', e.message));
+          }, 5000);
           return { uid, email, role: 'owner' };
         }
 
         // Blocked users are denied — and we don't register their sign-in (no spam in pending).
         try {
-          const blockedSnap = await withTimeout(get(ref(database, `blocked/${uid}`)), 3000, 'blocked');
+          const blockedSnap = await readWithRetry(`blocked/${uid}`, 'blocked-access', 1, 3000);
           if (blockedSnap.exists()) {
+            accessOkCache = false;
             console.warn('⛔ Sign-in denied — user is blocked');
             return { uid, email, role: 'blocked', blocked: true };
           }
@@ -533,9 +582,13 @@ export async function initializeFirebaseSync(config) {
         registerSignin(user).catch(() => {});
 
         try {
-          const snap = await withTimeout(get(ref(database, `access/${uid}`)), 3000, 'access');
-          if (!snap.exists()) return null;
+          const snap = await readWithRetry(`access/${uid}`, 'member-access', 1, 3000);
+          if (!snap.exists()) {
+            accessOkCache = false;
+            return null;
+          }
           const access = snap.val() || {};
+          accessOkCache = true;
           return {
             uid,
             ...access,
@@ -544,6 +597,7 @@ export async function initializeFirebaseSync(config) {
           };
         } catch (err) {
           console.warn('⚠️ Access read failed:', err.message);
+          accessOkCache = null;
           return null; // treat as "not approved yet" rather than hang
         }
       },
@@ -1032,19 +1086,22 @@ export async function initializeFirebaseSync(config) {
         if (!currentUser?.uid) {
           throw new Error('Firebase authentication is not ready');
         }
-        // Lightweight gate (the DB rules are the real enforcement).
-        const withReadTimeout = (promise, label) => Promise.race([
-          promise,
-          new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), 10000)),
-        ]);
         try {
-          const accessSnap = await withReadTimeout(get(ref(database, `access/${currentUser.uid}`)), 'Firebase access check');
-          if (!accessSnap.exists() && !isOwnerEmail(currentUser.email)) {
+          if (accessOkCacheUid !== currentUser.uid) {
+            accessOkCacheUid = currentUser.uid;
+            accessOkCache = null;
+          }
+          if (isOwnerEmail(currentUser.email)) {
+            accessOkCache = true;
+          } else if (accessOkCache === null) {
+            const accessSnap = await readWithRetry(`access/${currentUser.uid}`, 'Firebase access check', 1, 4000);
+            accessOkCache = accessSnap.exists();
+          }
+          if (!accessOkCache) {
             throw new Error('This account is not approved for Firebase access');
           }
 
-          const dbRef = ref(database, `workspaces/${workspaceId}`);
-          const snapshot = await withReadTimeout(get(dbRef), 'Firebase workspace read');
+          const snapshot = await readWithRetry(`workspaces/${workspaceId}`, 'Firebase workspace read', 1, 6000);
           if (snapshot.exists()) {
             const record = snapshot.val();
             console.log(`✅ Loaded workspace from Firebase: ${workspaceId}`);
