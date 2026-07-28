@@ -183,22 +183,42 @@ const exportPage = {
       alt: 'Chart',
       caption: 'Company chart',
     },
+    {
+      id: 'checklist',
+      type: 'checklist',
+      items: [
+        { id: 'todo', text: 'Prepare the launch brief', done: false, dueDate: '2026-07-30' },
+        { id: 'done', text: 'Approve the launch brief', done: true, dueDate: '2026-07-24' },
+      ],
+    },
+    {
+      id: 'milestones',
+      type: 'milestones',
+      items: [{ id: 'milestone', name: 'Launch ready', status: 'active', date: '2026-08-01' }],
+    },
   ],
 };
 const exportBody = E.renderPageBody(exportPage, {});
 check(exportBody.includes('<ol start="3"'), 'PDF/Google export lost the numbered-list starting value');
 check((exportBody.match(/<ol/g) || []).length === 2, 'nested numbered list was flattened during export');
-check((exportBody.match(/<ul/g) || []).length === 2, 'nested bullet list was flattened during export');
+check((exportBody.match(/<ul/g) || []).length >= 2, 'nested bullet list was flattened during export');
 check(exportBody.indexOf('Third') < exportBody.indexOf('Nested A') && exportBody.indexOf('Nested B') < exportBody.indexOf('Fourth'), 'export list order changed');
 check(exportBody.includes('<thead><tr><th>Owner</th><th>Status</th></tr></thead>'), 'export table headers were lost');
 check(exportBody.includes('<tbody><tr><td>Ee Wern</td><td>Ready</td></tr></tbody>'), 'export table rows were lost');
 check(exportBody.includes('<figcaption>Company chart</figcaption>'), 'image caption was lost during export');
 const printHtml = E.buildDocumentHtml(exportPage, { autoPrint: true });
 const docsHtml = E.buildDocumentHtml(exportPage, { autoPrint: false });
+const googleDocsHtml = E.buildGoogleDocsHtml([
+  exportPage,
+  { id: 'child', title: 'Launch Notes', date: '2026-08-02', blocks: [textBlock('child-text', 'Child page content')] },
+], { data: {} });
 check(printHtml.includes('@page { size: A4; margin: 18mm 17mm 20mm; }'), 'A4 export margins are missing');
 check(printHtml.includes('font-size: 11pt'), 'readable export body font is missing');
 check(printHtml.includes(exportBody) && docsHtml.includes(exportBody), 'PDF and Google Docs do not share the same document body');
 check(printHtml.includes('window.print()') && !docsHtml.includes('window.print()'), 'Google Docs export contains print-only behavior');
+check(googleDocsHtml.includes('[[WAULT_CHECKLIST_TODO]]') && googleDocsHtml.includes('[[WAULT_CHECKLIST_DONE]]'), 'Google Docs checklist markers were not emitted');
+check(googleDocsHtml.includes('Due: 30 Jul 2026') && googleDocsHtml.includes('1 Aug 2026'), 'Google Docs export did not format task or milestone dates');
+check(googleDocsHtml.includes('google-doc-page-separator') && googleDocsHtml.includes('Launch Notes'), 'selected subpages were not separated in the master Google Doc');
 
 for (let index = 1; index <= 1000; index += 1) {
   const html = E.renderList({

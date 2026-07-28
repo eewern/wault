@@ -4115,6 +4115,13 @@ function App() {
           onWordBoundary={forceHistoryCommit}
           authUser={authUser}
           activeWorkspaceId={activeLocalWorkspaceId}
+          cloudReadOnly={!!(
+            authUser?.uid
+            && (
+              cloudPreviewWorkspaceRef.current === activeLocalWorkspaceId
+              || loadedWorkspaceIdRef.current !== activeLocalWorkspaceId
+            )
+          )}
         />
       )}
       {currentPage?.id !== HOME_PAGE_ID && (
@@ -4794,13 +4801,29 @@ function getBuiltinTemplates() {
 }
 
 // ====== PAGE EDITOR ======
-function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, addBlock, addBlockAfter, addBlockBefore, replaceBlock, moveBlock, insertBlocksAtAnchor, data, setCurrentPage, updateEvents, addPage, presenceLocks = {}, onWordBoundary, authUser, activeWorkspaceId }) {
+function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, addBlock, addBlockAfter, addBlockBefore, replaceBlock, moveBlock, insertBlocksAtAnchor, data, setCurrentPage, updateEvents, addPage, presenceLocks = {}, onWordBoundary, authUser, activeWorkspaceId, cloudReadOnly = false }) {
   // Make forceHistoryCommit available globally so EditableText can call it on word boundaries
   useEffect(() => { window.__onWordBoundary = onWordBoundary; }, [onWordBoundary]);
 
   const [exportState, setExportState] = useState({ status: "idle", message: "", link: "" });
+  const directSubpages = useMemo(() => {
+    if (!page?.id || !data?.pages) return [];
+    const children = Object.values(data.pages).filter((candidate) => (
+      candidate && !candidate.system && candidate.parentId === page.id
+    ));
+    const order = Array.isArray(data.childOrder?.[page.id]) ? data.childOrder[page.id] : [];
+    const rank = new Map(order.map((id, index) => [id, index]));
+    return children.sort((left, right) => (
+      (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER)
+      || String(left.title || "").localeCompare(String(right.title || ""))
+    ));
+  }, [data?.childOrder, data?.pages, page?.id]);
+  const [includeSubpages, setIncludeSubpages] = useState(false);
+  const [selectedSubpageIds, setSelectedSubpageIds] = useState(new Set());
   useEffect(() => {
     setExportState({ status: "idle", message: "", link: "" });
+    setIncludeSubpages(false);
+    setSelectedSubpageIds(new Set());
   }, [page?.id]);
   const pageExportIcon = page?.icon && !(window.isPremiumIconKey && window.isPremiumIconKey(page.icon))
     ? page.icon
@@ -4809,6 +4832,13 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     if (!window.WaultExport?.buildDocumentHtml) throw new Error("The document exporter is unavailable.");
     return window.WaultExport.buildDocumentHtml(page, {
       autoPrint,
+      data,
+      icon: pageExportIcon,
+    });
+  };
+  const buildGoogleDocsHtml = (pages) => {
+    if (!window.WaultExport?.buildGoogleDocsHtml) throw new Error("The Google Docs exporter is unavailable.");
+    return window.WaultExport.buildGoogleDocsHtml(pages, {
       data,
       icon: pageExportIcon,
     });
@@ -4839,12 +4869,16 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     }
     setExportState({ status: "exporting", message: "Creating Google Doc...", link: "" });
     try {
-      const html = buildExportHtml(false);
+      const selectedSubpages = includeSubpages
+        ? directSubpages.filter((child) => selectedSubpageIds.has(child.id))
+        : [];
+      const html = buildGoogleDocsHtml([page, ...selectedSubpages]);
       const name = window.WaultExport?.safeFilename?.(page.title) || "Untitled";
       const result = await sync.createGoogleDocFromHtml({ name, html });
       setExportState({ status: "done", message: "Google Doc created", link: result.webViewLink });
       sync.writeAuditLog?.("export_google_doc", activeWorkspaceId, {
         pageId: page.id,
+        includedSubpageIds: selectedSubpages.map((child) => child.id),
         documentId: result.id,
         documentName: result.name || name,
       });
@@ -4852,8 +4886,8 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       const raw = String(error?.message || "Google Docs export failed.");
       let message = raw;
       if (/popup-closed|cancelled|canceled/i.test(raw)) message = "Google permission was cancelled.";
-      if (/drive api|accessnotconfigured|has not been used|disabled/i.test(raw)) {
-        message = "Google Drive API is not enabled for WAULT yet.";
+      if (/drive api|docs api|accessnotconfigured|has not been used|disabled/i.test(raw)) {
+        message = "Enable both Google Drive API and Google Docs API for WAULT, then try again.";
       }
       setExportState({ status: "failed", message, link: "" });
     }
@@ -6273,7 +6307,12 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
 
   return (
     <main className="page-main">
-      <div className="page-container" key={page.id}>
+      <div className={`page-container${cloudReadOnly ? " cloud-preview-locked" : ""}`} key={page.id}>
+        {cloudReadOnly && (
+          <div className="cloud-preview-notice" role="status">
+            Waiting for Firebase confirmation. This cached view is protected from edits until the live workspace is loaded.
+          </div>
+        )}
         <div className="page-header">
           <PageIconPicker
             icon={page.icon}
@@ -6343,13 +6382,63 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
             >
               {exportState.status === "exporting" ? "Creating..." : "Google Docs"}
             </button>
+            {directSubpages.length > 0 && (
+              <label className="page-export-subpages-toggle" title="Combine selected direct subpages into the same Google Doc">
+                <input
+                  type="checkbox"
+                  checked={includeSubpages}
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setIncludeSubpages(enabled);
+                    if (enabled) setSelectedSubpageIds(new Set(directSubpages.map((child) => child.id)));
+                  }}
+                />
+                Include subpages
+              </label>
+            )}
             {exportState.message && (
               exportState.link
                 ? <a className="page-export-status is-success" href={exportState.link} target="_blank" rel="noopener noreferrer">Open Google Doc</a>
                 : <span className={`page-export-status ${exportState.status === "failed" ? "is-failed" : ""}`}>{exportState.message}</span>
             )}
           </div>
-        </div>
+          </div>
+          {includeSubpages && directSubpages.length > 0 && (
+            <div className="page-export-subpages" role="group" aria-label="Subpages to include in Google Docs export">
+              <span className="page-export-subpages-label">Subpages in this document</span>
+              <button
+                type="button"
+                className="page-export-subpages-action"
+                onClick={() => setSelectedSubpageIds(new Set(directSubpages.map((child) => child.id)))}
+              >
+                Select all
+              </button>
+              <button
+                type="button"
+                className="page-export-subpages-action"
+                onClick={() => setSelectedSubpageIds(new Set())}
+              >
+                Clear
+              </button>
+              <div className="page-export-subpages-list">
+                {directSubpages.map((child) => (
+                  <label key={child.id} className="page-export-subpage-option">
+                    <input
+                      type="checkbox"
+                      checked={selectedSubpageIds.has(child.id)}
+                      onChange={(event) => setSelectedSubpageIds((current) => {
+                        const next = new Set(current);
+                        if (event.target.checked) next.add(child.id);
+                        else next.delete(child.id);
+                        return next;
+                      })}
+                    />
+                    <span>{window.stripHtml ? window.stripHtml(child.title || "Untitled") : child.title || "Untitled"}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
 
         <div
           ref={pageBodyRef}

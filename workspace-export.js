@@ -116,12 +116,38 @@
     return `<table class="document-table">${head}${body}</table>`;
   }
 
-  function renderChecklist(block) {
+  function formatExportDate(value) {
+    const raw = String(value || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    const date = new Date(`${raw}T12:00:00`);
+    if (Number.isNaN(date.getTime())) return raw;
+    return new Intl.DateTimeFormat("en-GB", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    }).format(date);
+  }
+
+  function milestoneDateLabel(item) {
+    const start = item?.startDate || item?.date || item?.dueDate || "";
+    const end = item?.endDate || "";
+    if (start && end && start !== end) return `${formatExportDate(start)} - ${formatExportDate(end)}`;
+    return formatExportDate(start || end);
+  }
+
+  function renderChecklist(block, options) {
     const items = (Array.isArray(block?.items) ? block.items : []).filter(Boolean);
     if (!items.length) return "";
+    if (options?.googleDocsNativeLists) {
+      return items.map((item) => {
+        const marker = item.done ? "[[WAULT_CHECKLIST_DONE]]" : "[[WAULT_CHECKLIST_TODO]]";
+        const due = item.dueDate ? `<span class="checklist-date">Due: ${escapeHtml(formatExportDate(item.dueDate))}</span>` : "";
+        return `<p class="wault-google-checklist">${marker}${richText(item.text) || "&nbsp;"}${due}</p>`;
+      }).join("");
+    }
     return `<ul class="document-checklist">${items.map((item) => {
       const box = item.done ? "&#9745;" : "&#9744;";
-      const due = item.dueDate ? `<span class="checklist-date">${escapeHtml(item.dueDate)}</span>` : "";
+      const due = item.dueDate ? `<span class="checklist-date">${escapeHtml(formatExportDate(item.dueDate))}</span>` : "";
       return `<li class="${item.done ? "is-done" : ""}"><span class="checklist-box">${box}</span><span>${richText(item.text) || "&nbsp;"}</span>${due}</li>`;
     }).join("")}</ul>`;
   }
@@ -141,7 +167,8 @@
     if (!items.length) return "";
     return `<table class="milestone-table"><tbody>${items.map((item) => {
       const status = String(item.status || "pending").replace(/-/g, " ");
-      return `<tr><td class="milestone-status">${escapeHtml(status)}</td><td>${richText(item.name) || "&nbsp;"}</td></tr>`;
+      const date = milestoneDateLabel(item);
+      return `<tr><td class="milestone-status">${escapeHtml(status)}</td><td>${richText(item.name) || "&nbsp;"}${date ? `<div class="milestone-date">${escapeHtml(date)}</div>` : ""}</td></tr>`;
     }).join("")}</tbody></table>`;
   }
 
@@ -152,7 +179,7 @@
     return `<div class="progress-block"><div class="progress-heading"><strong>${escapeHtml(stripHtml(block?.label || "Progress"))}</strong><span>${percent}%</span></div><div class="progress-track"><span style="width:${percent}%"></span></div></div>`;
   }
 
-  function renderBlock(block, data) {
+  function renderBlock(block, data, options) {
     if (!block || !block.type) return "";
     switch (block.type) {
       case "heading": {
@@ -168,7 +195,7 @@
       case "numbers":
         return renderList(block, "ol");
       case "checklist":
-        return renderChecklist(block);
+        return renderChecklist(block, options);
       case "callout":
         return `<blockquote class="document-callout"><span class="callout-icon">${escapeHtml(block.icon || "")}</span><span>${richText(block.text) || "&nbsp;"}</span></blockquote>`;
       case "divider":
@@ -201,9 +228,9 @@
     }
   }
 
-  function renderPageBody(page, data) {
+  function renderPageBody(page, data, options) {
     return (Array.isArray(page?.blocks) ? page.blocks : [])
-      .map((block) => renderBlock(block, data))
+      .map((block) => renderBlock(block, data, options))
       .filter(Boolean)
       .join("\n");
   }
@@ -254,6 +281,8 @@
     .kpi-value { color: #111827; font-size: 16pt; font-weight: 700; }
     .kpi-target, .kpi-change { color: #5f6875; font-size: 8.5pt; }
     .milestone-status { width: 28mm; color: #536173; text-transform: capitalize; }
+    .milestone-date { margin-top: 2pt; color: #68707c; font-size: 8.5pt; font-weight: 600; }
+    .wault-google-checklist { margin: 2.5pt 0; }
     .progress-block { margin: 10pt 0 13pt; break-inside: avoid; page-break-inside: avoid; }
     .progress-heading { display: flex; justify-content: space-between; margin-bottom: 5pt; }
     .progress-track { height: 5pt; overflow: hidden; background: #e6eaf0; }
@@ -290,9 +319,39 @@
 <article class="document-sheet">
 <h1 class="document-title">${icon ? `${escapeHtml(icon)} ` : ""}${escapeHtml(title)}</h1>
 ${page?.date ? `<p class="document-date">${escapeHtml(page.date)}</p>` : ""}
-${renderPageBody(page, settings.data)}
+${renderPageBody(page, settings.data, settings)}
 </article>
 ${printScript}
+</body>
+</html>`;
+  }
+
+  function buildGoogleDocsHtml(pages, options) {
+    const settings = options || {};
+    const sourcePages = (Array.isArray(pages) ? pages : []).filter(Boolean);
+    const primary = sourcePages[0] || { title: "Untitled", blocks: [] };
+    const title = stripHtml(primary.title || "Untitled").trim() || "Untitled";
+    const icon = settings.icon || "";
+    const pageSections = sourcePages.map((page, index) => {
+      const pageTitle = stripHtml(page?.title || "Untitled").trim() || "Untitled";
+      const divider = index > 0 ? '<hr class="document-divider google-doc-page-separator">' : "";
+      const heading = index > 0 ? `<h2 class="content-heading google-doc-subpage-title">${escapeHtml(pageTitle)}</h2>` : "";
+      const date = page?.date ? `<p class="document-date">${escapeHtml(formatExportDate(page.date))}</p>` : "";
+      return `${divider}${heading}${index === 0 ? date : date}${renderPageBody(page, settings.data, { ...settings, googleDocsNativeLists: true })}`;
+    }).join("\n");
+    return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>${DOCUMENT_CSS}</style>
+</head>
+<body>
+<article class="document-sheet">
+<h1 class="document-title">${icon ? `${escapeHtml(icon)} ` : ""}${escapeHtml(title)}</h1>
+${pageSections}
+</article>
 </body>
 </html>`;
   }
@@ -306,6 +365,7 @@ ${printScript}
 
   root.WaultExport = Object.freeze({
     buildDocumentHtml,
+    buildGoogleDocsHtml,
     renderPageBody,
     renderList,
     safeFilename,

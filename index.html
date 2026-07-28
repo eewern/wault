@@ -1028,6 +1028,23 @@
     padding: 60px 52px 240px;
     animation: pageFadeIn .20s ease-out;
   }
+  .cloud-preview-locked > :not(.cloud-preview-notice) {
+    pointer-events: none;
+    user-select: none;
+    opacity: 0.56;
+  }
+  .cloud-preview-notice {
+    position: sticky;
+    top: 10px;
+    z-index: 20;
+    margin: -42px 0 20px;
+    padding: 9px 11px;
+    border-left: 3px solid var(--accent);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.45;
+  }
   @keyframes pageFadeIn {
     from { opacity: 0; transform: translateY(4px); }
     to   { opacity: 1; transform: translateY(0); }
@@ -1112,6 +1129,62 @@
   .page-export-status.is-success { color: var(--accent); text-decoration: none; }
   .page-export-status.is-success:hover { text-decoration: underline; }
   .page-export-status.is-failed { color: var(--kpi-red); }
+  .page-export-subpages-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .page-export-subpages-toggle input,
+  .page-export-subpage-option input { accent-color: var(--accent); }
+  .page-export-subpages {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin: 8px 0 12px;
+    padding: 8px 10px;
+    border-left: 2px solid var(--line);
+  }
+  .page-export-subpages-label { color: var(--text); font-size: 12px; font-weight: 600; }
+  .page-export-subpages-action {
+    border: 0;
+    padding: 2px 4px;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .page-export-subpages-action:hover { text-decoration: underline; }
+  .page-export-subpages-list {
+    display: flex;
+    flex-basis: 100%;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+  }
+  .page-export-subpage-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    color: var(--text-muted);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .milestone-date-input {
+    min-width: 118px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--panel);
+    color: var(--text-muted);
+    padding: 4px 6px;
+    font-size: 11px;
+    outline: none;
+  }
+  .milestone-date-input:focus { border-color: rgba(236,107,160,0.72); }
   .page-tpl-save-btn { border-color: rgba(236,107,160,0.4); color: rgba(236,107,160,0.8); }
   .page-tpl-save-btn:hover { border-color: rgba(236,107,160,0.7); color: #ec6ba0; background: rgba(236,107,160,0.08); }
 
@@ -3486,6 +3559,8 @@
     .page-header .editable[style*="font-size:40"] { font-size: 26px !important; margin: 4px 0 16px !important; }
     .page-header-actions { flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .page-pdf-btn, .page-docs-btn, .page-tpl-btn { font-size: 12px; padding: 5px 10px; }
+    .page-export-subpages { align-items: flex-start; }
+    .milestone-date-input { min-width: 0; width: 112px; }
 
     /* ── Tables: horizontal scroll ── */
     .tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -4011,11 +4086,11 @@
 <script src="workspace-persistence.js?v=20260522-workspace-tools1"></script>
 <script src="workspace-api-client.js?v=20260628-sync1"></script>
 <script src="reliability-core.js?v=20260723-list-edit1"></script>
-<script src="workspace-export.js?v=20260724-export1"></script>
+<script src="workspace-export.js?v=20260724-google-docs2"></script>
 <script type="module">
   // Native ESM Firebase init — runs after workspace-config.js (classic) has set SUPABASE_CONFIG.
   // Exposes window.__firebaseInitPromise which workspace-app.jsx awaits (avoids Babel transforming import()).
-  import init from './firebase-sync.mjs?v=20260724-export1';
+  import init from './firebase-sync.mjs?v=20260724-google-docs2';
   let _fbInitDone = false;
   const _fbInit = init(window.SUPABASE_CONFIG || {}).catch((e) => {
     console.warn('Firebase init failed:', e && e.message);
@@ -4032,7 +4107,7 @@
 </script>
 <script type="text/babel" src="workspace-blocks.jsx?v=20260724-image-drop1"></script>
 <script type="text/babel" src="focus-home.jsx?v=20260715-reliability3"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260724-export1"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260724-google-docs2"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

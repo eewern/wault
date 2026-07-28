@@ -3206,13 +3206,13 @@ function MilestonesBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upd
   const [focusItemId, setFocusItemId] = useState(null);
   const upd = (id, patch) => updateBlock({ ...block, items: block.items.map(i => i.id === id ? { ...i, ...patch } : i) });
   const add = () => {
-    const item = { id: nid(), name:"", status:"pending" };
+    const item = { id: nid(), name:"", status:"pending", date:"" };
     updateBlock({ ...block, items: [...block.items, item] });
     setFocusItemId(item.id);
   };
   const addBefore = (id) => {
     const idx = block.items.findIndex(i => i.id === id);
-    const newItem = { id: nid(), name:"", status:"pending" };
+    const newItem = { id: nid(), name:"", status:"pending", date:"" };
     const next = [...block.items];
     next.splice(Math.max(0, idx), 0, newItem);
     updateBlock({ ...block, items: next });
@@ -3252,7 +3252,7 @@ function MilestonesBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upd
     upd(id, { status: STATUS_ORDER[idx] });
   };
   const addTo = (status) => {
-    const item = { id: nid(), name: "", status };
+    const item = { id: nid(), name: "", status, date: "" };
     updateBlock({ ...block, items: [...block.items, item] });
     setFocusItemId(item.id);
   };
@@ -3307,6 +3307,13 @@ function MilestonesBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upd
                         style={{ fontSize:13, fontWeight:500, color:"var(--text)", lineHeight:1.45 }}
                       />
                       <div className="kanban-card-tools">
+                        <input
+                          className="milestone-date-input"
+                          type="date"
+                          value={item.date || item.dueDate || ""}
+                          onChange={(e) => upd(item.id, { date: e.target.value, dueDate: "" })}
+                          title="Milestone date"
+                        />
                         <button type="button" title="Move left"  disabled={status === "pending"} onMouseDown={(e)=>e.preventDefault()} onClick={() => moveStatus(item.id, -1)}>‹</button>
                         <button type="button" title="Move right" disabled={status === "done"}    onMouseDown={(e)=>e.preventDefault()} onClick={() => moveStatus(item.id, 1)}>›</button>
                         <button type="button" title="Delete" className="row-del" onMouseDown={(e)=>e.preventDefault()} onClick={() => rem(item.id)}>×</button>
@@ -3338,6 +3345,14 @@ function MilestonesBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upd
                   onEnter={(_, caretPos) => onMilestoneEnter(item, index, caretPos)}
                   onBackspaceEmpty={() => block.items.length > 1 ? rem(item.id) : onExitBlock?.({ ...block, items: [] })}
                   style={{ flex:1, fontSize:14, fontWeight:500, color:"var(--text)" }}
+                />
+                <input
+                  className="milestone-date-input"
+                  type="date"
+                  value={item.date || item.dueDate || ""}
+                  onChange={(e) => upd(item.id, { date: e.target.value, dueDate: "" })}
+                  title="Milestone date"
+                  aria-label="Milestone date"
                 />
                 <button onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }} onClick={(e) => { e.stopPropagation(); rem(item.id); }} className="row-del" type="button">×</button>
               </div>

@@ -295,6 +295,108 @@ export async function initializeFirebaseSync(config) {
           const detail = payload?.error?.message || `Google Drive returned ${response.status}.`;
           throw new Error(detail);
         }
+
+        // HTML import keeps WAULT's rich text, tables and images intact. The
+        // Docs API then promotes only deliberately marked task paragraphs into
+        // native Google Docs checkbox lists, so they remain interactive in Docs.
+        const markerPattern = /^\[\[WAULT_CHECKLIST_(DONE|TODO)\]\]/;
+        const readGoogleDoc = async () => {
+          const docResponse = await fetch(
+            `https://docs.googleapis.com/v1/documents/${encodeURIComponent(payload.id)}`,
+            { headers: { Authorization: `Bearer ${accessToken}` } },
+          );
+          const docPayload = await docResponse.json().catch(() => ({}));
+          if (!docResponse.ok) {
+            throw new Error(docPayload?.error?.message || `Google Docs returned ${docResponse.status}.`);
+          }
+          return docPayload;
+        };
+        const findChecklistParagraphs = (content = []) => {
+          const matches = [];
+          const inspectContent = (entries) => {
+            (entries || []).forEach((entry) => {
+              const paragraph = entry?.paragraph;
+              if (paragraph) {
+                const text = (paragraph.elements || []).map((element) => element?.textRun?.content || '').join('');
+                const marker = text.match(markerPattern);
+                if (marker && Number.isFinite(entry.startIndex) && Number.isFinite(entry.endIndex)) {
+                  matches.push({
+                    startIndex: entry.startIndex,
+                    endIndex: entry.endIndex - 1,
+                    markerLength: marker[0].length,
+                    done: marker[1] === 'DONE',
+                  });
+                }
+              }
+              const table = entry?.table;
+              if (table?.tableRows) {
+                table.tableRows.forEach((row) => (row.tableCells || []).forEach((cell) => inspectContent(cell.content)));
+              }
+            });
+          };
+          inspectContent(content);
+          return matches;
+        };
+        try {
+          const document = await readGoogleDoc();
+          const checklistParagraphs = findChecklistParagraphs(document?.body?.content);
+          if (checklistParagraphs.length) {
+            const requests = checklistParagraphs
+              .sort((a, b) => b.startIndex - a.startIndex)
+              .flatMap((item) => {
+                const listRange = {
+                  startIndex: item.startIndex,
+                  endIndex: Math.max(item.startIndex + 1, item.endIndex - item.markerLength),
+                };
+                const requestsForItem = [
+                  {
+                    deleteContentRange: {
+                      range: { startIndex: item.startIndex, endIndex: item.startIndex + item.markerLength },
+                    },
+                  },
+                  {
+                    createParagraphBullets: {
+                      range: listRange,
+                      bulletPreset: 'BULLET_CHECKBOX',
+                    },
+                  },
+                ];
+                if (item.done) {
+                  requestsForItem.push({
+                    updateTextStyle: {
+                      range: listRange,
+                      textStyle: { strikethrough: true, foregroundColor: { color: { rgbColor: { red: 0.42, green: 0.45, blue: 0.49 } } } },
+                      fields: 'strikethrough,foregroundColor',
+                    },
+                  });
+                }
+                return requestsForItem;
+              });
+            const checklistResponse = await fetch(
+              `https://docs.googleapis.com/v1/documents/${encodeURIComponent(payload.id)}:batchUpdate`,
+              {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                  'Content-Type': 'application/json; charset=UTF-8',
+                },
+                body: JSON.stringify({ requests }),
+              },
+            );
+            const checklistPayload = await checklistResponse.json().catch(() => ({}));
+            if (!checklistResponse.ok) {
+              throw new Error(checklistPayload?.error?.message || `Google Docs returned ${checklistResponse.status}.`);
+            }
+          }
+        } catch (error) {
+          // Do not leave a half-converted document containing WAULT's internal
+          // markers in the user's Drive if native list conversion is unavailable.
+          await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(payload.id)}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${accessToken}` },
+          }).catch(() => null);
+          throw error;
+        }
         return {
           ...payload,
           webViewLink: payload.webViewLink || `https://docs.google.com/document/d/${payload.id}/edit`,
