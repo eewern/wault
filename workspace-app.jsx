@@ -2006,6 +2006,8 @@ function App() {
   const lastRemoteRevisionRef = useRef(0);
   const cloudPreviewWorkspaceRef = useRef(null);
   const cloudPreviewDataRef = useRef(null);
+  const cloudLoadRetryTimerRef = useRef(null);
+  const cloudLoadRetryAttemptRef = useRef(0);
   // Multiple saves can overlap during rapid typing. Track a count so an older
   // request finishing cannot incorrectly mark a newer in-flight request as idle.
   const pendingLocalSaveRef = useRef(false);
@@ -2361,6 +2363,11 @@ function App() {
           if (skipPersistenceWorkspaceRef.current === workspaceId) skipPersistenceWorkspaceRef.current = null;
           cloudPreviewWorkspaceRef.current = null;
           cloudPreviewDataRef.current = null;
+          cloudLoadRetryAttemptRef.current = 0;
+          if (cloudLoadRetryTimerRef.current) {
+            clearTimeout(cloudLoadRetryTimerRef.current);
+            cloudLoadRetryTimerRef.current = null;
+          }
           loadedWorkspaceIdRef.current = workspaceId;
           lastRemoteUpdatedAtRef.current = remoteUpdatedAt;
           lastRemoteRevisionRef.current = Number(firebaseRecord.revision || 0);
@@ -2441,12 +2448,22 @@ function App() {
         if (haveCache) {
           cloudPreviewWorkspaceRef.current = workspaceId;
           loadedWorkspaceIdRef.current = null;
+          const attempt = Math.min(cloudLoadRetryAttemptRef.current + 1, 6);
+          cloudLoadRetryAttemptRef.current = attempt;
+          const delay = Math.min(1000 * Math.pow(2, attempt), 15000);
+          if (cloudLoadRetryTimerRef.current) clearTimeout(cloudLoadRetryTimerRef.current);
+          cloudLoadRetryTimerRef.current = setTimeout(() => {
+            cloudLoadRetryTimerRef.current = null;
+            if (!cancelled && activeWorkspaceIdRef.current === workspaceId) {
+              loadFirebaseWorkspaceAndListen(firebaseSync, workspaceId);
+            }
+          }, delay);
         }
         setSyncState((s) => ({
           ...s,
           error: haveCache ? "" : (err.message || "Workspace load failed"),
-          status: haveCache ? "Cached preview only" : "Workspace load failed",
-          firebaseStatus: haveCache ? "Cloud refresh failed — not saving cache" : "Workspace load failed",
+          status: haveCache ? "Reconnecting to Firebase" : "Workspace load failed",
+          firebaseStatus: haveCache ? "Reconnecting to Firebase — cached view protected" : "Workspace load failed",
         }));
         return false;
       } finally {
@@ -2591,6 +2608,10 @@ function App() {
 
     return () => {
       cancelled = true;
+      if (cloudLoadRetryTimerRef.current) {
+        clearTimeout(cloudLoadRetryTimerRef.current);
+        cloudLoadRetryTimerRef.current = null;
+      }
       if (firebaseListenerUnsubRef.current) {
         firebaseListenerUnsubRef.current();
         firebaseListenerUnsubRef.current = null;
@@ -6310,7 +6331,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
       <div className={`page-container${cloudReadOnly ? " cloud-preview-locked" : ""}`} key={page.id}>
         {cloudReadOnly && (
           <div className="cloud-preview-notice" role="status">
-            Waiting for Firebase confirmation. This cached view is protected from edits until the live workspace is loaded.
+            Reconnecting to Firebase. This cached view is protected from edits until the live workspace is confirmed. WAULT will retry automatically.
           </div>
         )}
         <div className="page-header">

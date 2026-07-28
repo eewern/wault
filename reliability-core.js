@@ -255,9 +255,9 @@
     ].some((marker) => lower.includes(marker));
     if (failed) return { label: "Failed", tone: "failed", detail: text };
 
-    const saving = ["saving", "restoring", "merging", "newer changes", "pending retry"]
+    const saving = ["saving", "restoring", "merging", "newer changes", "pending retry", "reconnecting", "waiting for firebase source"]
       .some((marker) => lower.includes(marker));
-    if (saving) return { label: "Saving", tone: "saving", detail: text };
+    if (saving) return { label: lower.includes("reconnecting") ? "Reconnecting" : "Saving", tone: "saving", detail: text };
 
     const confirmed = (
       (lower.includes("synced to cloud") && text.includes("✓"))

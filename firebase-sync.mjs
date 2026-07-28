@@ -950,33 +950,27 @@ export async function initializeFirebaseSync(config) {
       },
 
       async loadWorkspace(workspaceId) {
-        try {
-          // Security: verify user is authenticated before reading
-          const currentUser = auth.currentUser;
-          if (!currentUser?.uid) {
-            console.warn('⚠️ Load blocked — user not authenticated');
-            return null;
-          }
-          // Lightweight gate (the DB rules are the real enforcement).
-          const accessSnap = await get(ref(database, `access/${currentUser.uid}`));
-          if (!accessSnap.exists() && !isOwnerEmail(currentUser.email)) {
-            console.warn('⚠️ Load blocked — user not in access list');
-            return null;
-          }
-
-          const dbRef = ref(database, `workspaces/${workspaceId}`);
-          const snapshot = await get(dbRef);
-          if (snapshot.exists()) {
-            const record = snapshot.val();
-            console.log(`✅ Loaded workspace from Firebase: ${workspaceId}`);
-            return record; // { workspace: {...}, updated_at, source }
-          }
-          console.log(`ℹ️ No Firebase data for: ${workspaceId}`);
-          return null;
-        } catch (error) {
-          console.error(`❌ Failed to load workspace: ${error.message}`);
-          return null;
+        // A missing record is a valid null result. Authentication, permission, and
+        // network failures must reject so callers never mistake them for deletion.
+        const currentUser = auth.currentUser;
+        if (!currentUser?.uid) {
+          throw new Error('Firebase authentication is not ready');
         }
+        // Lightweight gate (the DB rules are the real enforcement).
+        const accessSnap = await get(ref(database, `access/${currentUser.uid}`));
+        if (!accessSnap.exists() && !isOwnerEmail(currentUser.email)) {
+          throw new Error('This account is not approved for Firebase access');
+        }
+
+        const dbRef = ref(database, `workspaces/${workspaceId}`);
+        const snapshot = await get(dbRef);
+        if (snapshot.exists()) {
+          const record = snapshot.val();
+          console.log(`✅ Loaded workspace from Firebase: ${workspaceId}`);
+          return record; // { workspace: {...}, updated_at, source }
+        }
+        console.log(`ℹ️ No Firebase data for: ${workspaceId}`);
+        return null;
       },
 
       async loadWorkspaceCatalogEntry(workspaceId) {
