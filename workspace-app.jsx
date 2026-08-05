@@ -3466,13 +3466,18 @@ function App() {
       return { ...d, pages: { ...d.pages, [pageId]: nextPage } };
     });
   };
-  const insertBlocksAtAnchor = (pageId, anchorId, side, newBlocks) => {
+  const insertBlocksAtAnchor = (pageId, anchorId, side, newBlocks, { replaceBlankAnchor = false } = {}) => {
     if (!pageId || !Array.isArray(newBlocks) || !newBlocks.length) return;
     setData((current) => {
       const page = current.pages?.[pageId];
       if (!page || page.system) return current;
       const blocks = [...(page.blocks || [])];
       const anchorIndex = anchorId ? blocks.findIndex((block) => block.id === anchorId) : -1;
+      if (replaceBlankAnchor && anchorIndex !== -1 && isBlankTextBlock(blocks[anchorIndex])) {
+        blocks.splice(anchorIndex, 1, ...newBlocks);
+        const nextPage = { ...page, blocks: ensureTrailingTextBlock(blocks) };
+        return { ...current, pages: { ...current.pages, [pageId]: nextPage } };
+      }
       const insertAt = anchorIndex === -1
         ? blocks.length
         : anchorIndex + (side === "after" ? 1 : 0);
@@ -4978,6 +4983,32 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     const fileItems = Array.from(transfer.items || []).filter((item) => item.kind === "file");
     return !fileItems.length || fileItems.some((item) => /^image\//i.test(item.type || ""));
   };
+  const imageFilesFromTransfer = (transfer) => {
+    if (!transfer) return [];
+    const files = Array.from(transfer.files || []).filter((file) => /^image\//i.test(file.type || ""));
+    if (files.length) return files;
+    return Array.from(transfer.items || [])
+      .filter((item) => item.kind === "file" && /^image\//i.test(item.type || ""))
+      .map((item) => item.getAsFile?.())
+      .filter((file) => file && /^image\//i.test(file.type || ""));
+  };
+  const makeImageBlocks = async (files, fallbackName = "Image") => {
+    if (typeof window.fileToDownscaledDataUrl !== "function") {
+      throw new Error("Image processing is unavailable.");
+    }
+    const imageBlocks = [];
+    for (const file of files) {
+      const src = await window.fileToDownscaledDataUrl(file);
+      imageBlocks.push({
+        id: window.nid(),
+        type: "image",
+        src,
+        alt: String(file.name || fallbackName).replace(/\.[^.]+$/, "").slice(0, 300),
+        caption: "",
+      });
+    }
+    return imageBlocks;
+  };
   const imageDropPoint = (event) => {
     const shell = event.target?.closest?.(".block-shell[data-block-id]");
     if (!shell) return { targetId: null, side: "after" };
@@ -5007,7 +5038,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     if (!transferHasImageFiles(event.dataTransfer) || page?.system) return;
     event.preventDefault();
     event.stopPropagation();
-    const files = Array.from(event.dataTransfer.files || []).filter((file) => /^image\//i.test(file.type || ""));
+    const files = imageFilesFromTransfer(event.dataTransfer);
     if (!files.length) {
       setImageDrop({ active: false, targetId: null, side: "after", busy: false });
       setImageDropMessage("Only image files can be dropped here.");
@@ -5017,18 +5048,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     setImageDrop({ active: true, ...point, busy: true });
     setImageDropMessage(`Preparing ${files.length === 1 ? "image" : `${files.length} images`}...`);
     try {
-      if (typeof window.fileToDownscaledDataUrl !== "function") throw new Error("Image processing is unavailable.");
-      const imageBlocks = [];
-      for (const file of files) {
-        const src = await window.fileToDownscaledDataUrl(file);
-        imageBlocks.push({
-          id: window.nid(),
-          type: "image",
-          src,
-          alt: String(file.name || "Image").replace(/\.[^.]+$/, "").slice(0, 300),
-          caption: "",
-        });
-      }
+      const imageBlocks = await makeImageBlocks(files);
       insertBlocksAtAnchor?.(page.id, point.targetId, point.side, imageBlocks);
       setImageDropMessage(`${imageBlocks.length} ${imageBlocks.length === 1 ? "image" : "images"} added`);
       setTimeout(() => setImageDropMessage(""), 2600);
@@ -5954,6 +5974,30 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
     // otherwise pasting a list into a cell dumps the blocks *below* the whole table.
     if (e.target?.closest?.('td, th')) return;
     if (!page || page.system || !window.parseMarkdownishBlocks) return;
+    const imageFiles = imageFilesFromTransfer(e.clipboardData);
+    if (imageFiles.length) {
+      e.preventDefault();
+      e.stopPropagation();
+      const targetId = e.target.closest?.("[data-block-id]")?.dataset?.blockId;
+      setImageDrop({ active: true, targetId: targetId || null, side: "after", busy: true });
+      setImageDropMessage(`Preparing ${imageFiles.length === 1 ? "pasted image" : `${imageFiles.length} pasted images`}...`);
+      makeImageBlocks(imageFiles, "Pasted image")
+        .then((imageBlocks) => {
+          insertBlocksAtAnchor?.(page.id, targetId, "after", imageBlocks, { replaceBlankAnchor: true });
+          focusBlock(imageBlocks[0].id);
+          window.getSelection()?.removeAllRanges();
+          setImageDropMessage(`${imageBlocks.length} ${imageBlocks.length === 1 ? "image" : "images"} added`);
+          setTimeout(() => setImageDropMessage(""), 2600);
+        })
+        .catch((error) => {
+          const message = /too large/i.test(String(error?.message || ""))
+            ? "That image is too large to save safely."
+            : "The pasted image could not be added.";
+          setImageDropMessage(message);
+        })
+        .finally(() => setImageDrop({ active: false, targetId: null, side: "after", busy: false }));
+      return;
+    }
     const text = e.clipboardData?.getData("text/plain") || "";
     const clipHtml = e.clipboardData?.getData("text/html") || "";
 

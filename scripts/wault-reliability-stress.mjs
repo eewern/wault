@@ -252,6 +252,13 @@ check(workspaceBlocksSource.includes('replaceListItemFromShortcut'), 'mixed-list
 check(workspaceBlocksSource.includes('window.fileToDownscaledDataUrl = fileToDownscaledDataUrl'), 'image file dropping cannot use the safe image processor');
 check(workspaceBlocksSource.includes('onPointerDown={startImageBlockDrag}'), 'images cannot be dragged directly between blocks');
 check(workspaceAppSource.includes('onDropCapture={handleImageFileDrop}'), 'page editor does not accept dropped image files');
+check(workspaceAppSource.includes('const imageFilesFromTransfer = (transfer)'), 'clipboard image files are not detected');
+check(workspaceAppSource.includes('const makeImageBlocks = async (files'), 'pasted images bypass the safe image processor');
+check(workspaceAppSource.includes('const imageFiles = imageFilesFromTransfer(e.clipboardData)'), 'page paste does not handle clipboard image files');
+check(workspaceAppSource.includes('replaceBlankAnchor = false'), 'image insertions cannot safely replace an empty anchor block');
+check(workspaceAppSource.includes('insertBlocksAtAnchor?.(page.id, targetId, "after", imageBlocks, { replaceBlankAnchor: true })'), 'pasted images are not inserted through the conflict-safe block updater');
+check(workspaceAppSource.includes("e.target?.closest?.('textarea, input, select, [data-native-paste=\"true\"]')"), 'clipboard image paste can hijack native form fields');
+check(workspaceAppSource.includes("if (e.target?.closest?.('td, th')) return;"), 'clipboard image paste can escape table cells');
 check(firebaseSyncSource.includes("driveProvider.addScope('https://www.googleapis.com/auth/drive.file')"), 'Google Docs export requests the wrong Drive permission');
 check(firebaseSyncSource.includes('reauthenticateWithPopup(currentUser, driveProvider)'), 'Google Docs export can switch the signed-in WAULT account');
 check(firebaseSyncSource.includes('uploadType=resumable'), 'large Google Docs exports do not use a resumable upload');
