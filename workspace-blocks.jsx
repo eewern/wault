@@ -3208,6 +3208,9 @@ function KpisBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlo
 
 // ====== MILESTONES ======
 function MilestonesBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, onDeleteBlock, onExitBlock, autoFocus }) {
+  // Older workspace data can contain a milestones block without its optional
+  // items array. Render it as an empty block without mutating cloud data.
+  block = Array.isArray(block?.items) ? block : { ...(block || {}), items: [] };
   const [focusItemId, setFocusItemId] = useState(null);
   const upd = (id, patch) => updateBlock({ ...block, items: block.items.map(i => i.id === id ? { ...i, ...patch } : i) });
   const add = () => {
