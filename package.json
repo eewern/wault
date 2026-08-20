@@ -18,7 +18,7 @@
     "test:ui-server": "node scripts/wault-ui-test-server.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
