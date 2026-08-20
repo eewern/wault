@@ -252,6 +252,10 @@ check(workspaceBlocksSource.includes('replaceListItemFromShortcut'), 'mixed-list
 check(workspaceBlocksSource.includes('window.fileToDownscaledDataUrl = fileToDownscaledDataUrl'), 'image file dropping cannot use the safe image processor');
 check(workspaceBlocksSource.includes('onPointerDown={startImageBlockDrag}'), 'images cannot be dragged directly between blocks');
 check(workspaceAppSource.includes('onDropCapture={handleImageFileDrop}'), 'page editor does not accept dropped image files');
+check(workspaceBlocksSource.includes('const dueDateMeta = (item) =>'), 'milestones do not calculate a due-date countdown');
+check(workspaceBlocksSource.includes('milestone-days-left'), 'milestone days-left status is not rendered');
+check(workspaceBlocksSource.includes('Things to do'), 'checklists do not present the requested Things to do label');
+check(workspaceBlocksSource.includes('milestone-column-headings'), 'milestones do not show the requested execution columns');
 check(workspaceAppSource.includes('const imageFilesFromTransfer = (transfer)'), 'clipboard image files are not detected');
 check(workspaceAppSource.includes('const makeImageBlocks = async (files'), 'pasted images bypass the safe image processor');
 check(workspaceAppSource.includes('const imageFiles = imageFilesFromTransfer(e.clipboardData)'), 'page paste does not handle clipboard image files');

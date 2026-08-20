@@ -2228,17 +2228,80 @@
     flex-direction: column;
     gap: 6px;
   }
+  .milestone-column-headings,
   .milestone-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 108px 142px 106px 24px;
     align-items: center;
     gap: 12px;
-    padding: 10px 14px;
+  }
+  .milestone-column-headings {
+    padding: 0 14px 2px;
+    color: var(--text-muted);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+  .milestone-row {
+    padding: 9px 14px;
     background: rgba(var(--ovr),0.03);
     border: 1px solid var(--line-soft);
     border-radius: 8px;
     transition: background .12s, border-color .12s;
   }
-  .milestone-row:hover { background: rgba(var(--ovr),0.05); border-color: var(--line); }
+  .milestone-row:hover { background: rgba(184,255,74,0.045); border-color: rgba(184,255,74,0.24); }
+  .milestone-status {
+    justify-self: start;
+    min-width: 96px;
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+    font: 600 11px/1.2 inherit;
+    padding: 5px 9px;
+    white-space: nowrap;
+  }
+  .milestone-date-control { min-width: 0; }
+  .milestone-date-control label { display: block; }
+  .milestone-date-control label > span {
+    display: none;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+  }
+  .milestone-date-input {
+    width: 100%;
+    min-width: 132px;
+    box-sizing: border-box;
+    background: rgba(184,255,74,0.10);
+    border: 1px solid rgba(184,255,74,0.30);
+    border-radius: 6px;
+    color: #d9ff9a;
+    font: 600 11.5px/1.2 inherit;
+    padding: 5px 7px;
+    color-scheme: dark;
+  }
+  .milestone-date-input:hover,
+  .milestone-date-input:focus { border-color: #b8ff4a; outline: none; background: rgba(184,255,74,0.16); }
+  .milestone-date-readable { display: none; }
+  .milestone-days-left {
+    display: inline-flex;
+    width: fit-content;
+    align-items: center;
+    min-height: 26px;
+    box-sizing: border-box;
+    padding: 4px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .milestone-days-left.is-upcoming { color: #d9ff9a; background: rgba(184,255,74,0.13); border: 1px solid rgba(184,255,74,0.28); }
+  .milestone-days-left.is-today { color: #ffe59a; background: rgba(255,202,76,0.13); border: 1px solid rgba(255,202,76,0.28); }
+  .milestone-days-left.is-overdue { color: #ff9b94; background: rgba(240,112,104,0.13); border: 1px solid rgba(240,112,104,0.26); }
+  .milestone-days-left.is-done { color: var(--kpi-green); background: rgba(61,214,140,0.11); border: 1px solid rgba(61,214,140,0.24); }
+  .milestone-days-left.is-none { color: var(--text-muted); background: rgba(var(--ovr),0.05); border: 1px solid var(--line-soft); }
   /* === PROGRESS BLOCK === */
   .progress-block {
     padding: 14px 16px;
@@ -3079,6 +3142,22 @@
     margin-bottom: 10px;
     padding: 0 2px;
   }
+  .checklist-section-title,
+  .checklist-section-heading > span:first-child {
+    color: #d9ff9a;
+    font-size: 11px;
+    font-weight: 750;
+    letter-spacing: 0;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .checklist-section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 0 8px;
+  }
+  .checklist-section-heading > span:last-child { color: var(--text-muted); font-size: 11px; }
   .ct-progress-bar {
     flex: 1;
     height: 4px;
@@ -3448,6 +3527,15 @@
     background: var(--panel); border: 1px solid var(--line);
     border-radius: 8px; padding: 7px 9px 4px; position: relative;
   }
+  .kanban-card-date {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .kanban-card-date .milestone-date-control { flex: 1; }
+  .kanban-card-date .milestone-date-input { min-width: 0; }
+  .kanban-card-date .milestone-days-left { min-height: 24px; }
   .kanban-card-tools {
     display: flex; gap: 2px; justify-content: flex-end;
     margin-top: 4px; padding-top: 3px; border-top: 1px solid var(--line-soft);
@@ -3583,7 +3671,16 @@
     .page-header-actions { flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .page-pdf-btn, .page-docs-btn, .page-tpl-btn { font-size: 12px; padding: 5px 10px; }
     .page-export-subpages { align-items: flex-start; }
-    .milestone-date-input { min-width: 0; width: 112px; }
+    .milestone-toolbar { align-items: stretch; flex-direction: column; gap: 8px; }
+    .milestone-column-headings { display: none; }
+    .milestone-row { grid-template-columns: minmax(0, 1fr) 24px; gap: 8px; padding: 10px; }
+    .milestone-row > .editable { grid-column: 1; }
+    .milestone-row > .milestone-status { grid-column: 1; grid-row: 2; }
+    .milestone-row > .milestone-date-control { grid-column: 1; grid-row: 3; }
+    .milestone-row > .milestone-days-left { grid-column: 1; grid-row: 4; }
+    .milestone-row > .row-del { grid-column: 2; grid-row: 1; }
+    .milestone-date-control label > span { display: block; margin-bottom: 4px; }
+    .milestone-date-input { min-width: 0; width: 100%; }
 
     /* ── Tables: horizontal scroll ── */
     .tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -4122,7 +4219,7 @@
   // has its own responsive auth gate; this promise remains the source of truth.
   window.__firebaseInitPromise = _fbInit;
 </script>
-<script type="text/babel" src="workspace-blocks.jsx?v=20260724-image-drop1"></script>
+<script type="text/babel" src="workspace-blocks.jsx?v=20260820-milestone-dates1"></script>
 <script type="text/babel" src="focus-home.jsx?v=20260715-reliability3"></script>
 <script type="text/babel" src="workspace-app.jsx?v=20260820-direct-auth1"></script>
 

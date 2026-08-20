@@ -2904,6 +2904,7 @@ function ChecklistBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upda
         <BlockHandle blockId={blockId} onDragBlockStart={onDragBlockStart} onDragBlockEnd={onDragBlockEnd} />
         <div className="checklist-table-wrap">
           <div className="checklist-table-toolbar">
+            <span className="checklist-section-title">Things to do</span>
             <div className="ct-progress-bar">
               <div className="ct-progress-fill" style={{ width:`${pct}%` }} />
             </div>
@@ -2914,7 +2915,7 @@ function ChecklistBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upda
             <thead>
               <tr>
                 <th className="ct-col-check"></th>
-                <th className="ct-col-task">Task</th>
+                <th className="ct-col-task">Things to do</th>
                 <th className="ct-col-date">Due Date</th>
                 <th className="ct-col-status">Status</th>
                 <th className="ct-col-del"></th>
@@ -2972,6 +2973,10 @@ function ChecklistBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upda
     <div className="block-wrap">
       <BlockHandle blockId={blockId} onDragBlockStart={onDragBlockStart} onDragBlockEnd={onDragBlockEnd} />
       <div className="list-block">
+        <div className="checklist-section-heading">
+          <span>Things to do</span>
+          <span>{total} {total === 1 ? "item" : "items"}</span>
+        </div>
         {total > 0 && (
           <div className="progress-row">
             <div className="progress-track">
@@ -3019,7 +3024,7 @@ function ChecklistBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upda
               <EditableText
                 value={item.text}
                 onChange={(v) => upd(item.id, { text: v })}
-                placeholder="To-do"
+                placeholder="Thing to do"
                 multiline
                 autoFocus={focusItemId === item.id || (autoFocus && index === 0)}
                 onEnter={(_, caretPos, split) => {
@@ -3260,6 +3265,41 @@ function MilestonesBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upd
   const doneMs  = block.items.filter(i => i.status === "done").length;
   const activeMs = block.items.filter(i => i.status === "active").length;
   const pctMs   = totalMs > 0 ? Math.round((doneMs / totalMs) * 100) : 0;
+  const dueDateMeta = (item) => {
+    const dateText = item.date || item.dueDate || "";
+    if (!dateText) return { dateText: "", dateLabel: "No due date", daysLabel: "No date", state: "none" };
+    const due = new Date(`${dateText}T00:00:00`);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const days = Math.round((due.getTime() - today.getTime()) / 86400000);
+    const dateLabel = Number.isNaN(due.getTime())
+      ? dateText
+      : due.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+    if (item.status === "done") return { dateText, dateLabel, daysLabel: "Complete", state: "done" };
+    if (days < 0) return { dateText, dateLabel, daysLabel: `${Math.abs(days)}d overdue`, state: "overdue" };
+    if (days === 0) return { dateText, dateLabel, daysLabel: "Due today", state: "today" };
+    if (days === 1) return { dateText, dateLabel, daysLabel: "1 day left", state: "upcoming" };
+    return { dateText, dateLabel, daysLabel: `${days} days left`, state: "upcoming" };
+  };
+  const milestoneDateControl = (item, compact = false) => {
+    const meta = dueDateMeta(item);
+    return (
+      <div className={`milestone-date-control${compact ? " is-compact" : ""}`}>
+        <label>
+          <span>Due date</span>
+          <input
+            className="milestone-date-input"
+            type="date"
+            value={meta.dateText}
+            onChange={(e) => upd(item.id, { date: e.target.value, dueDate: "" })}
+            title="Milestone due date"
+            aria-label="Milestone due date"
+          />
+        </label>
+        {!compact && <span className="milestone-date-readable">{meta.dateLabel}</span>}
+      </div>
+    );
+  };
 
   return (
     <div className="block-wrap">
@@ -3306,14 +3346,11 @@ function MilestonesBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upd
                         autoFocus={focusItemId === item.id}
                         style={{ fontSize:13, fontWeight:500, color:"var(--text)", lineHeight:1.45 }}
                       />
+                      <div className="kanban-card-date">
+                        {milestoneDateControl(item, true)}
+                        <span className={`milestone-days-left is-${dueDateMeta(item).state}`}>{dueDateMeta(item).daysLabel}</span>
+                      </div>
                       <div className="kanban-card-tools">
-                        <input
-                          className="milestone-date-input"
-                          type="date"
-                          value={item.date || item.dueDate || ""}
-                          onChange={(e) => upd(item.id, { date: e.target.value, dueDate: "" })}
-                          title="Milestone date"
-                        />
                         <button type="button" title="Move left"  disabled={status === "pending"} onMouseDown={(e)=>e.preventDefault()} onClick={() => moveStatus(item.id, -1)}>‹</button>
                         <button type="button" title="Move right" disabled={status === "done"}    onMouseDown={(e)=>e.preventDefault()} onClick={() => moveStatus(item.id, 1)}>›</button>
                         <button type="button" title="Delete" className="row-del" onMouseDown={(e)=>e.preventDefault()} onClick={() => rem(item.id)}>×</button>
@@ -3328,14 +3365,18 @@ function MilestonesBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upd
         </div>
       ) : (
         <div className="milestone-list">
+          <div className="milestone-column-headings" aria-hidden="true">
+            <span>Milestone</span>
+            <span>Progress</span>
+            <span>Due date</span>
+            <span>Days left</span>
+            <span></span>
+          </div>
           {block.items.map((item, index) => {
             const s = ST[item.status] || ST.pending;
+            const dateMeta = dueDateMeta(item);
             return (
               <div key={item.id} className="milestone-row">
-                <button onClick={() => cycle(item.id, item.status)}
-                  style={{ background:s.bg, color:s.text, fontSize:11, fontWeight:600, padding:"4px 10px", borderRadius:12, border:"none", cursor:"pointer", minWidth:96 }}>
-                  {s.label}
-                </button>
                 <EditableText
                   value={item.name}
                   onChange={(v) => upd(item.id, { name: v })}
@@ -3346,14 +3387,11 @@ function MilestonesBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upd
                   onBackspaceEmpty={() => block.items.length > 1 ? rem(item.id) : onExitBlock?.({ ...block, items: [] })}
                   style={{ flex:1, fontSize:14, fontWeight:500, color:"var(--text)" }}
                 />
-                <input
-                  className="milestone-date-input"
-                  type="date"
-                  value={item.date || item.dueDate || ""}
-                  onChange={(e) => upd(item.id, { date: e.target.value, dueDate: "" })}
-                  title="Milestone date"
-                  aria-label="Milestone date"
-                />
+                <button className="milestone-status" onClick={() => cycle(item.id, item.status)} style={{ background:s.bg, color:s.text }}>
+                  {s.label}
+                </button>
+                {milestoneDateControl(item)}
+                <span className={`milestone-days-left is-${dateMeta.state}`}>{dateMeta.daysLabel}</span>
                 <button onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }} onClick={(e) => { e.stopPropagation(); rem(item.id); }} className="row-del" type="button">×</button>
               </div>
             );
