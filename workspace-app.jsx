@@ -2959,7 +2959,7 @@ function App() {
   // local changes or a save is in flight. If a save fails or an update lands during
   // that window, the live listener won't re-fetch it, so you can silently fall
   // behind teammates' edits until a manual reload. This safety net re-checks
-  // Firebase when the tab regains focus and on a slow interval, and:
+  // Firebase when the tab regains focus, and:
   //   • if we have un-pushed local edits → re-push them (unsticks a failed save), or
   //   • if we're in sync → adopt anything newer the listener missed.
   // It only ever runs when idle (no save in flight) and never clobbers active typing
@@ -3082,12 +3082,13 @@ function App() {
     };
 
     const onFocus = () => { if (document.visibilityState === "visible") catchUp(); };
-    const timer = setInterval(catchUp, 15000);
+    // onValue already delivers real-time updates. Periodically re-reading the
+    // entire workspace as well created overlapping reads and token races on
+    // larger documents. A focus catch-up is enough for missed background events.
     document.addEventListener("visibilitychange", onFocus);
     window.addEventListener("focus", onFocus);
     return () => {
       cancelled = true;
-      clearInterval(timer);
       document.removeEventListener("visibilitychange", onFocus);
       window.removeEventListener("focus", onFocus);
     };

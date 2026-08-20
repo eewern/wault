@@ -285,6 +285,8 @@ check(workspaceAppSource.includes("if (!isStillActiveWorkspace()) {\n          c
 check(workspaceAppSource.includes("if (isStillActiveWorkspace()) { setCloudWorkspaceLoading(false); initialContentLoadDoneRef.current = true; }"), 'a stale workspace request can still change the active loading gate');
 check(workspaceAppSource.includes('wault-cloud-retry'), 'the protected cached view has no immediate reconnect action');
 check(workspaceAppSource.includes('wault-cloud-reauth'), 'the protected cached view has no Google reauthentication action');
+check(!workspaceAppSource.includes('setInterval(catchUp, 15000)'), 'a redundant 15-second full-workspace Firebase poll can still race the realtime listener');
+check(workspaceAppSource.includes('const onFocus = () => { if (document.visibilityState === "visible") catchUp(); };'), 'the focus catch-up safeguard was removed with the redundant polling loop');
 check(!workspaceAppSource.includes('/connection-reset.html'), 'the protected cached view still sends users through a destructive connection reset');
 check(connectionResetSource.includes('firebaseLocalStorageDb'), 'connection reset does not clear stale Firebase authentication state');
 check(!connectionResetSource.includes('localStorage.clear'), 'connection reset can erase workspace recovery data');
