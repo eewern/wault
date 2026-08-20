@@ -2304,6 +2304,7 @@ function App() {
     };
 
     const loadFirebaseWorkspaceAndListen = async (firebaseSync, workspaceId) => {
+      const isStillActiveWorkspace = () => !cancelled && activeWorkspaceIdRef.current === workspaceId;
       if (!workspaceId || cancelled) {
         if (!cancelled) setCloudWorkspaceLoading(false);
         return false;
@@ -2341,7 +2342,13 @@ function App() {
 
       try {
         const firebaseRecord = await firebaseSync.loadWorkspace(workspaceId);
-        if (cancelled) return false;
+        // Startup can begin a read for the remembered local workspace just before
+        // the live catalogue switches to another workspace. A late result from that
+        // old request must never replace the current content or its sync status.
+        if (!isStillActiveWorkspace()) {
+          console.log('ℹ️ Ignoring stale Firebase workspace load:', workspaceId);
+          return false;
+        }
         if (firebaseRecord?.workspace) {
           console.log('📡 Loading workspace from Firebase source of truth');
           const loaded = restoreRememberedPage(workspaceId, normalizeWorkspaceData(firebaseRecord.workspace));
@@ -2352,6 +2359,10 @@ function App() {
             firebaseSync.loadWorkspaceDraft ? await firebaseSync.loadWorkspaceDraft(workspaceId) : null
           );
           const indexedDraft = normalizeIndexedWorkspaceBackup(workspaceId, await readLatestIndexedWorkspaceBackup(workspaceId));
+          if (!isStillActiveWorkspace()) {
+            console.log('ℹ️ Ignoring stale Firebase workspace hydration:', workspaceId);
+            return false;
+          }
           const replayDraft = newestReplayableDraft(remoteUpdatedAt, Number(firebaseRecord.revision || 0), pending, cloudDraft, indexedDraft);
           const replayPending = !!replayDraft;
           if (pending && !replayPending && (Date.parse(pending.savedAt) || 0) <= (Date.parse(remoteUpdatedAt) || 0)) {
@@ -2395,6 +2406,10 @@ function App() {
           firebaseSync.loadWorkspaceDraft ? await firebaseSync.loadWorkspaceDraft(workspaceId) : null
         );
         const indexedDraft = normalizeIndexedWorkspaceBackup(workspaceId, await readLatestIndexedWorkspaceBackup(workspaceId));
+        if (!isStillActiveWorkspace()) {
+          console.log('ℹ️ Ignoring stale Firebase workspace fallback:', workspaceId);
+          return false;
+        }
         const fallbackDraft = newestReplayableDraft("", null, cloudDraft, indexedDraft);
         if (fallbackDraft?.data?.pages) {
           const restored = restoreRememberedPage(workspaceId, normalizeWorkspaceData(fallbackDraft.data));
@@ -2444,6 +2459,12 @@ function App() {
         setupListener(firebaseSync, workspaceId);
         return false;
       } catch (err) {
+        // Do not let a failed request for a workspace that is no longer active
+        // overwrite the healthy active workspace's Saved state with Reconnecting.
+        if (!isStillActiveWorkspace()) {
+          console.log('ℹ️ Ignoring stale Firebase workspace error:', workspaceId);
+          return false;
+        }
         console.warn('⚠️ Firebase workspace load failed:', err.message);
         const readFailure = String(err?.code || err?.message || "Firebase read failed").replace(/^Firebase:\s*/i, "");
         if (haveCache) {
@@ -2468,7 +2489,7 @@ function App() {
         }));
         return false;
       } finally {
-        if (!cancelled) { setCloudWorkspaceLoading(false); initialContentLoadDoneRef.current = true; }
+        if (isStillActiveWorkspace()) { setCloudWorkspaceLoading(false); initialContentLoadDoneRef.current = true; }
       }
     };
 

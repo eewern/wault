@@ -280,6 +280,9 @@ check(firebaseSyncSource.includes("if (isOwnerEmail(currentUser.email))"), 'the 
 check(firebaseSyncSource.includes("readWithRetry(`workspaces/${workspaceId}`, 'Firebase workspace read'"), 'workspace loading bypasses the bounded fallback reader');
 check(firebaseSyncSource.includes("currentUser.getIdToken(true)"), 'failed Firebase reads do not force-refresh the auth token');
 check(firebaseSyncSource.includes("'Firebase workspace read'"), 'Firebase workspace reads can hang without a bounded timeout');
+check(workspaceAppSource.includes('const isStillActiveWorkspace = () => !cancelled && activeWorkspaceIdRef.current === workspaceId;'), 'stale workspace loads are not scoped to the active workspace');
+check(workspaceAppSource.includes("if (!isStillActiveWorkspace()) {\n          console.log('ℹ️ Ignoring stale Firebase workspace error:'"), 'stale workspace failures can still lock the active workspace');
+check(workspaceAppSource.includes("if (isStillActiveWorkspace()) { setCloudWorkspaceLoading(false); initialContentLoadDoneRef.current = true; }"), 'a stale workspace request can still change the active loading gate');
 check(workspaceAppSource.includes('wault-cloud-retry'), 'the protected cached view has no immediate reconnect action');
 check(workspaceAppSource.includes('wault-cloud-reauth'), 'the protected cached view has no Google reauthentication action');
 check(!workspaceAppSource.includes('/connection-reset.html'), 'the protected cached view still sends users through a destructive connection reset');
