@@ -14,6 +14,7 @@
     "test:auth-preflight": "node scripts/wault-auth-preflight.mjs",
     "test:firebase-reliability": "node scripts/wault-firebase-stress.mjs",
     "test:team-sync": "node scripts/wault-team-sync-stress.mjs",
+    "test:entry-session": "node scripts/wault-entry-session-test.mjs",
     "test:ui-server": "node scripts/wault-ui-test-server.mjs"
   },
   "engines": {

@@ -269,9 +269,10 @@ check(firebaseSyncSource.includes('reauthenticateWithPopup(currentUser, drivePro
 check(firebaseSyncSource.includes('uploadType=resumable'), 'large Google Docs exports do not use a resumable upload');
 check(firebaseSyncSource.includes("method: 'PUT'"), 'large Google Docs export does not finish its resumable upload correctly');
 check(firebaseSyncSource.includes('async refreshAuthSession()'), 'stale Firebase browser sessions cannot be repaired');
-check(firebaseSyncSource.includes('async reconnectGoogleSession()'), 'broken Google browser sessions cannot be explicitly reauthenticated');
+check(firebaseSyncSource.includes('async reconnectPasscodeSession()'), 'broken passcode browser sessions cannot be refreshed');
 check(!firebaseSyncSource.includes('getVercelGoogleCredential'), 'WAULT still depends on a cross-site Vercel authentication bridge');
-check(firebaseSyncSource.includes('const result = await signInWithPopup(auth, provider);'), 'WAULT does not use direct Firebase Google sign-in');
+check(firebaseSyncSource.includes('signInWithCustomToken(auth, payload.token)'), 'WAULT entry does not use its secure Firebase custom-token session');
+check(!firebaseSyncSource.includes('async signInWithGoogle()'), 'normal WAULT entry still uses Google sign-in');
 check(firebaseSyncSource.includes('try {\n      await setPersistence(auth, browserLocalPersistence);'), 'Firebase fails to start when persistent browser storage is unavailable');
 check(firebaseSyncSource.includes("'Firebase save access check'"), 'Firebase saves can hang on an unbounded access read');
 check(!workspaceAppSource.includes('location.assign("/connection-reset.html")'), 'normal workspace errors still force users to reset their connection');
@@ -285,7 +286,7 @@ check(workspaceAppSource.includes('const isStillActiveWorkspace = () => !cancell
 check(workspaceAppSource.includes("if (!isStillActiveWorkspace()) {\n          console.log('ℹ️ Ignoring stale Firebase workspace error:'"), 'stale workspace failures can still lock the active workspace');
 check(workspaceAppSource.includes("if (isStillActiveWorkspace()) { setCloudWorkspaceLoading(false); initialContentLoadDoneRef.current = true; }"), 'a stale workspace request can still change the active loading gate');
 check(workspaceAppSource.includes('wault-cloud-retry'), 'the protected cached view has no immediate reconnect action');
-check(workspaceAppSource.includes('wault-cloud-reauth'), 'the protected cached view has no Google reauthentication action');
+check(workspaceAppSource.includes('wault-cloud-reauth'), 'the protected cached view has no passcode re-entry action');
 check(!workspaceAppSource.includes('setInterval(catchUp, 15000)'), 'a redundant 15-second full-workspace Firebase poll can still race the realtime listener');
 check(workspaceAppSource.includes('const onFocus = () => { if (document.visibilityState === "visible") catchUp(); };'), 'the focus catch-up safeguard was removed with the redundant polling loop');
 check(!workspaceAppSource.includes('/connection-reset.html'), 'the protected cached view still sends users through a destructive connection reset');

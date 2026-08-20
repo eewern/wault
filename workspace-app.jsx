@@ -971,28 +971,34 @@ function historyComparable(data) {
   });
 }
 
-// ====== GOOGLE SIGN-IN SCREEN ======
-function GoogleSignInScreen({ busy, error, onSignIn }) {
+// ====== PRIVATE ENTRY SCREEN ======
+function PasscodeScreen({ busy, error, onSignIn }) {
+  const [passcode, setPasscode] = useState('');
+  const submit = (event) => {
+    event.preventDefault();
+    onSignIn(passcode);
+  };
   return (
     <main className="auth-gate">
       <section className="auth-card">
         <div className="auth-kicker">Workspace</div>
-        <h1>Sign in to continue</h1>
-        <p>This workspace is invite-only. Sign in with your Google account to access it.</p>
-        <button
-          className="auth-btn google-btn"
-          disabled={busy}
-          onClick={onSignIn}
-          style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'center' }}
-        >
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
-            <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z" fill="#34A853"/>
-            <path d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>
-            <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
-          </svg>
-          {busy ? 'Signing in…' : 'Continue with Google'}
-        </button>
+        <h1>Enter WAULT</h1>
+        <p>Enter the workspace passcode to open your team workspace.</p>
+        <form onSubmit={submit}>
+          <input
+            className="auth-input"
+            type="password"
+            autoComplete="current-password"
+            autoFocus
+            value={passcode}
+            onChange={(event) => setPasscode(event.target.value)}
+            placeholder="Workspace passcode"
+            disabled={busy}
+          />
+          <button className="auth-btn" type="submit" disabled={busy || !passcode} style={{ marginTop: 12, width: '100%' }}>
+            {busy ? 'Opening…' : 'Enter workspace'}
+          </button>
+        </form>
         {error && <div className="auth-error" style={{ marginTop: 12 }}>{error}</div>}
       </section>
     </main>
@@ -2641,26 +2647,27 @@ function App() {
     };
     window.addEventListener("wault-cloud-retry", retryCloudNow);
 
-    const reconnectGoogleNow = async () => {
+    const reconnectPasscodeNow = async () => {
       const firebaseSync = window.WorkspaceFirebaseSync;
       if (!firebaseSync || !activeWorkspaceIdRef.current || cancelled) return;
-      setSyncState((s) => ({ ...s, error: "", status: "Reconnecting Google account", firebaseStatus: "Reconnecting Google account" }));
+      setSyncState((s) => ({ ...s, error: "", status: "Refreshing Firebase session", firebaseStatus: "Refreshing Firebase session" }));
       try {
-        await firebaseSync.reconnectGoogleSession?.();
+        await firebaseSync.reconnectPasscodeSession?.();
         if (!cancelled) loadFirebaseWorkspaceAndListen(firebaseSync, activeWorkspaceIdRef.current);
       } catch (err) {
         if (!cancelled) {
-          const message = String(err?.code || err?.message || "Google reconnection failed").replace(/^Firebase:\s*/i, "");
-          setSyncState((s) => ({ ...s, error: message, status: "Google reconnection failed", firebaseStatus: `Google reconnection failed — ${message}` }));
+          await firebaseSync.signOut?.().catch(() => {});
+          const message = String(err?.code || err?.message || "Session refresh failed").replace(/^Firebase:\s*/i, "");
+          setSyncState((s) => ({ ...s, error: message, status: "Enter passcode again", firebaseStatus: `Enter passcode again — ${message}` }));
         }
       }
     };
-    window.addEventListener("wault-cloud-reauth", reconnectGoogleNow);
+    window.addEventListener("wault-cloud-reauth", reconnectPasscodeNow);
 
     return () => {
       cancelled = true;
       window.removeEventListener("wault-cloud-retry", retryCloudNow);
-      window.removeEventListener("wault-cloud-reauth", reconnectGoogleNow);
+      window.removeEventListener("wault-cloud-reauth", reconnectPasscodeNow);
       if (cloudLoadRetryTimerRef.current) {
         clearTimeout(cloudLoadRetryTimerRef.current);
         cloudLoadRetryTimerRef.current = null;
@@ -4004,25 +4011,25 @@ function App() {
     }
   };
 
-  // ── Firebase Google Auth handlers ──────────────────────────────────────────
-  const [googleSignInBusy, setGoogleSignInBusy] = useState(false);
-  const [googleSignInError, setGoogleSignInError] = useState('');
+  // ── Firebase passcode session handlers ─────────────────────────────────────
+  const [passcodeBusy, setPasscodeBusy] = useState(false);
+  const [passcodeError, setPasscodeError] = useState('');
 
-  const signInWithGoogle = async () => {
-    setGoogleSignInBusy(true);
-    setGoogleSignInError('');
+  const signInWithPasscode = async (passcode) => {
+    setPasscodeBusy(true);
+    setPasscodeError('');
     try {
       const firebaseSync = window.WorkspaceFirebaseSync
         || await window.__firebaseInitPromise;
-      if (!firebaseSync?.signInWithGoogle) {
+      if (!firebaseSync?.signInWithPasscode) {
         throw new Error('Secure sign-in could not start. Check your connection and try again.');
       }
-      await firebaseSync.signInWithGoogle();
+      await firebaseSync.signInWithPasscode(passcode);
       // onAuthStateChanged will fire → sets authUser + checks access
     } catch (err) {
-      setGoogleSignInError(err.message || 'Sign-in failed. Try again.');
+      setPasscodeError(err.message || 'Could not open the workspace. Try again.');
     } finally {
-      setGoogleSignInBusy(false);
+      setPasscodeBusy(false);
     }
   };
 
@@ -4066,7 +4073,7 @@ function App() {
     );
   }
 
-  // ── Firebase Google Auth gates ─────────────────────────────────────────────
+  // ── Firebase passcode session gates ────────────────────────────────────────
   if (firebaseConfigured && authLoading) {
     return (
       <main className="auth-gate">
@@ -4081,10 +4088,10 @@ function App() {
 
   if (firebaseConfigured && !authUser) {
     return (
-      <GoogleSignInScreen
-        busy={googleSignInBusy}
-        error={googleSignInError}
-        onSignIn={signInWithGoogle}
+      <PasscodeScreen
+        busy={passcodeBusy}
+        error={passcodeError}
+        onSignIn={signInWithPasscode}
       />
     );
   }
@@ -6443,7 +6450,7 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
                 Retry now
               </button>
               <button type="button" className="cloud-preview-retry" onClick={() => window.dispatchEvent(new Event("wault-cloud-reauth"))}>
-                Reconnect Google
+                Enter passcode again
               </button>
             </div>
           </div>

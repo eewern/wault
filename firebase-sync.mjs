@@ -13,7 +13,7 @@ export async function initializeFirebaseSync(config) {
     const {
       getAuth,
       GoogleAuthProvider,
-      signInWithPopup,
+      signInWithCustomToken,
       reauthenticateWithPopup,
       signOut: firebaseSignOut,
       onAuthStateChanged,
@@ -39,7 +39,6 @@ export async function initializeFirebaseSync(config) {
     const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
     const database = getDatabase(app);
     const auth = getAuth(app);
-    const provider = new GoogleAuthProvider();
     const localReliabilityTestMode = typeof location !== 'undefined'
       && (location.hostname === '127.0.0.1' || location.hostname === 'localhost')
       && new URLSearchParams(location.search).get('ui_stress') === '1';
@@ -262,9 +261,19 @@ export async function initializeFirebaseSync(config) {
 
       // ── Auth ────────────────────────────────────────────────────────────────
 
-      async signInWithGoogle() {
-        const result = await signInWithPopup(auth, provider);
-        return result.user; // { email, displayName, uid, ... }
+      async signInWithPasscode(passcode) {
+        const response = await fetch('/api/wault-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify({ passcode }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload?.token) {
+          throw new Error(payload?.error || 'Secure entry could not start. Try again.');
+        }
+        const result = await signInWithCustomToken(auth, payload.token);
+        return result.user;
       },
 
       async createGoogleDocFromHtml({ name, html }) {
@@ -460,16 +469,13 @@ export async function initializeFirebaseSync(config) {
         return true;
       },
 
-      async reconnectGoogleSession() {
+      async reconnectPasscodeSession() {
         const user = auth.currentUser;
         if (!user?.uid) {
-          return this.signInWithGoogle();
+          throw new Error('Enter the workspace passcode again.');
         }
-        const reconnectProvider = new GoogleAuthProvider();
-        reconnectProvider.setCustomParameters({ login_hint: user.email || '' });
-        const result = await reauthenticateWithPopup(user, reconnectProvider);
-        await result.user.getIdToken(true);
-        return result.user;
+        await user.getIdToken(true);
+        return user;
       },
 
       onAuthStateChange(callback) {
