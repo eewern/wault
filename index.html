@@ -4113,24 +4113,18 @@
 <script type="module">
   // Native ESM Firebase init — runs after workspace-config.js (classic) has set SUPABASE_CONFIG.
   // Exposes window.__firebaseInitPromise which workspace-app.jsx awaits (avoids Babel transforming import()).
-  import init from './firebase-sync.mjs?v=20260728-firebase-read2';
-  let _fbInitDone = false;
+  import init from './firebase-sync.mjs?v=20260820-direct-auth1';
   const _fbInit = init(window.SUPABASE_CONFIG || {}).catch((e) => {
     console.warn('Firebase init failed:', e && e.message);
     return null;
-  }).finally(() => {
-    _fbInitDone = true;
   });
-  const _fbTimeout = new Promise(resolve => setTimeout(() => {
-    if (_fbInitDone) return;
-    console.warn('Firebase init timed out after 10s — unblocking app');
-    resolve(null);
-  }, 10000));
-  window.__firebaseInitPromise = Promise.race([_fbInit, _fbTimeout]);
+  // Never replace a slow-but-working Firebase initialization with null. The app
+  // has its own responsive auth gate; this promise remains the source of truth.
+  window.__firebaseInitPromise = _fbInit;
 </script>
 <script type="text/babel" src="workspace-blocks.jsx?v=20260724-image-drop1"></script>
 <script type="text/babel" src="focus-home.jsx?v=20260715-reliability3"></script>
-<script type="text/babel" src="workspace-app.jsx?v=20260728-connection-reset1"></script>
+<script type="text/babel" src="workspace-app.jsx?v=20260820-direct-auth1"></script>
 
 <!-- ── Global JS tooltip engine ──────────────────────────────────────────────
      Renders a single position:fixed tooltip on <body>, so it can never be clipped

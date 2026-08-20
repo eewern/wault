@@ -3987,11 +3987,15 @@ function App() {
   const [googleSignInError, setGoogleSignInError] = useState('');
 
   const signInWithGoogle = async () => {
-    if (!window.WorkspaceFirebaseSync?.signInWithGoogle) return;
     setGoogleSignInBusy(true);
     setGoogleSignInError('');
     try {
-      await window.WorkspaceFirebaseSync.signInWithGoogle();
+      const firebaseSync = window.WorkspaceFirebaseSync
+        || await window.__firebaseInitPromise;
+      if (!firebaseSync?.signInWithGoogle) {
+        throw new Error('Secure sign-in could not start. Check your connection and try again.');
+      }
+      await firebaseSync.signInWithGoogle();
       // onAuthStateChanged will fire → sets authUser + checks access
     } catch (err) {
       setGoogleSignInError(err.message || 'Sign-in failed. Try again.');
@@ -6418,9 +6422,6 @@ function PageEditor({ page, updatePage, updateBlock, patchBlock, deleteBlock, ad
               </button>
               <button type="button" className="cloud-preview-retry" onClick={() => window.dispatchEvent(new Event("wault-cloud-reauth"))}>
                 Reconnect Google
-              </button>
-              <button type="button" className="cloud-preview-retry" onClick={() => window.location.assign("/connection-reset.html")}>
-                Reset connection
               </button>
             </div>
           </div>

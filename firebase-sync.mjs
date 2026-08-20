@@ -14,9 +14,7 @@ export async function initializeFirebaseSync(config) {
       getAuth,
       GoogleAuthProvider,
       signInWithPopup,
-      signInWithCredential,
       reauthenticateWithPopup,
-      reauthenticateWithCredential,
       signOut: firebaseSignOut,
       onAuthStateChanged,
       setPersistence,
@@ -46,8 +44,14 @@ export async function initializeFirebaseSync(config) {
       && (location.hostname === '127.0.0.1' || location.hostname === 'localhost')
       && new URLSearchParams(location.search).get('ui_stress') === '1';
 
-    // Keep the user signed in across page refreshes (survives browser close/reopen)
-    await setPersistence(auth, browserLocalPersistence);
+    // Keep the user signed in across page refreshes whenever the browser permits
+    // persistent storage. Privacy-restricted browsers can reject this request;
+    // Firebase must still initialize and allow the user to sign in for this tab.
+    try {
+      await setPersistence(auth, browserLocalPersistence);
+    } catch (error) {
+      console.warn('⚠️ Persistent Firebase sign-in is unavailable in this browser:', error?.message || error);
+    }
     console.log('✅ Firebase initialized');
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -248,61 +252,6 @@ export async function initializeFirebaseSync(config) {
       return next;
     }
 
-    const getVercelGoogleCredential = async () => {
-      const bridgeOrigin = 'https://wernotion.firebaseapp.com';
-      const bridgeUrl = `${bridgeOrigin}/auth-bridge.html?returnOrigin=${encodeURIComponent(location.origin)}`;
-      const authWindow = window.open(
-        bridgeUrl,
-        'wault-google-sign-in',
-        'popup=yes,width=520,height=720,resizable=yes,scrollbars=yes'
-      );
-      if (!authWindow) {
-        throw new Error('Google sign-in was blocked. Allow pop-ups for waults.vercel.app and try again.');
-      }
-
-      return await new Promise((resolve, reject) => {
-        let settled = false;
-        let closedTimer = null;
-        let timeoutTimer = null;
-        const finish = (error, credential = null) => {
-          if (settled) return;
-          settled = true;
-          window.removeEventListener('message', handleMessage);
-          clearInterval(closedTimer);
-          clearTimeout(timeoutTimer);
-          try { authWindow.close(); } catch {}
-          if (error) reject(error);
-          else resolve(credential);
-        };
-        const handleMessage = (event) => {
-          if (event.origin !== bridgeOrigin || event.source !== authWindow) return;
-          const message = event.data || {};
-          if (message.type === 'wault-google-auth-error') {
-            finish(new Error(message.message || 'Google sign-in failed.'));
-            return;
-          }
-          if (message.type !== 'wault-google-auth-credential') return;
-          try {
-            finish(null, GoogleAuthProvider.credential(
-              message.idToken || null,
-              message.accessToken || null
-            ));
-          } catch (error) {
-            finish(error);
-          }
-        };
-        window.addEventListener('message', handleMessage);
-        closedTimer = setInterval(() => {
-          if (authWindow.closed) {
-            finish(new Error('Google sign-in was closed before it finished.'));
-          }
-        }, 400);
-        timeoutTimer = setTimeout(() => {
-          finish(new Error('Google sign-in timed out. Please try again.'));
-        }, 120000);
-      });
-    };
-
     // ── Public API ─────────────────────────────────────────────────────────────
     return {
       database,
@@ -314,11 +263,6 @@ export async function initializeFirebaseSync(config) {
       // ── Auth ────────────────────────────────────────────────────────────────
 
       async signInWithGoogle() {
-        if (typeof location !== 'undefined' && location.hostname === 'waults.vercel.app') {
-          const credential = await getVercelGoogleCredential();
-          const result = await signInWithCredential(auth, credential);
-          return result.user;
-        }
         const result = await signInWithPopup(auth, provider);
         return result.user; // { email, displayName, uid, ... }
       },
@@ -520,12 +464,6 @@ export async function initializeFirebaseSync(config) {
         const user = auth.currentUser;
         if (!user?.uid) {
           return this.signInWithGoogle();
-        }
-        if (typeof location !== 'undefined' && location.hostname === 'waults.vercel.app') {
-          const credential = await getVercelGoogleCredential();
-          const result = await reauthenticateWithCredential(user, credential);
-          await result.user.getIdToken(true);
-          return result.user;
         }
         const reconnectProvider = new GoogleAuthProvider();
         reconnectProvider.setCustomParameters({ login_hint: user.email || '' });
@@ -733,7 +671,7 @@ export async function initializeFirebaseSync(config) {
             accessOkCache = null;
           }
           if (accessOkCache === null) {
-            const accessSnap = await get(ref(database, `access/${currentUser.uid}`));
+            const accessSnap = await readWithRetry(`access/${currentUser.uid}`, 'Firebase save access check', 1, 4000);
             accessOkCache = accessSnap.exists() || isOwnerEmail(currentUser.email);
           }
           if (!accessOkCache) {

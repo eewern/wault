@@ -9,7 +9,6 @@ const out = resolve(root, ".netlify-publish");
 // documentation, uploads, dependencies, and dotfiles can never enter the deploy.
 const publicFiles = [
   "index.html",
-  "auth-bridge.html",
   "connection-reset.html",
   "recovery.html",
   "workspace-config.js",

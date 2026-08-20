@@ -265,13 +265,12 @@ check(firebaseSyncSource.includes('uploadType=resumable'), 'large Google Docs ex
 check(firebaseSyncSource.includes("method: 'PUT'"), 'large Google Docs export does not finish its resumable upload correctly');
 check(firebaseSyncSource.includes('async refreshAuthSession()'), 'stale Firebase browser sessions cannot be repaired');
 check(firebaseSyncSource.includes('async reconnectGoogleSession()'), 'broken Google browser sessions cannot be explicitly reauthenticated');
-check(firebaseSyncSource.includes("'https://wernotion.firebaseapp.com'"), 'Vercel authentication bridge does not target the Firebase origin');
-check(firebaseSyncSource.includes('signInWithCredential(auth, credential)'), 'Vercel authentication bridge cannot complete Firebase sign-in');
-check(firebaseSyncSource.includes('reauthenticateWithCredential(user, credential)'), 'Vercel Google reconnection bypasses the working authentication bridge');
-check(firebaseSyncSource.includes("event.origin !== bridgeOrigin"), 'Vercel authentication bridge does not validate the message origin');
-const authBridgeSource = readFileSync(new URL('../auth-bridge.html', import.meta.url), 'utf8');
-check(authBridgeSource.includes("requestedOrigin === ALLOWED_RETURN_ORIGIN"), 'Firebase authentication bridge accepts an untrusted return origin');
-check(authBridgeSource.includes('GoogleAuthProvider.credentialFromResult(result)'), 'Firebase authentication bridge does not return the Google credential');
+check(!firebaseSyncSource.includes('getVercelGoogleCredential'), 'WAULT still depends on a cross-site Vercel authentication bridge');
+check(firebaseSyncSource.includes('const result = await signInWithPopup(auth, provider);'), 'WAULT does not use direct Firebase Google sign-in');
+check(firebaseSyncSource.includes('try {\n      await setPersistence(auth, browserLocalPersistence);'), 'Firebase fails to start when persistent browser storage is unavailable');
+check(firebaseSyncSource.includes("'Firebase save access check'"), 'Firebase saves can hang on an unbounded access read');
+check(!workspaceAppSource.includes('location.assign("/connection-reset.html")'), 'normal workspace errors still force users to reset their connection');
+check(workspaceAppSource.includes('|| await window.__firebaseInitPromise'), 'sign-in can silently do nothing while Firebase is still initializing');
 check(firebaseSyncSource.includes('const restReadSnapshot = async'), 'stalled Firebase SDK reads have no authenticated REST fallback');
 check(firebaseSyncSource.includes("if (isOwnerEmail(currentUser.email))"), 'the canonical owner still waits on a redundant access-record read');
 check(firebaseSyncSource.includes("readWithRetry(`workspaces/${workspaceId}`, 'Firebase workspace read'"), 'workspace loading bypasses the bounded fallback reader');
@@ -279,7 +278,7 @@ check(firebaseSyncSource.includes("currentUser.getIdToken(true)"), 'failed Fireb
 check(firebaseSyncSource.includes("'Firebase workspace read'"), 'Firebase workspace reads can hang without a bounded timeout');
 check(workspaceAppSource.includes('wault-cloud-retry'), 'the protected cached view has no immediate reconnect action');
 check(workspaceAppSource.includes('wault-cloud-reauth'), 'the protected cached view has no Google reauthentication action');
-check(workspaceAppSource.includes('/connection-reset.html'), 'the protected cached view has no clean connection reset action');
+check(!workspaceAppSource.includes('/connection-reset.html'), 'the protected cached view still sends users through a destructive connection reset');
 check(connectionResetSource.includes('firebaseLocalStorageDb'), 'connection reset does not clear stale Firebase authentication state');
 check(!connectionResetSource.includes('localStorage.clear'), 'connection reset can erase workspace recovery data');
 check(connectionResetSource.includes('Workspace data and recovery copies are not being deleted'), 'connection reset does not explain its data-safe scope');
