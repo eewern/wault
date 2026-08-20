@@ -46,4 +46,6 @@ check(appSource.includes('function PasscodeScreen'), 'the UI does not render a p
 check(!appSource.includes('<GoogleSignInScreen'), 'the UI still renders Google sign-in');
 check(endpointSource.includes('timingSafeEqual'), 'the passcode comparison is not timing-safe');
 check(endpointSource.includes('FIREBASE_SERVICE_ACCOUNT_JSON'), 'the Firebase Admin credential is not server-side');
+check(endpointSource.includes('WAULT_OWNER_UID'), 'the Firebase custom-token identity is not configured server-side');
+check(!endpointSource.includes('firebase-admin'), 'the entry endpoint depends on an incompatible Firebase Admin runtime');
 console.log('WAULT passcode-session tests passed.');

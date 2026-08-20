@@ -1,8 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
-import { cert, getApps, initializeApp } from 'firebase-admin/app';
-import { getAuth } from 'firebase-admin/auth';
-
-const OWNER_EMAIL = 'eewern21@gmail.com';
+import { createSign, timingSafeEqual } from 'node:crypto';
 const attempts = new Map();
 const WINDOW_MS = 60_000;
 const MAX_ATTEMPTS = 8;
@@ -31,7 +27,7 @@ function isRateLimited(ip) {
   return existing.count > MAX_ATTEMPTS;
 }
 
-function getAdminAuth() {
+function createFirebaseCustomToken() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
   if (!raw) throw new Error('Firebase session service is not configured.');
 
@@ -42,8 +38,25 @@ function getAdminAuth() {
     throw new Error('Firebase session service is misconfigured.');
   }
 
-  if (!getApps().length) initializeApp({ credential: cert(serviceAccount) });
-  return getAuth();
+  const ownerUid = String(process.env.WAULT_OWNER_UID || '').trim();
+  if (!serviceAccount.client_email || !serviceAccount.private_key || !ownerUid) {
+    throw new Error('Firebase session service is misconfigured.');
+  }
+
+  const base64Url = (value) => Buffer.from(value).toString('base64url');
+  const now = Math.floor(Date.now() / 1000);
+  const header = base64Url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+  const claims = base64Url(JSON.stringify({
+    iss: serviceAccount.client_email,
+    sub: serviceAccount.client_email,
+    aud: 'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit',
+    iat: now,
+    exp: now + 3600,
+    uid: ownerUid,
+  }));
+  const unsigned = `${header}.${claims}`;
+  const signature = createSign('RSA-SHA256').update(unsigned).sign(serviceAccount.private_key);
+  return `${unsigned}.${base64Url(signature)}`;
 }
 
 export default async function handler(req, res) {
@@ -60,9 +73,7 @@ export default async function handler(req, res) {
   if (!matchesPasscode(passcode, expectedPasscode)) return send(res, 401, { error: 'That passcode is not correct.' });
 
   try {
-    const auth = getAdminAuth();
-    const owner = await auth.getUserByEmail(OWNER_EMAIL);
-    const token = await auth.createCustomToken(owner.uid);
+    const token = createFirebaseCustomToken();
     return send(res, 200, { token });
   } catch (error) {
     console.error('WAULT custom session failed:', error?.code || error?.message || error);

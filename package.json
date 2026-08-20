@@ -18,10 +18,9 @@
     "test:ui-server": "node scripts/wault-ui-test-server.mjs"
   },
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   },
   "dependencies": {
-    "dotenv": "^17.4.2",
-    "firebase-admin": "^14.0.0"
+    "dotenv": "^17.4.2"
   }
 }
