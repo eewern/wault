@@ -257,6 +257,9 @@ check(workspaceBlocksSource.includes('milestone-days-left'), 'milestone days-lef
 check(workspaceBlocksSource.includes('Things to do'), 'checklists do not present the requested Things to do label');
 check(workspaceBlocksSource.includes('milestone-column-headings'), 'milestones do not show the requested execution columns');
 check(workspaceBlocksSource.includes('block = Array.isArray(block?.items) ? block : { ...(block || {}), items: [] };'), 'legacy milestone blocks without items can still crash the workspace');
+check(workspaceBlocksSource.includes('function normalizeTableBlockForRender(source)'), 'legacy table data is not normalized before rendering');
+check(workspaceBlocksSource.includes('_waultTableOverflow: overflow'), 'malformed table overflow can be discarded during repair');
+check(workspaceBlocksSource.includes('block.headers.map((_, i) => renderCell(row.cells[i] || "", colTypes[i]'), 'table rows still render an unbounded number of malformed cells');
 check(workspaceAppSource.includes('const imageFilesFromTransfer = (transfer)'), 'clipboard image files are not detected');
 check(workspaceAppSource.includes('const makeImageBlocks = async (files'), 'pasted images bypass the safe image processor');
 check(workspaceAppSource.includes('const imageFiles = imageFilesFromTransfer(e.clipboardData)'), 'page paste does not handle clipboard image files');

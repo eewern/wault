@@ -3407,10 +3407,37 @@ function MilestonesBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, upd
 }
 
 // ====== TABLE ======
+// Firebase workspaces contain years of table data, including older rows with more
+// cells than their declared headers. Never let that malformed shape expand the
+// rendered grid. The overflow remains attached to the row for recovery and is
+// only hidden from the normal editing surface.
+function normalizeTableBlockForRender(source) {
+  const rawRows = Array.isArray(source?.rows) ? source.rows : [];
+  const widestRow = rawRows.reduce((widest, row) => Math.max(widest, Array.isArray(row?.cells) ? row.cells.length : 0), 0);
+  const headers = Array.isArray(source?.headers) && source.headers.length
+    ? [...source.headers]
+    : Array.from({ length: Math.max(1, widestRow) }, (_, index) => `Column ${index + 1}`);
+  const columnCount = headers.length;
+  const colTypes = Array.from({ length: columnCount }, (_, index) => (source?.colTypes || [])[index] || "text");
+  const columnWidths = Array.from({ length: columnCount }, (_, index) => Number(source?.columnWidths?.[index]) || 180);
+  const rows = rawRows.map((row, rowIndex) => {
+    const cells = Array.isArray(row?.cells) ? row.cells : [];
+    const overflow = cells.slice(columnCount);
+    return {
+      ...(row || {}),
+      id: row?.id || `legacy-table-row-${rowIndex}`,
+      cells: Array.from({ length: columnCount }, (_, index) => cells[index] == null ? "" : cells[index]),
+      ...(overflow.length ? { _waultTableOverflow: overflow } : {}),
+    };
+  });
+  return { ...(source || {}), headers, rows, colTypes, columnWidths };
+}
+
 function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBlock, onDeleteBlock }) {
-  const columnWidths = block.columnWidths || block.headers.map(() => 180);
+  block = normalizeTableBlockForRender(block);
+  const columnWidths = block.columnWidths;
   // Per-column type: "text" (default) or "checkbox". Checkbox cells store "1"/"".
-  const colTypes = block.headers.map((_, i) => (block.colTypes || [])[i] || "text");
+  const colTypes = block.colTypes;
   const [scriptPaste, setScriptPaste] = useState("");
   const [showScriptInput, setShowScriptInput] = useState(false);
   const updateTable = (patch) => updateBlock({ ...block, ...patch });
@@ -3801,7 +3828,7 @@ function TableBlock({ block, blockId, onDragBlockStart, onDragBlockEnd, updateBl
                 </tr>
                 {block.rows.map((row, rowIdx) => (
                   <tr key={row.id} data-row-id={row.id} data-row-slot={block.headerRow ? rowIdx : rowIdx + 1}>
-                    {row.cells.map((c, i) => renderCell(c, colTypes[i], (v) => updCell(row.id, i, v), i, {
+                    {block.headers.map((_, i) => renderCell(row.cells[i] || "", colTypes[i], (v) => updCell(row.id, i, v), i, {
                       rowSlot: rowIdx + 1,
                       colIndex: i,
                       ...(i === 0 ? {
